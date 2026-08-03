@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^Set-Location 'C:\\\\Users\\\\Rafay\\\\Desktop\\\\SECMC-Internship'; python -c \"import sys; from PyPDF2 import PdfReader; reader = PdfReader\\('Scope_of_Work_Data_Intelligence_Platform\\.pdf'\\); print\\('\\\\n\\\\n'\\.join\\(f'=== PAGE \\{i\\+1\\} ===\\\\n' \\+ page\\.extract_text\\(\\) for i, page in enumerate\\(reader\\.pages\\)\\)\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
