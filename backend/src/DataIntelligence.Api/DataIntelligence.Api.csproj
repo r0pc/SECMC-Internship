@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- Presentation layer: REST endpoints for the dashboards and the AI query assistant. -->
+
+  <PropertyGroup>
+    <UserSecretsId>dataintelligence-api</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- OpenAPI document generation is built into ASP.NET Core; Swashbuckle supplies only the UI. -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+    <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="10.2.3" />
+    <!-- Pinned above the 2.0.0 that Microsoft.AspNetCore.OpenApi pulls in transitively (GHSA-v5pm-xwqc-g5wc). -->
+    <PackageReference Include="Microsoft.OpenApi" Version="2.11.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DataIntelligence.Core\DataIntelligence.Core.csproj" />
+    <ProjectReference Include="..\DataIntelligence.Infrastructure\DataIntelligence.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

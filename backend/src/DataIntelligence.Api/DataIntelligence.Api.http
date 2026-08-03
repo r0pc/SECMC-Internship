@@ -1,0 +1,6 @@
+@DataIntelligence.Api_HostAddress = http://localhost:5063
+
+GET {{DataIntelligence.Api_HostAddress}}/health
+Accept: application/json
+
+###

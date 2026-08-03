@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Domain layer: entities, DTOs, and the interfaces the outer layers implement.
+       Deliberately depends on no other project. -->
+
+</Project>

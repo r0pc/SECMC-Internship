@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <!-- Hosted background service that runs the hourly collection cycle independently
+       of API traffic (FR-8). Deployable separately from the API. -->
+
+  <PropertyGroup>
+    <UserSecretsId>dataintelligence-worker</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DataIntelligence.Core\DataIntelligence.Core.csproj" />
+    <ProjectReference Include="..\DataIntelligence.Infrastructure\DataIntelligence.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>
