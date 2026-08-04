@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Infrastructure layer: EF Core DbContext and migrations, the source collector,
+  <!-- Infrastructure layer: EF Core DbContext and migrations, the source adapters,
        and the LLM client. Implements the interfaces declared in Core. -->
 
   <ItemGroup>
@@ -8,12 +8,13 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.10" />
-    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
     <!-- Caches the source's robots.txt between cycles. -->
     <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.10" />
     <!-- Binds and validates the Collection options section at startup. -->
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.10" />
+    <!-- HtmlAgilityPack was dropped when the confirmed sources turned out to publish official
+         JSON APIs (SOW 9). System.Text.Json in the base library covers both adapters. -->
   </ItemGroup>
 
   <ItemGroup>

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using DataIntelligence.Core.Dtos;
+using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
 using Microsoft.Extensions.Logging;
@@ -10,17 +11,15 @@ using Microsoft.Extensions.Options;
 namespace DataIntelligence.Infrastructure.Collection;
 
 /// <summary>
-/// Fetches the source over HTTP with a timeout, bounded retries, and exponential backoff.
+/// Executes a source request with a timeout, bounded retries and exponential backoff.
 /// </summary>
 /// <remarks>
-/// Returns failures rather than throwing them (FR-2): the caller records the run and the
-/// scheduler survives. Retries are hand-rolled rather than taken from a resilience package —
-/// the policy needed here is a handful of lines, and it keeps the dependency surface of a
-/// scheduled service that runs unattended as small as possible.
+/// Publisher-agnostic: the adapter decides what to send, this decides how to send it and how to
+/// classify what comes back. Failures are returned rather than thrown (FR-2), so the caller
+/// records the run and the scheduler survives.
 /// </remarks>
 public sealed class HttpSourceFetcher : ISourceFetcher
 {
-    /// <summary>Named client so its handler lifetime and headers are configured in one place.</summary>
     public const string HttpClientName = "SourceCollector";
 
     private readonly HttpClient _httpClient;
@@ -37,22 +36,28 @@ public sealed class HttpSourceFetcher : ISourceFetcher
         _logger = logger;
     }
 
-    public async Task<FetchResult> FetchAsync(string url, CancellationToken cancellationToken)
+    public async Task<FetchResult> FetchAsync(
+        SourceRequest request, DataSource source, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(url))
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(source);
+
+        if (string.IsNullOrWhiteSpace(request.Url))
         {
             return FetchResult.Failure(CollectionFailureCategory.Unknown,
-                "No source URL is configured.");
+                $"Source '{source.Code}' produced an empty request URL.");
         }
 
-        var maxAttempts = _options.MaxRetries + 1;
+        // Per-source retry budget: the two publishers have different reliability profiles and
+        // different quotas, so one is not made to inherit the other's policy.
+        var maxAttempts = Math.Max(1, (int)source.MaxRetries) + 1;
         FetchResult? lastFailure = null;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var result = await TryFetchOnceAsync(url, attempt, cancellationToken);
+            var result = await TryFetchOnceAsync(request, source, attempt, cancellationToken);
             if (result.Succeeded)
             {
                 return result;
@@ -65,12 +70,10 @@ public sealed class HttpSourceFetcher : ISourceFetcher
                 break;
             }
 
-            // 2s, 4s, 8s. Bounded by MaxRetries, so a source that is down cannot hold the
-            // cycle open indefinitely — the run is recorded as failed and the next hour retries.
             var delay = TimeSpan.FromSeconds(_options.RetryBaseDelaySeconds * Math.Pow(2, attempt - 1));
             _logger.LogWarning(
-                "Fetch attempt {Attempt}/{MaxAttempts} failed ({Category}): {Message}. Retrying in {Delay}.",
-                attempt, maxAttempts, result.FailureCategory, result.ErrorMessage, delay);
+                "{Source}: fetch attempt {Attempt}/{MaxAttempts} failed ({Category}): {Message}. Retrying in {Delay}.",
+                source.Code, attempt, maxAttempts, result.FailureCategory, result.ErrorMessage, delay);
 
             await Task.Delay(delay, cancellationToken);
         }
@@ -78,66 +81,74 @@ public sealed class HttpSourceFetcher : ISourceFetcher
         return lastFailure!;
     }
 
-    private async Task<FetchResult> TryFetchOnceAsync(string url, int attempt, CancellationToken cancellationToken)
+    private async Task<FetchResult> TryFetchOnceAsync(
+        SourceRequest request, DataSource source, int attempt, CancellationToken cancellationToken)
     {
-        // Separate token so a request timeout is distinguishable from service shutdown: both
-        // surface as TaskCanceledException, but only one of them is a collection failure.
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
+        var timeoutSeconds = source.RequestTimeoutSec > 0
+            ? source.RequestTimeoutSec
+            : _options.RequestTimeoutSeconds;
+
+        // Separate token so a request timeout stays distinguishable from service shutdown: both
+        // surface as OperationCanceledException, but only one of them is a collection failure.
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         var stopwatch = Stopwatch.StartNew();
 
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            using var httpRequest = new HttpRequestMessage(request.Method, request.Url);
+
+            if (request.JsonBody is { Length: > 0 } body)
+            {
+                httpRequest.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            }
+
             using var response = await _httpClient.SendAsync(
-                request, HttpCompletionOption.ResponseHeadersRead, linkedCts.Token);
+                httpRequest, HttpCompletionOption.ResponseHeadersRead, linkedCts.Token);
 
             var statusCode = (short)response.StatusCode;
 
             if (!response.IsSuccessStatusCode)
             {
-                return FetchResult.Failure(
-                    CollectionFailureCategory.HttpError,
-                    $"Source returned {statusCode} {response.ReasonPhrase}.",
-                    detail: $"GET {url}",
+                // 429 is categorised separately: the remedy is a smaller query budget or a
+                // registration key, not a faster retry.
+                var category = response.StatusCode == HttpStatusCode.TooManyRequests
+                    ? CollectionFailureCategory.RateLimited
+                    : CollectionFailureCategory.HttpError;
+
+                return FetchResult.Failure(category,
+                    $"{source.Code} returned {statusCode} {response.ReasonPhrase}.",
+                    detail: $"{request.Method} {request.Url}",
                     statusCode: statusCode,
                     attempts: attempt);
             }
 
             var maxBytes = (long)_options.MaxPayloadMegabytes * 1024 * 1024;
 
-            // Trust the declared length when it is present — cheaper than downloading to find out.
             if (response.Content.Headers.ContentLength is { } declared && declared > maxBytes)
             {
-                return FetchResult.Failure(
-                    CollectionFailureCategory.HttpError,
+                return FetchResult.Failure(CollectionFailureCategory.HttpError,
                     $"Payload declares {declared} bytes, over the {_options.MaxPayloadMegabytes} MB limit.",
-                    detail: "A sudden size jump usually means an error page or a redirect loop, not real data.",
-                    statusCode: statusCode,
-                    attempts: attempt);
+                    detail: "A sudden size jump usually means an error page, not real data.",
+                    statusCode: statusCode, attempts: attempt);
             }
 
             var (content, exceededLimit) = await ReadBoundedAsync(response, maxBytes, linkedCts.Token);
 
             if (exceededLimit)
             {
-                return FetchResult.Failure(
-                    CollectionFailureCategory.HttpError,
+                return FetchResult.Failure(CollectionFailureCategory.HttpError,
                     $"Payload exceeded the {_options.MaxPayloadMegabytes} MB limit while streaming.",
-                    statusCode: statusCode,
-                    attempts: attempt);
+                    statusCode: statusCode, attempts: attempt);
             }
 
             _logger.LogInformation(
-                "Fetched {Bytes} bytes from {Url} in {ElapsedMs} ms (attempt {Attempt}).",
-                content.Length, url, stopwatch.ElapsedMilliseconds, attempt);
+                "{Source}: fetched {Bytes} bytes in {ElapsedMs} ms (attempt {Attempt}).",
+                source.Code, content.Length, stopwatch.ElapsedMilliseconds, attempt);
 
             return FetchResult.Success(
-                content,
-                response.Content.Headers.ContentType?.ToString(),
-                statusCode,
-                attempt);
+                content, response.Content.Headers.ContentType?.ToString(), statusCode, attempt);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -146,39 +157,30 @@ public sealed class HttpSourceFetcher : ISourceFetcher
         }
         catch (OperationCanceledException)
         {
-            return FetchResult.Failure(
-                CollectionFailureCategory.Timeout,
-                $"Request exceeded the {_options.RequestTimeoutSeconds}s timeout.",
-                detail: $"GET {url}",
-                attempts: attempt);
+            return FetchResult.Failure(CollectionFailureCategory.Timeout,
+                $"Request exceeded the {timeoutSeconds}s timeout.",
+                detail: $"{request.Method} {request.Url}", attempts: attempt);
         }
         catch (HttpRequestException ex)
         {
-            return FetchResult.Failure(
-                CategoriseHttpError(ex),
-                ex.Message,
+            return FetchResult.Failure(CategoriseHttpError(ex), ex.Message,
                 detail: ex.ToString(),
                 statusCode: ex.StatusCode is { } code ? (short)code : null,
                 attempts: attempt);
         }
         catch (Exception ex)
         {
-            return FetchResult.Failure(
-                CollectionFailureCategory.Unknown,
-                ex.Message,
-                detail: ex.ToString(),
-                attempts: attempt);
+            return FetchResult.Failure(CollectionFailureCategory.Unknown, ex.Message,
+                detail: ex.ToString(), attempts: attempt);
         }
     }
 
     /// <summary>
-    /// Streams the body, stopping as soon as the cap is passed, so an unexpectedly huge
-    /// response cannot exhaust memory on the worker host.
+    /// Streams the body, stopping as soon as the cap is passed, so an unexpectedly huge response
+    /// cannot exhaust memory on the worker host.
     /// </summary>
     private static async Task<(string Content, bool ExceededLimit)> ReadBoundedAsync(
-        HttpResponseMessage response,
-        long maxBytes,
-        CancellationToken cancellationToken)
+        HttpResponseMessage response, long maxBytes, CancellationToken cancellationToken)
     {
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var buffer = new MemoryStream();
@@ -198,10 +200,6 @@ public sealed class HttpSourceFetcher : ISourceFetcher
         return (ResolveEncoding(response).GetString(buffer.ToArray()), false);
     }
 
-    /// <summary>
-    /// Honours the charset the source declares. Falling back to UTF-8 blindly mangles accented
-    /// text on sources that still publish ISO-8859-1.
-    /// </summary>
     private static Encoding ResolveEncoding(HttpResponseMessage response)
     {
         var charset = response.Content.Headers.ContentType?.CharSet;
@@ -216,7 +214,6 @@ public sealed class HttpSourceFetcher : ISourceFetcher
         }
         catch (ArgumentException)
         {
-            // Unknown or unregistered code page. UTF-8 is the safer guess than failing the run.
             return Encoding.UTF8;
         }
     }
@@ -237,20 +234,16 @@ public sealed class HttpSourceFetcher : ISourceFetcher
         };
 
     /// <summary>
-    /// Retry only what a retry could plausibly fix.
+    /// Retry only what a retry could plausibly fix. Connection problems and timeouts qualify;
+    /// most status codes do not — a 404 fails identically three more times. 408, 429 and 5xx are
+    /// the exceptions, being the server asking us to come back.
     /// </summary>
-    /// <remarks>
-    /// Connection problems and timeouts are worth another attempt. HTTP status codes mostly are
-    /// not: a 404 or a 403 will fail identically three more times, so retrying only delays the
-    /// failure record and holds the cycle open. The exceptions are 408, 429 and 5xx, which the
-    /// server itself is telling us to come back for.
-    /// </remarks>
     private static bool IsTransient(FetchResult result) => result.FailureCategory switch
     {
         CollectionFailureCategory.Unreachable or CollectionFailureCategory.Timeout => true,
+        CollectionFailureCategory.RateLimited => false,
         CollectionFailureCategory.HttpError => result.HttpStatusCode is null
             or (short)HttpStatusCode.RequestTimeout
-            or (short)HttpStatusCode.TooManyRequests
             or >= 500 and < 600,
         _ => false
     };

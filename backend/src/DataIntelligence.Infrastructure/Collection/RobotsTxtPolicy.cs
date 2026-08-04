@@ -42,7 +42,7 @@ public sealed class RobotsTxtPolicy : IRobotsPolicy
 
     public async Task<RobotsDecision> EvaluateAsync(string url, CancellationToken cancellationToken)
     {
-        if (!_options.RespectRobotsTxt)
+        if (!_options.RespectRobotsTxtForHtmlSources)
         {
             return RobotsDecision.Allowed("robots.txt enforcement is disabled by configuration.");
         }

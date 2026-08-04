@@ -1,4 +1,5 @@
 using DataIntelligence.Core.Dtos;
+using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Collection;
@@ -11,23 +12,15 @@ namespace DataIntelligence.IntegrationTests.Collection;
 
 /// <summary>
 /// Collector → database flow against real SQL Server (SOW 11.1). The fetcher is stubbed so the
-/// tests are deterministic and reach no external site; everything below it is production code.
+/// tests are deterministic and never call the live publishers; the adapter, validator, runner
+/// and schema underneath are all production code.
 /// </summary>
-/// <remarks>
-/// The class shares one database, so each test gets its own source key and its own schedule
-/// slot — otherwise tests would collide on <c>UQ_Item_SourceKey</c> and on the attempt numbering
-/// behind <c>UQ_CollectionRun_Cycle</c>. Migrating a database per test would be cleaner still,
-/// but costs seconds per test for isolation that unique keys already provide.
-/// </remarks>
 public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
 {
-    private const string RecordSelector = "//div[@class='listing']";
-
-    /// <summary>Hands each test instance a private block of schedule slots.</summary>
     private static int _slotCounter;
 
     private readonly CollectionDatabaseFixture _fixture;
-    private readonly string _sourceKey;
+    private readonly string _seriesCode;
     private readonly DateTime _cycle1;
     private readonly DateTime _cycle2;
 
@@ -35,184 +28,216 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     {
         _fixture = fixture;
 
-        // These tests require a real SQL Server, which SOW 11.2 provisions for exactly this
-        // purpose. Failing with an actionable message beats passing silently and reporting
-        // coverage the run never actually had.
+        // These tests require a real SQL Server, which CI provisions as a service container.
+        // Failing with an actionable message beats passing silently and reporting coverage the
+        // run never had.
         if (!fixture.IsAvailable)
         {
             throw new InvalidOperationException(fixture.UnavailableReason);
         }
 
+        // The class shares one database, so each test gets its own series and schedule slot;
+        // otherwise tests would collide on UQ_Series_Code and on attempt numbering.
         var slot = Interlocked.Increment(ref _slotCounter);
-        _sourceKey = $"ITEM-{slot:D4}";
-        _cycle1 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddHours(slot * 24);
+        _seriesCode = $"TEST_{slot:D4}";
+
+        // Collection time must sit after the observed period, or the validator correctly
+        // rejects every record as a future publication.
+        _cycle1 = new DateTime(2026, 8, 4, 0, 0, 0, DateTimeKind.Utc).AddHours(slot * 24);
         _cycle2 = _cycle1.AddHours(1);
+
+        SeedSeries();
     }
 
-    private string Page(string price, string quantity = "5", string title = "First item") => $"""
-        <html><body>
-          <div class="listing" data-id="{_sourceKey}">
-            <h3>{title}</h3><span class="price">{price}</span><span class="stock">{quantity}</span>
-          </div>
-        </body></html>
-        """;
+    private void SeedSeries()
+    {
+        using var db = _fixture.CreateContext();
 
-    private static IOptions<CollectionOptions> CreateOptions(bool storeUnchanged = false) =>
-        Options.Create(new CollectionOptions
+        db.Series.Add(new Series
         {
-            SourceUrl = "https://example.test/data",
-            StoreUnchangedSnapshots = storeUnchanged,
-            StoreRawPayload = true,
-            Parser = new ParserOptions
-            {
-                RecordSelector = RecordSelector,
-                Fields = new Dictionary<string, FieldSelector>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["SourceKey"] = new() { Selector = ".", Attribute = "data-id", Required = true },
-                    ["Title"] = new() { Selector = ".//h3", Required = true },
-                    ["PrimaryValue"] = new() { Selector = ".//span[@class='price']", Type = FieldType.Decimal },
-                    ["Quantity"] = new() { Selector = ".//span[@class='stock']", Type = FieldType.Integer }
-                }
-            }
+            DataSourceId = DataSource.NyFedSofrId,
+            SeriesCode = _seriesCode,
+            IsSourceAssignedCode = true,
+            Title = $"Test series {_seriesCode}",
+            Unit = "Percent per annum",
+            Frequency = SeriesFrequency.BusinessDaily,
+            SeasonalAdjustment = SeasonalAdjustment.NotApplicable
         });
 
-    private (CollectionRunner Runner, DataIntelligenceDbContext Db) CreateRunner(
-        string content,
-        DateTime now,
-        bool storeUnchanged = false,
-        FetchResult? forcedFailure = null,
-        IRobotsPolicy? robotsPolicy = null)
+        db.SaveChanges();
+    }
+
+    private static readonly DateOnly Period = new(2026, 6, 1);
+
+    private ObservationRecord Record(decimal value, string? annotation = null) => new()
     {
-        var options = CreateOptions(storeUnchanged);
-        var db = _fixture.CreateContext();
+        SeriesCode = _seriesCode,
+        ReferenceDate = Period,
+        PeriodType = PeriodType.Month,
+        SourcePeriodCode = "M06",
+        Value = value,
+        SourceAnnotation = annotation
+    };
+
+    private int _payloadSequence;
+
+    /// <summary>
+    /// Runs one cycle in its own scope, as the Worker does.
+    /// </summary>
+    /// <param name="payload">
+    /// Left null, every call gets a distinct body. The class shares one source, so a fixed
+    /// default would trip the runner's byte-identical-payload short-circuit against an unrelated
+    /// test's run — and each test would silently stop exercising what it claims to.
+    /// </param>
+    private async Task<CollectionSummary> RunAsync(
+        DateTime scheduledFor,
+        ParseResult? parseResult = null,
+        FetchResult? forcedFailure = null,
+        string? payload = null,
+        CollectionTriggerType trigger = CollectionTriggerType.Scheduled)
+    {
+        payload ??= $$"""{"series":"{{_seriesCode}}","seq":{{++_payloadSequence}}}""";
+
+        await using var db = _fixture.CreateContext();
 
         var runner = new CollectionRunner(
             db,
-            new StubFetcher(content, forcedFailure),
-            new SelectorHtmlParser(options, NullLogger<SelectorHtmlParser>.Instance),
-            robotsPolicy ?? new AllowAllRobotsPolicy(),
-            options,
-            new FixedTimeProvider(now),
+            new StubFetcher(payload, forcedFailure),
+            [new StubAdapter(parseResult ?? new ParseResult([], [], 0))],
+            new AllowAllRobotsPolicy(),
+            Options.Create(new CollectionOptions()),
+            new FixedTimeProvider(scheduledFor),
             NullLogger<CollectionRunner>.Instance);
 
-        return (runner, db);
-    }
-
-    /// <summary>Runs one cycle in its own context, as the Worker does with a scope per cycle.</summary>
-    private async Task<CollectionSummary> RunCycleAsync(
-        string content,
-        DateTime scheduledFor,
-        bool storeUnchanged = false,
-        FetchResult? forcedFailure = null,
-        IRobotsPolicy? robotsPolicy = null,
-        CollectionTriggerType trigger = CollectionTriggerType.Scheduled)
-    {
-        var (runner, db) = CreateRunner(content, scheduledFor, storeUnchanged, forcedFailure, robotsPolicy);
-        await using (db)
-        {
-            return await runner.RunAsync(scheduledFor, trigger, CancellationToken.None);
-        }
+        return await runner.RunAsync(
+            DataSource.NyFedSofrCode, scheduledFor, trigger, CancellationToken.None);
     }
 
     [Fact]
-    public async Task FirstCycle_StoresTheItemAndItsSnapshot()
+    public async Task FirstCycle_StoresObservationAsRevisionZero()
     {
-        var summary = await RunCycleAsync(Page("19.99"), _cycle1);
+        var summary = await RunAsync(_cycle1,
+            new ParseResult([Record(333.952m)], [], 1));
 
         Assert.Equal(CollectionRunStatus.Succeeded, summary.Status);
-        Assert.Equal(1, summary.RecordsInserted);
+        Assert.Equal(1, summary.Inserted);
 
         await using var verify = _fixture.CreateContext();
-        var item = await verify.Items.SingleAsync(i => i.SourceKey == _sourceKey);
-        var snapshot = await verify.ItemSnapshots.SingleAsync(s => s.ItemId == item.ItemId);
+        var observation = await verify.Observations
+            .SingleAsync(o => o.Series!.SeriesCode == _seriesCode);
 
-        Assert.Equal(19.99m, snapshot.PrimaryValue);
-        Assert.Equal(5, snapshot.Quantity);
+        Assert.Equal(333.952m, observation.Value);
+        Assert.Equal(0, observation.RevisionNumber);
+        Assert.True(observation.IsCurrent);
+        Assert.Null(observation.SupersededAtUtc);
 
-        // FR-6: the collection timestamp, and the date key SQL Server computes from it.
-        Assert.Equal(_cycle1, snapshot.CollectedAtUtc);
-        Assert.Equal(int.Parse(_cycle1.ToString("yyyyMMdd")), snapshot.CollectedDateKey);
+        // FR-6: the collection timestamp, and the key SQL Server computes from the period.
+        Assert.Equal(20260601, observation.ReferenceDateKey);
+        Assert.Equal(_cycle1, observation.CollectedAtUtc);
     }
 
     [Fact]
-    public async Task RerunningTheSameCycle_DoesNotDuplicateRows()
+    public async Task ReissuingTheSameValue_WritesNothing()
     {
-        // FR-3, stated literally: re-running a collection cycle creates no duplicate rows.
-        await RunCycleAsync(Page("42.00"), _cycle1);
+        // FR-3. Polling monthly data hourly means this is the overwhelmingly common path.
+        await RunAsync(_cycle1, new ParseResult([Record(333.952m)], [], 1));
 
-        var summary = await RunCycleAsync(
-            Page("42.00"), _cycle1, trigger: CollectionTriggerType.Retry);
+        var summary = await RunAsync(_cycle2, new ParseResult([Record(333.952m)], [], 1));
 
-        Assert.Equal(0, summary.RecordsInserted);
-        Assert.Equal(1, summary.RecordsUnchanged);
+        Assert.Equal(0, summary.Inserted);
+        Assert.Equal(0, summary.Revised);
+        Assert.Equal(1, summary.Unchanged);
 
         await using var verify = _fixture.CreateContext();
-        var item = await verify.Items.SingleAsync(i => i.SourceKey == _sourceKey);
-
-        Assert.Equal(1, await verify.ItemSnapshots.CountAsync(s => s.ItemId == item.ItemId));
+        Assert.Equal(1, await verify.Observations.CountAsync(o => o.Series!.SeriesCode == _seriesCode));
     }
 
     [Fact]
-    public async Task ChangedValue_AppendsASnapshotAndKeepsTheOriginal()
+    public async Task ARevisedValue_SupersedesTheOldVintageAndKeepsIt()
     {
         // FR-4: history is retained, never overwritten.
-        await RunCycleAsync(Page("10.00"), _cycle1);
+        await RunAsync(_cycle1, new ParseResult([Record(333.952m)], [], 1));
 
-        var summary = await RunCycleAsync(Page("12.50"), _cycle2);
-        Assert.Equal(1, summary.RecordsInserted);
+        var summary = await RunAsync(_cycle2, new ParseResult([Record(334.100m, "R")], [], 1));
+
+        Assert.Equal(1, summary.Revised);
+        Assert.Equal(0, summary.Inserted);
 
         await using var verify = _fixture.CreateContext();
-        var item = await verify.Items.SingleAsync(i => i.SourceKey == _sourceKey);
-        var values = await verify.ItemSnapshots
-            .Where(s => s.ItemId == item.ItemId)
-            .OrderBy(s => s.CollectedAtUtc)
-            .Select(s => s.PrimaryValue)
+        var vintages = await verify.Observations
+            .Where(o => o.Series!.SeriesCode == _seriesCode)
+            .OrderBy(o => o.RevisionNumber)
             .ToListAsync();
 
-        Assert.Equal([10.00m, 12.50m], values);
+        Assert.Equal(2, vintages.Count);
+
+        Assert.Equal(333.952m, vintages[0].Value);
+        Assert.False(vintages[0].IsCurrent);
+        Assert.NotNull(vintages[0].SupersededAtUtc);
+
+        Assert.Equal(334.100m, vintages[1].Value);
+        Assert.Equal(1, vintages[1].RevisionNumber);
+        Assert.True(vintages[1].IsCurrent);
+        Assert.Equal("R", vintages[1].SourceAnnotation);
     }
 
     [Fact]
-    public async Task UnchangedItem_StillUpdatesLastSeen()
+    public async Task ExactlyOneVintageStaysCurrentAcrossRepeatedRevisions()
     {
-        // What makes skipping an unchanged snapshot lossless: presence is still recorded.
-        await RunCycleAsync(Page("7.00"), _cycle1);
-        await RunCycleAsync(Page("7.00"), _cycle2);
+        // The integrity rule the dashboards depend on: UQ_Observation_Current would reject a
+        // second live vintage outright, so this proves the supersede-then-append order holds.
+        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1));
+        await RunAsync(_cycle2, new ParseResult([Record(2m)], [], 1));
+        await RunAsync(_cycle2.AddHours(1), new ParseResult([Record(3m)], [], 1));
 
         await using var verify = _fixture.CreateContext();
-        var item = await verify.Items.SingleAsync(i => i.SourceKey == _sourceKey);
+        var live = await verify.Observations
+            .Where(o => o.Series!.SeriesCode == _seriesCode && o.IsCurrent)
+            .ToListAsync();
 
-        Assert.Equal(_cycle1, item.FirstSeenAtUtc);
-        Assert.Equal(_cycle2, item.LastSeenAtUtc);
-        Assert.Equal(1, await verify.ItemSnapshots.CountAsync(s => s.ItemId == item.ItemId));
+        Assert.Single(live);
+        Assert.Equal(3m, live[0].Value);
+        Assert.Equal(2, live[0].RevisionNumber);
     }
 
     [Fact]
-    public async Task StoreUnchangedSnapshots_WritesARowPerCycleWithHasChangedFalse()
+    public async Task AnnotationOnlyChange_IsStillARevision()
     {
-        await RunCycleAsync(Page("3.00"), _cycle1, storeUnchanged: true);
-        await RunCycleAsync(Page("3.00"), _cycle2, storeUnchanged: true);
+        // BLS flips a footnote to "R" without necessarily moving the number; that transition is
+        // meaningful for economic data and must not be swallowed.
+        await RunAsync(_cycle1, new ParseResult([Record(333.952m)], [], 1));
+
+        var summary = await RunAsync(_cycle2, new ParseResult([Record(333.952m, "R")], [], 1));
+
+        Assert.Equal(1, summary.Revised);
+    }
+
+    [Fact]
+    public async Task UnknownSeries_IsRejectedRatherThanAutoCreated()
+    {
+        // Silently inventing series is how a publisher typo becomes permanent reference data.
+        var stray = Record(1m) with { SeriesCode = "NOT_REGISTERED" };
+
+        var summary = await RunAsync(_cycle1, new ParseResult([stray], [], 1));
+
+        Assert.Equal(0, summary.Inserted);
+        Assert.Equal(1, summary.Rejected);
 
         await using var verify = _fixture.CreateContext();
-        var item = await verify.Items.SingleAsync(i => i.SourceKey == _sourceKey);
-        var snapshots = await verify.ItemSnapshots
-            .Where(s => s.ItemId == item.ItemId)
-            .OrderBy(s => s.CollectedAtUtc)
-            .ToListAsync();
+        var rejection = await verify.RejectedObservations
+            .SingleAsync(r => r.CollectionRunId == summary.CollectionRunId);
 
-        Assert.Equal(2, snapshots.Count);
-        Assert.True(snapshots[0].HasChanged);
-        Assert.False(snapshots[1].HasChanged);
+        Assert.Equal(RejectionReason.UnknownSeries, rejection.Reason);
     }
 
     [Fact]
     public async Task FetchFailure_IsRecordedAndCategorised()
     {
-        // FR-2: the failure is logged with a category, and nothing throws.
+        // FR-2: logged with a category, and nothing throws.
         var failure = FetchResult.Failure(
             CollectionFailureCategory.Timeout, "Request exceeded the 30s timeout.");
 
-        var summary = await RunCycleAsync(Page("1.00"), _cycle1, forcedFailure: failure);
+        var summary = await RunAsync(_cycle1, forcedFailure: failure);
 
         Assert.Equal(CollectionRunStatus.Failed, summary.Status);
         Assert.Equal(CollectionFailureCategory.Timeout, summary.FailureCategory);
@@ -221,64 +246,77 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
         await using var verify = _fixture.CreateContext();
         var run = await verify.CollectionRuns.SingleAsync(r => r.CollectionRunId == summary.CollectionRunId);
 
-        Assert.Equal(CollectionRunStatus.Failed, run.Status);
         Assert.Equal(CollectionFailureCategory.Timeout, run.FailureCategory);
         Assert.NotNull(run.CompletedAtUtc);
     }
 
     [Fact]
-    public async Task SelectorMatchingNothing_IsReportedAsALayoutChange()
+    public async Task RateLimiting_IsNotRetried()
     {
-        // Distinguishes "the site changed" from "the site is down" — different fix, different alert.
-        var summary = await RunCycleAsync("<html><body><p>redesigned</p></body></html>", _cycle1);
+        // The remedy is a registration key or a smaller budget, not a faster retry.
+        var failure = FetchResult.Failure(
+            CollectionFailureCategory.RateLimited, "BLS daily threshold reached.");
+
+        var summary = await RunAsync(_cycle1, forcedFailure: failure);
+
+        Assert.Equal(CollectionFailureCategory.RateLimited, summary.FailureCategory);
+        Assert.False(summary.ShouldRetry);
+    }
+
+    [Fact]
+    public async Task AnEmptyPayload_IsReportedAsAContractChange()
+    {
+        // Distinguishes "the publisher changed its API" from "the publisher is down".
+        var summary = await RunAsync(_cycle1, new ParseResult([], [], 0));
 
         Assert.Equal(CollectionRunStatus.Failed, summary.Status);
-        Assert.Equal(CollectionFailureCategory.LayoutChanged, summary.FailureCategory);
-
-        // Not retried: another request returns the same redesigned page.
+        Assert.Equal(CollectionFailureCategory.SchemaChanged, summary.FailureCategory);
         Assert.False(summary.ShouldRetry);
     }
 
     [Fact]
-    public async Task InvalidRecord_IsRejectedWithAReasonAndTheRunIsPartial()
+    public async Task PartialSuccess_WhenSomeRecordsAreRejected()
     {
-        var html = $"""
-            <html><body>
-              <div class="listing" data-id="{_sourceKey}"><h3>Fine</h3><span class="price">1.00</span><span class="stock">1</span></div>
-              <div class="listing" data-id="{_sourceKey}-BAD"><h3>Broken</h3><span class="price">1.00</span><span class="stock">-4</span></div>
-            </body></html>
-            """;
+        var rejection = new RejectedFragment(
+            _seriesCode, "2026-13-01", RejectionReason.UnparseablePeriod, "Bad period.", "{}");
 
-        var summary = await RunCycleAsync(html, _cycle1);
+        var summary = await RunAsync(_cycle1,
+            new ParseResult([Record(1m)], [rejection], 2));
 
         Assert.Equal(CollectionRunStatus.PartialSuccess, summary.Status);
-        Assert.Equal(1, summary.RecordsInserted);
-        Assert.Equal(1, summary.RecordsRejected);
-
-        await using var verify = _fixture.CreateContext();
-        var rejection = await verify.RejectedRecords
-            .SingleAsync(r => r.CollectionRunId == summary.CollectionRunId);
-
-        Assert.Equal(RejectionReason.OutOfRange, rejection.Reason);
-        Assert.Equal($"{_sourceKey}-BAD", rejection.SourceKey);
+        Assert.Equal(1, summary.Inserted);
+        Assert.Equal(1, summary.Rejected);
     }
 
     [Fact]
-    public async Task RobotsDisallow_SkipsTheCycleInsteadOfFailingIt()
+    public async Task AnIdenticalPayload_ShortCircuitsBeforeParsing()
     {
-        // A deliberate, correct decision must not count against the reliability metric.
-        var summary = await RunCycleAsync(
-            Page("1.00"), _cycle1, robotsPolicy: new DenyAllRobotsPolicy());
+        // The cheapest possible dedup: byte-identical bodies are recognised from the stored
+        // payload hash, so no observation is even parsed. Scoped to this test's series so it
+        // cannot collide with another test's stored payload.
+        var body = $$"""{"series":"{{_seriesCode}}","effectiveDate":"2026-07-31"}""";
 
-        Assert.Equal(CollectionRunStatus.Skipped, summary.Status);
-        Assert.Null(summary.FailureCategory);
-        Assert.False(summary.ShouldRetry);
+        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1), payload: body);
+
+        // The adapter would return a different value, but it is never consulted.
+        var summary = await RunAsync(_cycle2, new ParseResult([Record(999m)], [], 1), payload: body);
+
+        Assert.Equal(CollectionRunStatus.Succeeded, summary.Status);
+        Assert.Equal(0, summary.Fetched);
+
+        await using var verify = _fixture.CreateContext();
+        var values = await verify.Observations
+            .Where(o => o.Series!.SeriesCode == _seriesCode)
+            .Select(o => o.Value)
+            .ToListAsync();
+
+        Assert.Equal([1m], values);
     }
 
     [Fact]
     public async Task RawPayloadIsStoredForDiagnosis()
     {
-        var summary = await RunCycleAsync(Page("55.00"), _cycle1);
+        var summary = await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1));
 
         await using var verify = _fixture.CreateContext();
         var payload = await verify.RawPayloads.SingleAsync(p => p.CollectionRunId == summary.CollectionRunId);
@@ -291,14 +329,12 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     [Fact]
     public async Task RetryOfTheSameCycle_GetsADistinctAttemptNumber()
     {
-        // UQ_CollectionRun_Cycle is (ScheduledForUtc, Attempt); a retry must not collide with
-        // the run it is retrying.
-        await RunCycleAsync(Page("2.00"), _cycle1);
-        await RunCycleAsync(Page("2.00"), _cycle1, trigger: CollectionTriggerType.Retry);
+        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1));
+        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1), trigger: CollectionTriggerType.Retry);
 
         await using var verify = _fixture.CreateContext();
         var attempts = await verify.CollectionRuns
-            .Where(r => r.ScheduledForUtc == _cycle1)
+            .Where(r => r.DataSourceId == DataSource.NyFedSofrId && r.ScheduledForUtc == _cycle1)
             .Select(r => r.Attempt)
             .OrderBy(a => a)
             .ToListAsync();
@@ -306,19 +342,42 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
         Assert.Equal([(byte)1, (byte)2], attempts);
     }
 
-    private sealed class StubFetcher : ISourceFetcher
+    [Fact]
+    public async Task UnknownSourceCode_IsSkippedNotCrashed()
     {
-        private readonly string _content;
-        private readonly FetchResult? _forcedFailure;
+        await using var db = _fixture.CreateContext();
 
-        public StubFetcher(string content, FetchResult? forcedFailure)
-        {
-            _content = content;
-            _forcedFailure = forcedFailure;
-        }
+        var runner = new CollectionRunner(
+            db,
+            new StubFetcher("{}", null),
+            [new StubAdapter(new ParseResult([], [], 0))],
+            new AllowAllRobotsPolicy(),
+            Options.Create(new CollectionOptions()),
+            new FixedTimeProvider(_cycle1),
+            NullLogger<CollectionRunner>.Instance);
 
-        public Task<FetchResult> FetchAsync(string url, CancellationToken cancellationToken) =>
-            Task.FromResult(_forcedFailure ?? FetchResult.Success(_content, "text/html", 200, 1));
+        var summary = await runner.RunAsync(
+            "NO_SUCH_SOURCE", _cycle1, CollectionTriggerType.Scheduled, CancellationToken.None);
+
+        Assert.Equal(CollectionRunStatus.Skipped, summary.Status);
+        Assert.Null(summary.CollectionRunId);
+    }
+
+    private sealed class StubFetcher(string content, FetchResult? forcedFailure) : ISourceFetcher
+    {
+        public Task<FetchResult> FetchAsync(
+            SourceRequest request, DataSource source, CancellationToken cancellationToken) =>
+            Task.FromResult(forcedFailure ?? FetchResult.Success(content, "application/json", 200, 1));
+    }
+
+    private sealed class StubAdapter(ParseResult result) : ISourceAdapter
+    {
+        public string SourceCode => DataSource.NyFedSofrCode;
+
+        public SourceRequest BuildRequest(SourceRequestContext context) =>
+            SourceRequest.Get("https://example.test/api");
+
+        public ParseResult Parse(string content) => result;
     }
 
     private sealed class AllowAllRobotsPolicy : IRobotsPolicy
@@ -327,18 +386,8 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
             Task.FromResult(RobotsDecision.Allowed("Test policy."));
     }
 
-    private sealed class DenyAllRobotsPolicy : IRobotsPolicy
+    private sealed class FixedTimeProvider(DateTime utcNow) : TimeProvider
     {
-        public Task<RobotsDecision> EvaluateAsync(string url, CancellationToken cancellationToken) =>
-            Task.FromResult(RobotsDecision.Disallowed("Disallowed by test policy."));
-    }
-
-    private sealed class FixedTimeProvider : TimeProvider
-    {
-        private readonly DateTimeOffset _now;
-
-        public FixedTimeProvider(DateTime utcNow) => _now = new DateTimeOffset(utcNow);
-
-        public override DateTimeOffset GetUtcNow() => _now;
+        public override DateTimeOffset GetUtcNow() => new(utcNow);
     }
 }

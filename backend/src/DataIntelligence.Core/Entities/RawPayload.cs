@@ -1,9 +1,9 @@
 namespace DataIntelligence.Core.Entities;
 
 /// <summary>
-/// The untouched response body for a run, stored compressed. Diagnostic only: it lets a
-/// layout change be diagnosed after the fact and a cycle be re-parsed without re-fetching
-/// (SOW 9, "target site changes layout"). Purged on a shorter window than curated data.
+/// The untouched API response for a run, stored compressed. Diagnostic: it lets a parse failure
+/// be reproduced and a cycle re-parsed without re-requesting, which matters when BLS caps the
+/// daily query budget.
 /// </summary>
 public class RawPayload
 {
@@ -13,14 +13,13 @@ public class RawPayload
     public string? ContentType { get; set; }
 
     /// <summary>
-    /// SHA-256 of the uncompressed body. An unchanged hash across consecutive runs means the
-    /// source republished nothing, which is the cheapest possible short-circuit.
+    /// SHA-256 of the uncompressed body. An unchanged hash between consecutive runs means the
+    /// publisher released nothing new — the cheapest short-circuit available, and the common
+    /// case when polling monthly data hourly.
     /// </summary>
     public byte[] ContentHash { get; set; } = [];
 
     public int SizeBytes { get; set; }
-
-    /// <summary>GZip-compressed body. Written via SQL Server's COMPRESS(); read via DECOMPRESS().</summary>
     public byte[] CompressedContent { get; set; } = [];
 
     public CollectionRun? Run { get; set; }

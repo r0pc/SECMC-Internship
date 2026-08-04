@@ -15,18 +15,18 @@ using Microsoft.Extensions.Options;
 namespace DataIntelligence.Infrastructure.Collection;
 
 /// <summary>
-/// Executes one collection cycle end to end and records exactly what happened.
+/// Executes one collection cycle for one source and records exactly what happened.
 /// </summary>
 /// <remarks>
 /// The contract that matters: this never throws for a collection failure. Every exit path
-/// finalises the run record with a status and, on failure, a category — so the scheduler is
-/// never taken down by a bad cycle (FR-2) and the reliability figures stay truthful.
+/// finalises the run with a status and, on failure, a category — so a bad cycle from one
+/// publisher can neither stop the scheduler (FR-2) nor affect the other publisher's run.
 /// </remarks>
 public sealed class CollectionRunner : ICollectionRunner
 {
     private readonly DataIntelligenceDbContext _db;
     private readonly ISourceFetcher _fetcher;
-    private readonly ISourceParser _parser;
+    private readonly IEnumerable<ISourceAdapter> _adapters;
     private readonly IRobotsPolicy _robotsPolicy;
     private readonly CollectionOptions _options;
     private readonly TimeProvider _timeProvider;
@@ -35,7 +35,7 @@ public sealed class CollectionRunner : ICollectionRunner
     public CollectionRunner(
         DataIntelligenceDbContext db,
         ISourceFetcher fetcher,
-        ISourceParser parser,
+        IEnumerable<ISourceAdapter> adapters,
         IRobotsPolicy robotsPolicy,
         IOptions<CollectionOptions> options,
         TimeProvider timeProvider,
@@ -43,7 +43,7 @@ public sealed class CollectionRunner : ICollectionRunner
     {
         _db = db;
         _fetcher = fetcher;
-        _parser = parser;
+        _adapters = adapters;
         _robotsPolicy = robotsPolicy;
         _options = options.Value;
         _timeProvider = timeProvider;
@@ -51,26 +51,40 @@ public sealed class CollectionRunner : ICollectionRunner
     }
 
     public async Task<CollectionSummary> RunAsync(
+        string sourceCode,
         DateTime scheduledForUtc,
         CollectionTriggerType trigger,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_options.SourceUrl))
-        {
-            _logger.LogWarning(
-                "No source URL configured; skipping the cycle scheduled for {ScheduledFor:u}. "
-                + "Set Collection:SourceUrl once the data source is signed off (SOW 0.1).",
-                scheduledForUtc);
+        var source = await _db.DataSources
+            .FirstOrDefaultAsync(s => s.Code == sourceCode, cancellationToken);
 
-            return new CollectionSummary(null, CollectionRunStatus.Skipped, 0, 0, 0, 0, null,
-                "No source URL configured.");
+        if (source is null)
+        {
+            _logger.LogError("No data source is registered with code '{SourceCode}'.", sourceCode);
+            return Skipped(sourceCode, $"No data source registered with code '{sourceCode}'.");
         }
 
-        var run = await StartRunAsync(scheduledForUtc, trigger, cancellationToken);
+        if (!source.IsEnabled)
+        {
+            _logger.LogInformation("Source {SourceCode} is disabled; skipping.", sourceCode);
+            return Skipped(sourceCode, "Source is disabled.");
+        }
+
+        var adapter = _adapters.FirstOrDefault(a =>
+            string.Equals(a.SourceCode, sourceCode, StringComparison.Ordinal));
+
+        if (adapter is null)
+        {
+            _logger.LogError("No adapter is registered for source {SourceCode}.", sourceCode);
+            return Skipped(sourceCode, $"No adapter registered for '{sourceCode}'.");
+        }
+
+        var run = await StartRunAsync(source, scheduledForUtc, trigger, cancellationToken);
 
         try
         {
-            return await ExecuteAsync(run, cancellationToken);
+            return await ExecuteAsync(source, adapter, run, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -81,389 +95,307 @@ public sealed class CollectionRunner : ICollectionRunner
         }
         catch (CollectionFailureException ex)
         {
-            _logger.LogError(ex, "Collection run {RunId} failed: {Category}.", run.CollectionRunId, ex.Category);
+            _logger.LogError(ex, "{Source}: run {RunId} failed ({Category}).",
+                source.Code, run.CollectionRunId, ex.Category);
             await FinaliseAsync(run, CollectionRunStatus.Failed, ex.Category, ex.Message, ex.ToString(), cancellationToken);
-            return Summarise(run);
+            return Summarise(source.Code, run);
         }
         catch (DbUpdateException ex)
         {
-            _logger.LogError(ex, "Collection run {RunId} could not be persisted.", run.CollectionRunId);
+            _logger.LogError(ex, "{Source}: run {RunId} could not be persisted.", source.Code, run.CollectionRunId);
             await FinaliseAsync(run, CollectionRunStatus.Failed, CollectionFailureCategory.Persistence,
                 ex.Message, ex.ToString(), cancellationToken);
-            return Summarise(run);
+            return Summarise(source.Code, run);
         }
         catch (Exception ex)
         {
             // The backstop that keeps FR-2's promise: whatever went wrong, the scheduler lives.
-            _logger.LogError(ex, "Collection run {RunId} failed unexpectedly.", run.CollectionRunId);
+            _logger.LogError(ex, "{Source}: run {RunId} failed unexpectedly.", source.Code, run.CollectionRunId);
             await FinaliseAsync(run, CollectionRunStatus.Failed, CollectionFailureCategory.Unknown,
                 ex.Message, ex.ToString(), cancellationToken);
-            return Summarise(run);
+            return Summarise(source.Code, run);
         }
     }
 
-    private async Task<CollectionSummary> ExecuteAsync(CollectionRun run, CancellationToken cancellationToken)
+    private async Task<CollectionSummary> ExecuteAsync(
+        DataSource source, ISourceAdapter adapter, CollectionRun run, CancellationToken cancellationToken)
     {
-        // 1. Compliance gate, before any request to the source itself (SOW 3).
-        var robots = await _robotsPolicy.EvaluateAsync(_options.SourceUrl, cancellationToken);
-        if (!robots.IsAllowed)
+        // 1. Compliance gate. Scoped to HTML sources: RFC 9309 governs crawlers of web content,
+        //    while both confirmed sources are official APIs published for programmatic use and
+        //    carry their own terms (DataSource.TermsOfUseUrl).
+        if (source.AccessMethod == SourceAccessMethod.Html && _options.RespectRobotsTxtForHtmlSources)
         {
-            _logger.LogWarning("Collection disallowed by robots.txt: {Reason}", robots.Reason);
+            var robots = await _robotsPolicy.EvaluateAsync(source.ApiEndpoint, cancellationToken);
+            if (!robots.IsAllowed)
+            {
+                _logger.LogWarning("{Source}: disallowed by robots.txt: {Reason}", source.Code, robots.Reason);
 
-            // Skipped, not Failed: the platform behaved correctly. Counting this as a failure
-            // would corrupt the reliability metric with a deliberate, correct decision.
-            await FinaliseAsync(run, CollectionRunStatus.Skipped, null,
-                $"Disallowed by robots.txt: {robots.Reason}", null, cancellationToken);
-            return Summarise(run);
+                // Skipped, not Failed: the platform behaved correctly, and counting a deliberate
+                // decision as a failure would corrupt the reliability metric.
+                await FinaliseAsync(run, CollectionRunStatus.Skipped, null,
+                    $"Disallowed by robots.txt: {robots.Reason}", null, cancellationToken);
+                return Summarise(source.Code, run);
+            }
+
+            source.RobotsTxtCheckedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
         }
 
-        await RecordRobotsCheckAsync(cancellationToken);
+        // 2. Build and send the request.
+        var seriesCodes = await _db.Series
+            .Where(s => s.DataSourceId == source.DataSourceId && s.IsActive)
+            .Select(s => s.SeriesCode)
+            .ToListAsync(cancellationToken);
 
-        // 2. Fetch.
-        var fetch = await _fetcher.FetchAsync(_options.SourceUrl, cancellationToken);
+        var request = adapter.BuildRequest(
+            new SourceRequestContext(source, seriesCodes, _timeProvider.GetUtcNow().UtcDateTime));
+
+        run.RequestUrl = request.Url;
+
+        var fetch = await _fetcher.FetchAsync(request, source, cancellationToken);
         run.HttpStatusCode = fetch.HttpStatusCode;
 
         if (!fetch.Succeeded)
         {
             await FinaliseAsync(run, CollectionRunStatus.Failed, fetch.FailureCategory,
                 fetch.ErrorMessage, fetch.ErrorDetail, cancellationToken);
-            return Summarise(run);
+            return Summarise(source.Code, run);
         }
 
         var content = fetch.Content!;
+        var contentHash = SHA256.HashData(Encoding.UTF8.GetBytes(content));
 
         if (_options.StoreRawPayload)
         {
-            AddRawPayload(run, content, fetch.ContentType);
+            AddRawPayload(run, content, contentHash, fetch.ContentType);
         }
 
-        // 3. Parse. A ParseError propagates to the caller's catch and is categorised there.
-        var parsed = _parser.Parse(content);
-        run.RecordsFetched = parsed.Records.Count;
-
-        if (parsed.RecordNodesMatched == 0)
+        // 3. Short-circuit an identical body. Polling monthly CPI hourly means the overwhelming
+        //    majority of cycles return byte-for-byte what we already have; parsing and hashing
+        //    every observation to discover that is wasted work.
+        if (await IsUnchangedSinceLastRunAsync(source, run, contentHash, cancellationToken))
         {
-            // Fetched fine, parsed fine, matched nothing — the markup moved under us.
-            await FinaliseAsync(run, CollectionRunStatus.Failed, CollectionFailureCategory.LayoutChanged,
-                $"Record selector '{_options.Parser.RecordSelector}' matched no nodes in a "
-                + $"{content.Length}-character response.",
-                "The source's markup has probably changed. Re-parse the stored raw payload to confirm, "
-                + "then update Collection:Parser.",
-                cancellationToken);
-            return Summarise(run);
+            _logger.LogInformation(
+                "{Source}: response is byte-identical to the previous run; nothing to parse.", source.Code);
+            await FinaliseAsync(run, CollectionRunStatus.Succeeded, null, null, null, cancellationToken);
+            return Summarise(source.Code, run);
         }
 
-        // 4. Validate, then persist what survived.
+        // 4. Parse. A ParseError or SchemaChanged propagates to the caller's catch.
+        var parsed = adapter.Parse(content);
+        run.ObservationsFetched = parsed.Records.Count;
+
+        if (parsed.EntriesSeen == 0)
+        {
+            await FinaliseAsync(run, CollectionRunStatus.Failed, CollectionFailureCategory.SchemaChanged,
+                "The response parsed but contained no data entries.",
+                "Re-parse the stored raw payload to confirm, then check the publisher's API contract.",
+                cancellationToken);
+            return Summarise(source.Code, run);
+        }
+
+        // 5. Validate.
         var collectedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        var accepted = new List<ScrapedRecord>(parsed.Records.Count);
+        var accepted = new List<ObservationRecord>(parsed.Records.Count);
 
         foreach (var fragment in parsed.Rejections)
         {
-            AddRejection(run, fragment.SourceKey, fragment.Reason, fragment.Detail, fragment.Fragment, collectedAtUtc);
+            AddRejection(run, fragment.SeriesCode, fragment.ReferenceDateText,
+                fragment.Reason, fragment.Detail, fragment.Fragment, collectedAtUtc);
         }
 
         foreach (var record in parsed.Records)
         {
-            var failure = ScrapedRecordValidator.Validate(record, collectedAtUtc);
+            var failure = ObservationValidator.Validate(record, collectedAtUtc);
             if (failure is null)
             {
                 accepted.Add(record);
                 continue;
             }
 
-            AddRejection(run, record.SourceKey, failure.Reason, failure.Detail, null, collectedAtUtc);
+            AddRejection(run, record.SeriesCode, record.ReferenceDate.ToString("O"),
+                failure.Reason, failure.Detail, null, collectedAtUtc);
         }
 
-        run.RecordsRejected = parsed.Rejections.Count + (parsed.Records.Count - accepted.Count);
+        run.ObservationsRejected = parsed.Rejections.Count + (parsed.Records.Count - accepted.Count);
 
         if (accepted.Count == 0)
         {
             await FinaliseAsync(run, CollectionRunStatus.Failed, CollectionFailureCategory.Validation,
-                $"All {run.RecordsRejected} extracted records failed validation.",
-                "See core.RejectedRecord for the per-record reasons.", cancellationToken);
-            return Summarise(run);
+                $"All {run.ObservationsRejected} extracted observations failed validation.",
+                "See core.RejectedObservation for the per-record reasons.", cancellationToken);
+            return Summarise(source.Code, run);
         }
 
-        await PersistAsync(run, accepted, collectedAtUtc, cancellationToken);
+        await PersistAsync(source, run, accepted, collectedAtUtc, cancellationToken);
 
-        // Partial success is a distinct state on purpose: data landed, but something was lost,
-        // and that is worth surfacing on the dashboard rather than reporting a clean run.
-        var status = run.RecordsRejected > 0
+        // Partial success is distinct on purpose: data landed, but something was lost, and that
+        // is worth surfacing rather than reporting a clean run.
+        var status = run.ObservationsRejected > 0
             ? CollectionRunStatus.PartialSuccess
             : CollectionRunStatus.Succeeded;
 
         await FinaliseAsync(run, status, null, null, null, cancellationToken);
 
         _logger.LogInformation(
-            "Run {RunId} {Status}: {Fetched} fetched, {Inserted} inserted, {Unchanged} unchanged, {Rejected} rejected.",
-            run.CollectionRunId, status, run.RecordsFetched, run.RecordsInserted,
-            run.RecordsUnchanged, run.RecordsRejected);
+            "{Source}: run {RunId} {Status}. {Fetched} fetched, {Inserted} new, {Revised} revised, "
+            + "{Unchanged} unchanged, {Rejected} rejected.",
+            source.Code, run.CollectionRunId, status, run.ObservationsFetched,
+            run.ObservationsInserted, run.ObservationsRevised, run.ObservationsUnchanged,
+            run.ObservationsRejected);
 
-        return Summarise(run);
+        return Summarise(source.Code, run);
     }
 
     /// <summary>
-    /// Upserts items and writes snapshots, applying the deduplication rule (FR-3).
+    /// Writes observations, applying deduplication (FR-3) and the revision rule (FR-4).
     /// </summary>
+    /// <remarks>
+    /// Three outcomes per record: unseen period becomes revision 0; unchanged value writes
+    /// nothing; changed value supersedes the current vintage and appends the next one. Nothing
+    /// is ever updated in place except the IsCurrent flag being cleared.
+    /// </remarks>
     private async Task PersistAsync(
+        DataSource source,
         CollectionRun run,
-        List<ScrapedRecord> records,
+        List<ObservationRecord> records,
         DateTime collectedAtUtc,
         CancellationToken cancellationToken)
     {
-        var categories = await ResolveCategoriesAsync(records, cancellationToken);
-        var attributes = await ResolveAttributesAsync(records, cancellationToken);
+        var seriesByCode = await _db.Series
+            .Where(s => s.DataSourceId == source.DataSourceId)
+            .ToDictionaryAsync(s => s.SeriesCode, StringComparer.Ordinal, cancellationToken);
 
-        var sourceKeys = records.Select(r => r.SourceKey).ToList();
+        var seriesIds = seriesByCode.Values.Select(s => s.SeriesId).ToList();
+        var referenceDates = records.Select(r => r.ReferenceDate).Distinct().ToList();
 
-        var existingItems = await _db.Items
-            .Where(i => sourceKeys.Contains(i.SourceKey))
-            .ToDictionaryAsync(i => i.SourceKey, StringComparer.Ordinal, cancellationToken);
-
-        // One query for every item's most recent hash, rather than one query per item. At a few
-        // thousand items an hour the difference between this and an N+1 is the whole cycle.
-        var itemIds = existingItems.Values.Select(i => i.ItemId).ToList();
-        var latestHashes = await _db.ItemSnapshots
-            .Where(s => itemIds.Contains(s.ItemId))
-            .GroupBy(s => s.ItemId)
-            .Select(g => new
-            {
-                ItemId = g.Key,
-                RowHash = g.OrderByDescending(s => s.CollectedAtUtc)
-                    .Select(s => s.RowHash)
-                    .First()
-            })
-            .ToDictionaryAsync(x => x.ItemId, x => x.RowHash, cancellationToken);
+        // One query for every current vintage in range, rather than one per record. With ten
+        // years of CPI history the difference between this and an N+1 is the whole cycle.
+        var currentVintages = await _db.Observations
+            .Where(o => seriesIds.Contains(o.SeriesId)
+                     && o.IsCurrent
+                     && referenceDates.Contains(o.ReferenceDate))
+            .ToDictionaryAsync(o => (o.SeriesId, o.ReferenceDate), cancellationToken);
 
         foreach (var record in records)
         {
-            var rowHash = record.ComputeRowHash();
-
-            if (!existingItems.TryGetValue(record.SourceKey, out var item))
+            if (!seriesByCode.TryGetValue(record.SeriesCode, out var series))
             {
-                item = new Item
-                {
-                    SourceKey = record.SourceKey,
-                    Title = record.Title,
-                    SourceUrl = record.SourceUrl,
-                    FirstSeenRunId = run.CollectionRunId,
-                    FirstSeenAtUtc = collectedAtUtc,
-                    LastSeenAtUtc = collectedAtUtc,
-                    IsActive = true
-                };
-
-                if (record.CategoryCode is { Length: > 0 } code && categories.TryGetValue(code, out var category))
-                {
-                    item.Category = category;
-                }
-
-                _db.Items.Add(item);
-                existingItems[record.SourceKey] = item;
-            }
-            else
-            {
-                // Descriptive fields track the source; the observation history does not change.
-                item.Title = record.Title;
-                item.SourceUrl = record.SourceUrl;
-                item.LastSeenAtUtc = collectedAtUtc;
-                item.IsActive = true;
-
-                if (record.CategoryCode is { Length: > 0 } code && categories.TryGetValue(code, out var category))
-                {
-                    item.Category = category;
-                }
-            }
-
-            var unchanged = latestHashes.TryGetValue(item.ItemId, out var previousHash)
-                && previousHash.AsSpan().SequenceEqual(rowHash);
-
-            if (unchanged && !_options.StoreUnchangedSnapshots)
-            {
-                // FR-3. The observation is not lost: LastSeenAtUtc above records that the item
-                // was present this cycle, and its values are the previous snapshot's.
-                run.RecordsUnchanged++;
+                // Series are curated and seeded, so an unknown code means the publisher returned
+                // something we did not ask for. Logged rather than auto-created: silently
+                // inventing series is how a typo becomes permanent reference data.
+                AddRejection(run, record.SeriesCode, record.ReferenceDate.ToString("O"),
+                    RejectionReason.UnknownSeries,
+                    $"Series '{record.SeriesCode}' is not registered for source {source.Code}.",
+                    null, collectedAtUtc);
+                run.ObservationsRejected++;
                 continue;
             }
 
-            var snapshot = new ItemSnapshot
-            {
-                Item = item,
-                CollectionRunId = run.CollectionRunId,
-                CollectedAtUtc = collectedAtUtc,
-                PrimaryValue = record.PrimaryValue,
-                SecondaryValue = record.SecondaryValue,
-                Quantity = record.Quantity,
-                StatusText = record.StatusText,
-                CurrencyCode = record.CurrencyCode,
-                PublishedAtUtc = record.PublishedAtUtc,
-                RowHash = rowHash,
-                HasChanged = !unchanged
-            };
+            series.LastSeenAtUtc = collectedAtUtc;
+            series.FirstSeenAtUtc ??= collectedAtUtc;
+            series.FirstSeenRunId ??= run.CollectionRunId;
 
-            foreach (var (code, value) in record.ExtraAttributes)
-            {
-                if (!attributes.TryGetValue(code, out var definition))
-                {
-                    continue;
-                }
+            var rowHash = record.ComputeRowHash();
 
-                snapshot.Attributes.Add(new SnapshotAttribute
-                {
-                    Attribute = definition,
-                    CollectedAtUtc = collectedAtUtc,
-                    ValueText = value
-                });
+            if (!currentVintages.TryGetValue((series.SeriesId, record.ReferenceDate), out var current))
+            {
+                _db.Observations.Add(NewObservation(record, series.SeriesId, run, collectedAtUtc, rowHash, 0));
+                run.ObservationsInserted++;
+                continue;
             }
 
-            _db.ItemSnapshots.Add(snapshot);
+            // The publisher reissued the same figure. Nothing to record: the run itself is the
+            // evidence that we checked, and a second identical vintage is not merely wasteful —
+            // UQ_Observation_Current forbids it outright (FR-3).
+            if (current.RowHash.AsSpan().SequenceEqual(rowHash))
+            {
+                run.ObservationsUnchanged++;
+                continue;
+            }
 
-            if (unchanged)
-            {
-                run.RecordsUnchanged++;
-            }
-            else
-            {
-                run.RecordsInserted++;
-            }
+            // A genuine revision, in the order the unique index requires: release the current
+            // flag before claiming it, or the insert collides with the row it replaces.
+            current.IsCurrent = false;
+            current.SupersededAtUtc = collectedAtUtc;
+
+            _db.Observations.Add(NewObservation(
+                record, series.SeriesId, run, collectedAtUtc, rowHash, (short)(current.RevisionNumber + 1)));
+
+            run.ObservationsRevised++;
+
+            _logger.LogInformation(
+                "{Source}: {SeriesCode} {ReferenceDate:yyyy-MM-dd} revised from {Old} to {New}.",
+                source.Code, record.SeriesCode, record.ReferenceDate, current.Value, record.Value);
         }
 
-        await MarkMissingItemsInactiveAsync(sourceKeys, collectedAtUtc, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>
-    /// Retires items that have not been seen for <c>InactiveAfterMissedCycles</c> cycles.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately lagged rather than "not in this payload". A single truncated response would
-    /// otherwise retire the entire catalogue in one cycle, and the dashboards would show a cliff
-    /// that never happened.
-    /// </remarks>
-    private async Task MarkMissingItemsInactiveAsync(
-        List<string> seenKeys,
-        DateTime collectedAtUtc,
-        CancellationToken cancellationToken)
-    {
-        var cutoff = collectedAtUtc.AddMinutes(-_options.IntervalMinutes * _options.InactiveAfterMissedCycles);
-
-        var stale = await _db.Items
-            .Where(i => i.IsActive && i.LastSeenAtUtc < cutoff && !seenKeys.Contains(i.SourceKey))
-            .ToListAsync(cancellationToken);
-
-        foreach (var item in stale)
+    private static Observation NewObservation(
+        ObservationRecord record, int seriesId, CollectionRun run,
+        DateTime collectedAtUtc, byte[] rowHash, short revisionNumber) =>
+        new()
         {
-            item.IsActive = false;
-        }
-
-        if (stale.Count > 0)
-        {
-            _logger.LogInformation(
-                "Marked {Count} items inactive; not seen since before {Cutoff:u}.", stale.Count, cutoff);
-        }
-    }
-
-    private async Task<Dictionary<string, Category>> ResolveCategoriesAsync(
-        List<ScrapedRecord> records,
-        CancellationToken cancellationToken)
-    {
-        var codes = records
-            .Select(r => r.CategoryCode)
-            .Where(c => !string.IsNullOrWhiteSpace(c))
-            .Select(c => c!.Trim())
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-
-        if (codes.Count == 0)
-        {
-            return [];
-        }
-
-        var existing = await _db.Categories
-            .Where(c => codes.Contains(c.Code))
-            .ToDictionaryAsync(c => c.Code, StringComparer.Ordinal, cancellationToken);
-
-        foreach (var code in codes.Where(c => !existing.ContainsKey(c)))
-        {
-            var displayName = records
-                .FirstOrDefault(r => string.Equals(r.CategoryCode?.Trim(), code, StringComparison.Ordinal))
-                ?.CategoryName;
-
-            var category = new Category
-            {
-                Code = code,
-                DisplayName = string.IsNullOrWhiteSpace(displayName) ? code : displayName
-            };
-
-            _db.Categories.Add(category);
-            existing[code] = category;
-        }
-
-        return existing;
-    }
+            SeriesId = seriesId,
+            ReferenceDate = record.ReferenceDate,
+            PeriodType = record.PeriodType,
+            SourcePeriodCode = record.SourcePeriodCode,
+            RevisionNumber = revisionNumber,
+            IsCurrent = true,
+            Value = record.Value,
+            SourceAnnotation = record.SourceAnnotation,
+            CollectionRunId = run.CollectionRunId,
+            CollectedAtUtc = collectedAtUtc,
+            RowHash = rowHash
+        };
 
     /// <summary>
-    /// Registers attribute definitions on first sight, so a new source field is absorbed
-    /// without a migration.
+    /// Whether this response is byte-identical to the last successfully fetched one.
     /// </summary>
-    private async Task<Dictionary<string, AttributeDefinition>> ResolveAttributesAsync(
-        List<ScrapedRecord> records,
-        CancellationToken cancellationToken)
+    private async Task<bool> IsUnchangedSinceLastRunAsync(
+        DataSource source, CollectionRun run, byte[] contentHash, CancellationToken cancellationToken)
     {
-        var codes = records
-            .SelectMany(r => r.ExtraAttributes.Keys)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-
-        if (codes.Count == 0)
+        if (!_options.StoreRawPayload)
         {
-            return [];
+            // Without stored payloads there is nothing to compare against, so the parse proceeds
+            // and the per-observation hash catches the duplication instead.
+            return false;
         }
 
-        var existing = await _db.AttributeDefinitions
-            .Where(a => codes.Contains(a.Code))
-            .ToDictionaryAsync(a => a.Code, StringComparer.Ordinal, cancellationToken);
+        var previousHash = await _db.RawPayloads
+            .Where(p => p.Run!.DataSourceId == source.DataSourceId
+                     && p.CollectionRunId != run.CollectionRunId)
+            .OrderByDescending(p => p.FetchedAtUtc)
+            .Select(p => p.ContentHash)
+            .FirstOrDefaultAsync(cancellationToken);
 
-        foreach (var code in codes.Where(c => !existing.ContainsKey(c)))
-        {
-            var definition = new AttributeDefinition
-            {
-                Code = code,
-                DisplayName = code,
-                DataType = AttributeDataType.Text
-            };
-
-            _db.AttributeDefinitions.Add(definition);
-            existing[code] = definition;
-
-            _logger.LogInformation("Registered new source attribute '{Code}'.", code);
-        }
-
-        return existing;
+        return previousHash is not null && previousHash.AsSpan().SequenceEqual(contentHash);
     }
 
     private async Task<CollectionRun> StartRunAsync(
-        DateTime scheduledForUtc,
-        CollectionTriggerType trigger,
+        DataSource source, DateTime scheduledForUtc, CollectionTriggerType trigger,
         CancellationToken cancellationToken)
     {
-        // Attempt numbering makes a retry distinguishable from a fresh cycle under
-        // UQ_CollectionRun_Cycle, so a retry cannot collide with the run it is retrying.
+        // Attempt numbering keeps a retry distinguishable from the run it retries under
+        // UQ_CollectionRun_Cycle, which is scoped per source.
         var priorAttempts = await _db.CollectionRuns
-            .CountAsync(r => r.ScheduledForUtc == scheduledForUtc, cancellationToken);
+            .CountAsync(r => r.DataSourceId == source.DataSourceId
+                          && r.ScheduledForUtc == scheduledForUtc, cancellationToken);
 
         var run = new CollectionRun
         {
+            DataSourceId = source.DataSourceId,
             ScheduledForUtc = scheduledForUtc,
             Attempt = (byte)Math.Min(priorAttempts + 1, byte.MaxValue),
             TriggerType = trigger,
             StartedAtUtc = _timeProvider.GetUtcNow().UtcDateTime,
             Status = CollectionRunStatus.Running,
-            RequestUrl = _options.SourceUrl
+            RequestUrl = source.ApiEndpoint
         };
 
         _db.CollectionRuns.Add(run);
 
-        // Saved immediately so the run is visible while it is in flight, and so a hard crash
+        // Saved immediately so the run is visible while in flight, and so a hard crash still
         // leaves evidence that the cycle started.
         await _db.SaveChangesAsync(cancellationToken);
         return run;
@@ -495,18 +427,7 @@ public sealed class CollectionRunner : ICollectionRunner
         }
     }
 
-    private async Task RecordRobotsCheckAsync(CancellationToken cancellationToken)
-    {
-        var config = await _db.SourceConfigs
-            .FirstOrDefaultAsync(c => c.SourceConfigId == SourceConfig.SingletonId, cancellationToken);
-
-        if (config is not null)
-        {
-            config.RobotsTxtCheckedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        }
-    }
-
-    private void AddRawPayload(CollectionRun run, string content, string? contentType)
+    private void AddRawPayload(CollectionRun run, string content, byte[] contentHash, string? contentType)
     {
         var bytes = Encoding.UTF8.GetBytes(content);
 
@@ -521,24 +442,21 @@ public sealed class CollectionRunner : ICollectionRunner
             CollectionRunId = run.CollectionRunId,
             FetchedAtUtc = _timeProvider.GetUtcNow().UtcDateTime,
             ContentType = Truncate(contentType, 100),
-            ContentHash = SHA256.HashData(bytes),
+            ContentHash = contentHash,
             SizeBytes = bytes.Length,
             CompressedContent = output.ToArray()
         });
     }
 
     private void AddRejection(
-        CollectionRun run,
-        string? sourceKey,
-        RejectionReason reason,
-        string detail,
-        string? fragment,
-        DateTime rejectedAtUtc)
+        CollectionRun run, string? seriesCode, string? referenceDateText,
+        RejectionReason reason, string detail, string? fragment, DateTime rejectedAtUtc)
     {
-        _db.RejectedRecords.Add(new RejectedRecord
+        _db.RejectedObservations.Add(new RejectedObservation
         {
             CollectionRunId = run.CollectionRunId,
-            SourceKey = Truncate(sourceKey, 200),
+            SeriesCode = Truncate(seriesCode, 100),
+            ReferenceDateText = Truncate(referenceDateText, 50),
             RejectedAtUtc = rejectedAtUtc,
             Reason = reason,
             ReasonDetail = Truncate(detail, 1000),
@@ -546,13 +464,18 @@ public sealed class CollectionRunner : ICollectionRunner
         });
     }
 
-    private static CollectionSummary Summarise(CollectionRun run) => new(
+    private static CollectionSummary Skipped(string sourceCode, string reason) =>
+        new(sourceCode, null, CollectionRunStatus.Skipped, 0, 0, 0, 0, 0, null, reason);
+
+    private static CollectionSummary Summarise(string sourceCode, CollectionRun run) => new(
+        sourceCode,
         run.CollectionRunId,
         run.Status,
-        run.RecordsFetched,
-        run.RecordsInserted,
-        run.RecordsUnchanged,
-        run.RecordsRejected,
+        run.ObservationsFetched,
+        run.ObservationsInserted,
+        run.ObservationsRevised,
+        run.ObservationsUnchanged,
+        run.ObservationsRejected,
         run.FailureCategory,
         run.ErrorMessage);
 

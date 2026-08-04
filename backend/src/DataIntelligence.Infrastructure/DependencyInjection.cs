@@ -4,6 +4,7 @@ using DataIntelligence.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace DataIntelligence.Infrastructure;
@@ -47,7 +48,7 @@ public static class DependencyInjection
 
     /// <summary>
     /// Registers the collection pipeline. Separate from <see cref="AddInfrastructure"/> because
-    /// the API hosts the read side and does not need a fetcher or a parser.
+    /// the API hosts the read side and needs no fetcher or adapters.
     /// </summary>
     public static IServiceCollection AddCollection(
         this IServiceCollection services,
@@ -59,12 +60,20 @@ public static class DependencyInjection
             .ValidateOnStart();
 
         services.AddMemoryCache();
-        services.TryAddSingletonTimeProvider();
 
-        services.AddHttpClient<ISourceFetcher, HttpSourceFetcher>(HttpSourceFetcher.HttpClientName, ConfigureClient);
+        // Injected rather than using DateTime.UtcNow directly, so schedule alignment and the
+        // validator's future-period rule stay deterministic under test.
+        services.TryAddSingleton(TimeProvider.System);
+
+        services.AddHttpClient<ISourceFetcher, HttpSourceFetcher>(
+            HttpSourceFetcher.HttpClientName, ConfigureClient);
         services.AddHttpClient<IRobotsPolicy, RobotsTxtPolicy>(ConfigureClient);
 
-        services.AddScoped<ISourceParser, SelectorHtmlParser>();
+        // One adapter per publisher, resolved by SourceCode. Adding a third source is a new
+        // registration here and nothing else.
+        services.AddScoped<ISourceAdapter, BlsCpiAdapter>();
+        services.AddScoped<ISourceAdapter, SofrAdapter>();
+
         services.AddScoped<ICollectionRunner, CollectionRunner>();
 
         return services;
@@ -73,26 +82,14 @@ public static class DependencyInjection
         {
             var options = provider.GetRequiredService<IOptions<CollectionOptions>>().Value;
 
-            // Identify the collector to the source operator, per common crawling etiquette. This
-            // is also the token matched against robots.txt user-agent groups.
+            // Identify the collector to the publisher, per common etiquette for automated
+            // clients, and so a maintainer can be contacted rather than simply blocked.
             client.DefaultRequestHeaders.UserAgent.ParseAdd(options.UserAgent);
-            client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/json");
+            client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
 
             // Per-request timeouts are enforced with a CancellationTokenSource so a timeout is
             // distinguishable from shutdown; the client-level timeout is the outer backstop.
             client.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds * 2);
         }
-    }
-
-    private static IServiceCollection TryAddSingletonTimeProvider(this IServiceCollection services)
-    {
-        // Injected rather than using DateTime.UtcNow directly so schedule alignment and the
-        // validator's future-timestamp rule are deterministic under test.
-        if (services.All(d => d.ServiceType != typeof(TimeProvider)))
-        {
-            services.AddSingleton(TimeProvider.System);
-        }
-
-        return services;
     }
 }

@@ -2,21 +2,20 @@ namespace DataIntelligence.Core.Enums;
 
 /// <summary>Outcome of a single collection attempt (FR-2).</summary>
 /// <remarks>
-/// Names match the values allowed by <c>CK_CollectionRun_Status</c> in the schema;
-/// they are persisted as strings, so renaming a member is a breaking schema change.
+/// Names match the values allowed by the schema's CHECK constraints and are persisted as
+/// strings, so renaming a member is a breaking schema change.
 /// </remarks>
 public enum CollectionRunStatus
 {
     Running,
     Succeeded,
-    /// <summary>Data was stored, but some records were rejected during validation.</summary>
+    /// <summary>Data was stored, but some observations were rejected during validation.</summary>
     PartialSuccess,
     Failed,
-    /// <summary>Not attempted — no source configured, source disabled, or robots.txt disallowed it.</summary>
+    /// <summary>Not attempted — source disabled, or robots.txt disallowed an HTML source.</summary>
     Skipped
 }
 
-/// <summary>What caused a run to start.</summary>
 public enum CollectionTriggerType
 {
     Scheduled,
@@ -25,45 +24,96 @@ public enum CollectionTriggerType
     Backfill
 }
 
-/// <summary>
-/// Why a run failed. Recorded so the scheduler can log and alert without crashing (FR-2),
-/// and so <c>LayoutChanged</c> can be alerted on separately — it is the leading risk in SOW 9.
-/// </summary>
+/// <summary>Why a run failed, recorded so the scheduler can log and alert without crashing.</summary>
 public enum CollectionFailureCategory
 {
     /// <summary>DNS failure, connection refused, network unreachable.</summary>
     Unreachable,
     Timeout,
-    /// <summary>Reached the server but it returned a non-success status code.</summary>
+    /// <summary>Reached the publisher but it returned a non-success status code.</summary>
     HttpError,
-    /// <summary>The response could not be parsed as the expected document type.</summary>
+    /// <summary>
+    /// The publisher refused because we have asked too often. Distinct from HttpError because
+    /// the fix is a smaller query budget, not a retry — BLS caps unregistered callers hard.
+    /// </summary>
+    RateLimited,
+    /// <summary>The response could not be read as JSON at all.</summary>
     ParseError,
-    /// <summary>Parsed fine, but the configured selectors matched nothing — the source's markup moved.</summary>
-    LayoutChanged,
-    /// <summary>Records were extracted but none survived validation.</summary>
+    /// <summary>
+    /// Valid JSON, but not the shape this adapter expects. For an API this is the equivalent
+    /// of a layout change: the publisher altered its contract.
+    /// </summary>
+    SchemaChanged,
+    /// <summary>Observations were extracted but none survived validation.</summary>
     Validation,
     /// <summary>Extraction succeeded; writing to SQL Server did not.</summary>
     Persistence,
     Unknown
 }
 
-/// <summary>Why a parsed record was not promoted to a snapshot.</summary>
+/// <summary>Why a parsed observation was not stored.</summary>
 public enum RejectionReason
 {
     MissingField,
     TypeMismatch,
     OutOfRange,
-    /// <summary>Two records in the same payload claimed the same source key.</summary>
-    DuplicateKey,
+    /// <summary>The publisher returned a series this platform does not track.</summary>
+    UnknownSeries,
+    /// <summary>Two records in one payload claimed the same series and period.</summary>
+    DuplicatePeriod,
+    /// <summary>The period token could not be turned into a reference date.</summary>
+    UnparseablePeriod,
     SchemaDrift,
     Unknown
 }
 
-/// <summary>Storage type for an extension attribute.</summary>
-public enum AttributeDataType
+/// <summary>
+/// The length of the period an observation describes.
+/// </summary>
+/// <remarks>
+/// Not derivable from the series' frequency: a BLS monthly series also publishes M13 (annual
+/// average) and S01/S02 (semiannual) rows in the same response, and averaging those into a
+/// monthly trend would double-count the year.
+/// </remarks>
+public enum PeriodType
 {
-    Text,
-    Number,
-    Date,
-    Boolean
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Semiannual,
+    Annual
+}
+
+/// <summary>How often the publisher releases a series.</summary>
+public enum SeriesFrequency
+{
+    BusinessDaily,
+    Daily,
+    Weekly,
+    Monthly,
+    Quarterly,
+    Semiannual,
+    Annual
+}
+
+/// <summary>
+/// Whether a series has been seasonally adjusted. Kept explicit because comparing an adjusted
+/// series against an unadjusted one is a common and silent analytical error.
+/// </summary>
+public enum SeasonalAdjustment
+{
+    SeasonallyAdjusted,
+    NotSeasonallyAdjusted,
+    NotApplicable
+}
+
+/// <summary>How a source is retrieved.</summary>
+public enum SourceAccessMethod
+{
+    /// <summary>An official JSON API. Both confirmed sources use this (SOW 9).</summary>
+    RestApi,
+    /// <summary>Retained so a scraped fallback importer stays modelled; not implemented.</summary>
+    Html,
+    Csv
 }

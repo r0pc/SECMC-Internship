@@ -25,7 +25,7 @@ public class RobotsTxtPolicyTests
         var options = Options.Create(new CollectionOptions
         {
             UserAgent = userAgent,
-            RespectRobotsTxt = true
+            RespectRobotsTxtForHtmlSources = true
         });
 
         return new RobotsTxtPolicy(
@@ -182,7 +182,7 @@ public class RobotsTxtPolicyTests
         var policy = new RobotsTxtPolicy(
             new HttpClient(handler),
             new MemoryCache(new MemoryCacheOptions()),
-            Options.Create(new CollectionOptions { RespectRobotsTxt = false }),
+            Options.Create(new CollectionOptions { RespectRobotsTxtForHtmlSources = false }),
             NullLogger<RobotsTxtPolicy>.Instance);
 
         var decision = await policy.EvaluateAsync(TargetUrl, CancellationToken.None);
@@ -198,7 +198,7 @@ public class RobotsTxtPolicyTests
         var policy = new RobotsTxtPolicy(
             new HttpClient(handler),
             new MemoryCache(new MemoryCacheOptions()),
-            Options.Create(new CollectionOptions { RespectRobotsTxt = true, RobotsCacheMinutes = 60 }),
+            Options.Create(new CollectionOptions { RespectRobotsTxtForHtmlSources = true, RobotsCacheMinutes = 60 }),
             NullLogger<RobotsTxtPolicy>.Instance);
 
         await policy.EvaluateAsync(TargetUrl, CancellationToken.None);
