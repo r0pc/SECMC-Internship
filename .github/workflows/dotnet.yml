@@ -46,10 +46,15 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        # Must satisfy global.json, which pins the .NET 10 LTS SDK. The previous 8.0.x only
-        # built because the runner image happened to also ship .NET 10 - that is how a green
-        # build turns red on an unrelated image update.
-        global-json-file: global.json
+        # Resolves to the latest published .NET 10 SDK, which satisfies global.json.
+        #
+        # Not `global-json-file`: that installs global.json's version *literally*, and the
+        # version there ("10.0.0") is a floor for rollForward rather than a real build - SDKs
+        # ship in feature bands (10.0.1xx, 10.0.3xx), so the download 404s.
+        #
+        # Not a bare `8.0.x` either: that only built because the runner image happened to also
+        # ship .NET 10, which is how a green build turns red on an unrelated image update.
+        dotnet-version: 10.0.x
 
     - name: Restore dependencies
       run: dotnet restore
