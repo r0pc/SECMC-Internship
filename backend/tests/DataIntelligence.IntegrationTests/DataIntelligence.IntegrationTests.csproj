@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DataIntelligence.Api\DataIntelligence.Api.csproj" />
+    <ProjectReference Include="..\..\src\DataIntelligence.Infrastructure\DataIntelligence.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>

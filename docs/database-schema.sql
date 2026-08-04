@@ -65,8 +65,9 @@ CREATE TABLE collect.SourceConfig
     Name                NVARCHAR(100)   NOT NULL,
     BaseUrl             NVARCHAR(500)   NOT NULL,
     CollectionUrl       NVARCHAR(1000)  NOT NULL,
-    -- Hourly per FR-1; stored so the Worker's cadence is data-driven.
-    CronSchedule        VARCHAR(100)    NOT NULL CONSTRAINT DF_SourceConfig_Cron DEFAULT '0 0 * * * ?',
+    -- 60 = hourly per FR-1. An interval rather than a cron expression: the requirement is a
+    -- fixed cadence, and a cron parser would be a dependency bought for one expression.
+    CollectionIntervalMinutes SMALLINT  NOT NULL CONSTRAINT DF_SourceConfig_Interval DEFAULT 60,
     RequestTimeoutSec   SMALLINT        NOT NULL CONSTRAINT DF_SourceConfig_Timeout DEFAULT 30,
     MaxRetries          TINYINT         NOT NULL CONSTRAINT DF_SourceConfig_Retries DEFAULT 3,
     UserAgent           NVARCHAR(250)   NULL,
@@ -239,8 +240,11 @@ CREATE TABLE core.ItemSnapshot
     CollectionRunId     BIGINT          NOT NULL,
     CollectedAtUtc      DATETIME2(3)    NOT NULL,   -- FR-6; future partition key
     -- Persisted date key: cheap dashboard grouping and the eventual partition
-    -- boundary column. Deterministic, so it is indexable.
-    CollectedDateKey    AS CONVERT(INT, CONVERT(CHAR(8), CollectedAtUtc, 112)) PERSISTED NOT NULL,
+    -- boundary column. Deterministic, so it is indexable. Derived from a NOT NULL
+    -- column, so it can never actually be null; the constraint is left off because
+    -- EF Core does not emit it for computed columns, and keeping this script and
+    -- the migration byte-identical is worth more than the redundant declaration.
+    CollectedDateKey    AS CONVERT(INT, CONVERT(CHAR(8), CollectedAtUtc, 112)) PERSISTED,
 
     ---- Measures (rename at [DATA SOURCE — TBD] sign-off) --------------------
     PrimaryValue        DECIMAL(18,4)   NULL,       -- e.g. price / rate / score
@@ -588,14 +592,18 @@ GO
 
 /*==============================================================================
   7. SEED — the single data source (SOW 0.1)
-  Replace the placeholders at source sign-off.
+------------------------------------------------------------------------------
+  Left commented deliberately. The Worker upserts this row from its
+  Collection:* configuration at startup, so seeding it here would just create a
+  second source of truth that drifts. The statement is kept for reference and
+  for standing up a database by hand.
 ==============================================================================*/
-INSERT INTO collect.SourceConfig
-    (SourceConfigId, Name, BaseUrl, CollectionUrl, CronSchedule, IsEnabled)
-VALUES
-    (1, N'[DATA SOURCE - TBD]', N'https://example.invalid',
-        N'https://example.invalid/data', '0 0 * * * ?', 0);
-GO
+-- INSERT INTO collect.SourceConfig
+--     (SourceConfigId, Name, BaseUrl, CollectionUrl, CollectionIntervalMinutes, IsEnabled)
+-- VALUES
+--     (1, N'[DATA SOURCE - TBD]', N'https://example.invalid',
+--         N'https://example.invalid/data', 60, 0);
+-- GO
 
 /*==============================================================================
   8. NOTES FOR PHASE 4

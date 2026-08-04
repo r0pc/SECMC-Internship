@@ -9,6 +9,11 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.10" />
     <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
+    <!-- Caches the source's robots.txt between cycles. -->
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.10" />
+    <!-- Binds and validates the Collection options section at startup. -->
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.10" />
   </ItemGroup>
 
   <ItemGroup>

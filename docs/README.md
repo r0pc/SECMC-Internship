@@ -4,7 +4,7 @@ Home for the Phase 3 and Phase 6 artifacts called for in the Scope of Work.
 
 | Document | SOW reference | Status |
 | --- | --- | --- |
-| ERD / database schema | Phase 3 deliverable | Not started |
+| [ERD / database schema](database-schema.sql) | Phase 3 deliverable | Draft — DDL written, ERD diagram pending |
 | Architecture document | Phase 3 deliverable | Not started |
 | Risk log | Phase 3 deliverable | Not started |
 | API contract (published from Swagger) | SOW 3 — Maintainability | Not started |
