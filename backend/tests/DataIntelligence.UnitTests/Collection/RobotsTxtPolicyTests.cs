@@ -208,14 +208,33 @@ public class RobotsTxtPolicyTests
         Assert.Equal(1, handler.RequestCount);
     }
 
-    [Fact]
-    public async Task RejectsARelativeUrl()
+    [Theory]
+    // A bare path. Unix parses this as an absolute file URI, so an absolute-only check passes
+    // on Windows and lets it through on Linux — this test exists to pin that difference.
+    [InlineData("/data/listings")]
+    [InlineData("data/listings")]
+    [InlineData("file:///etc/passwd")]
+    [InlineData("ftp://example.test/data")]
+    [InlineData("")]
+    public async Task RejectsAnythingThatIsNotAnAbsoluteHttpUrl(string url)
     {
         var policy = CreatePolicy("User-agent: *\nDisallow:");
 
-        var decision = await policy.EvaluateAsync("/data/listings", CancellationToken.None);
+        var decision = await policy.EvaluateAsync(url, CancellationToken.None);
 
         Assert.False(decision.IsAllowed);
+    }
+
+    [Theory]
+    [InlineData("http://example.test/data")]
+    [InlineData("https://example.test/data")]
+    public async Task AcceptsAbsoluteHttpUrls(string url)
+    {
+        var policy = CreatePolicy("User-agent: *\nDisallow:");
+
+        var decision = await policy.EvaluateAsync(url, CancellationToken.None);
+
+        Assert.True(decision.IsAllowed);
     }
 
     private sealed class StubHandler : HttpMessageHandler

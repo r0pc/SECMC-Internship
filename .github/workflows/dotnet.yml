@@ -18,19 +18,48 @@ jobs:
       run:
         working-directory: ./backend
 
+    # The integration tests exercise the real collector -> database flow (SOW 11.1), which
+    # relies on computed columns, check constraints and unique indexes that no in-memory
+    # provider implements. They need a real SQL Server, so the job brings one up rather than
+    # dropping the coverage.
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          # Throwaway credentials for an ephemeral container that is created and destroyed
+          # inside this job and is never reachable from outside it. Not a secret.
+          MSSQL_SA_PASSWORD: "CiOnly!Passw0rd"
+        ports:
+          - 1433:1433
+        # SQL Server takes ~20s to accept logins; without this the first test would race it.
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CiOnly!Passw0rd' -C -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
-        
+        # Must satisfy global.json, which pins the .NET 10 LTS SDK. The previous 8.0.x only
+        # built because the runner image happened to also ship .NET 10 - that is how a green
+        # build turns red on an unrelated image update.
+        global-json-file: global.json
+
     - name: Restore dependencies
       run: dotnet restore
-      
+
     - name: Build
       run: dotnet build --no-restore
-      
+
     - name: Test
       run: dotnet test --no-build --verbosity normal
+      env:
+        # Read by CollectionDatabaseFixture. Each test class creates and drops its own
+        # uniquely named database on this instance.
+        DATAINTELLIGENCE_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=CiOnly!Passw0rd;TrustServerCertificate=True;"

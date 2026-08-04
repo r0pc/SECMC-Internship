@@ -47,9 +47,13 @@ public sealed class RobotsTxtPolicy : IRobotsPolicy
             return RobotsDecision.Allowed("robots.txt enforcement is disabled by configuration.");
         }
 
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var target))
+        // The scheme check is not redundant. On Unix, Uri.TryCreate accepts a bare path like
+        // "/data/listings" as an absolute *file* URI, so an absolute-only test passes on Windows
+        // and silently lets a misconfigured URL through on the Linux hosts this deploys to.
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var target)
+            || (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps))
         {
-            return RobotsDecision.Disallowed($"'{url}' is not an absolute URL.");
+            return RobotsDecision.Disallowed($"'{url}' is not an absolute http or https URL.");
         }
 
         var rules = await GetRulesAsync(target, cancellationToken);
