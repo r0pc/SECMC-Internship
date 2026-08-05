@@ -23,10 +23,14 @@ HEADER_H = 40.0
 ROW_H = 21.0
 PAD_BOTTOM = 12.0
 COL_W = 340.0
-COL_X = [60.0, 460.0, 860.0, 1260.0]
+COL_X = [60.0, 460.0, 860.0]
 
-CANVAS_W = 1660.0
+CANVAS_W = 1300.0
 CANVAS_H = 1500.0
+
+# The legend sits under the subtitle rather than beside the title: at this width the
+# title would run into it.
+LEGEND_Y = 116.0
 
 # ------------------------------------------------------------------------- palette
 
@@ -114,10 +118,10 @@ class Edge:
 
 # --------------------------------------------------------------------------- model
 
-Y_COLLECT = 150.0
-Y_CORE = 500.0
-Y_SEC = 900.0
-Y_AI = 1160.0
+Y_COLLECT = 190.0
+Y_CORE = 530.0
+Y_SEC = 940.0
+Y_AI = 1190.0
 
 TABLES: list[Table] = [
     # ---- collect: ingestion -------------------------------------------------
@@ -155,46 +159,44 @@ TABLES: list[Table] = [
         Column("CompressedContent", "VARBINARY(MAX)"),
     ], note="diagnostic; purge beyond ~90 days"),
 
-    # ---- core: curated ------------------------------------------------------
-    Table("SeriesCategory", "core", "SeriesCategory", COL_X[0], Y_CORE, [
-        Column("CategoryId", "INT", ("PK",)),
-        Column("ParentCategoryId", "INT", ("FK",)),
-        Column("Code", "NVARCHAR(100)", ("UQ",)),
-        Column("DisplayName", "NVARCHAR(200)"),
-        Column("SortOrder", "SMALLINT"),
-    ], note="self-referencing: CPI item hierarchy"),
-
-    Table("Series", "core", "Series", COL_X[1], Y_CORE, [
-        Column("SeriesId", "INT", ("PK",)),
-        Column("DataSourceId", "TINYINT", ("FK", "UQ")),
-        Column("SeriesCode", "NVARCHAR(100)", ("UQ",)),
-        Column("CategoryId", "INT", ("FK",)),
-        Column("FirstSeenRunId", "BIGINT", ("FK",)),
-        Column("Title", "NVARCHAR(400)"),
-        Column("Unit", "NVARCHAR(60)"),
-        Column("Frequency", "VARCHAR(20)"),
-        Column("SeasonalAdjustment", "VARCHAR(24)"),
-        Column("IsSourceAssignedCode", "BIT"),
-        Column("SourceFieldPath", "NVARCHAR(200)"),
-        Column("IsActive", "BIT"),
-    ], note="one measured quantity; dedup anchor (FR-3)"),
-
-    Table("Observation", "core", "Observation", COL_X[2], Y_CORE, [
-        Column("ObservationId", "BIGINT", ("PK",)),
-        Column("ReferenceDate", "DATE", ("PK", "UQ")),
-        Column("SeriesId", "INT", ("FK", "UQ")),
+    # ---- core: curated, one table per dataset -------------------------------
+    Table("CpiObservation", "core", "CpiObservation", COL_X[0], Y_CORE, [
+        Column("CpiObservationId", "BIGINT", ("PK",)),
+        Column("SeriesCode", "VARCHAR(20)"),
+        Column("ReferenceDate", "DATE"),
+        Column("ReferenceYear", "SMALLINT", ("UQ", "UQf")),
+        Column("PeriodCode", "VARCHAR(3)", ("UQ", "UQf")),
+        Column("PeriodType", "VARCHAR(10)"),
+        Column("IndexValue", "DECIMAL(12,3)"),
+        Column("Footnotes", "VARCHAR(100)"),
         Column("RevisionNumber", "SMALLINT", ("UQ",)),
-        Column("IsCurrent", "BIT", ("UQf",)),
+        Column("IsCurrent", "BIT"),
         Column("SupersededAtUtc", "DATETIME2(3)"),
-        Column("PeriodType", "VARCHAR(12)"),
-        Column("Value", "DECIMAL(28,8)"),
-        Column("SourceAnnotation", "VARCHAR(100)"),
         Column("CollectionRunId", "BIGINT", ("FK",)),
         Column("CollectedAtUtc", "DATETIME2(3)"),
         Column("RowHash", "BINARY(32)"),
-    ], note="append-only fact; bi-temporal (FR-4, FR-6)"),
+    ], note="BLS CUUR0000SA0 only; one row per (year, period)"),
 
-    Table("RejectedObservation", "core", "RejectedObservation", COL_X[3], Y_CORE, [
+    Table("SofrDailyRate", "core", "SofrDailyRate", COL_X[1], Y_CORE, [
+        Column("SofrDailyRateId", "BIGINT", ("PK",)),
+        Column("RateType", "VARCHAR(5)"),
+        Column("EffectiveDate", "DATE", ("UQ", "UQf")),
+        Column("RatePercent", "DECIMAL(9,5)"),
+        Column("Percentile1/25/75/99Percent", "DECIMAL(9,5)"),
+        Column("VolumeUsdBillions", "DECIMAL(12,3)"),
+        Column("Average30/90/180DayPercent", "DECIMAL(9,5)"),
+        Column("SofrIndexValue", "DECIMAL(20,8)"),
+        Column("RevisionIndicator", "CHAR(1)"),
+        Column("FootnoteId", "VARCHAR(20)"),
+        Column("RevisionNumber", "SMALLINT", ("UQ",)),
+        Column("IsCurrent", "BIT"),
+        Column("SupersededAtUtc", "DATETIME2(3)"),
+        Column("CollectionRunId", "BIGINT", ("FK",)),
+        Column("CollectedAtUtc", "DATETIME2(3)"),
+        Column("RowHash", "BINARY(32)"),
+    ], note="rate type SOFR only; one row per business day"),
+
+    Table("RejectedObservation", "core", "RejectedObservation", COL_X[2], Y_CORE, [
         Column("RejectedObservationId", "BIGINT", ("PK",)),
         Column("CollectionRunId", "BIGINT", ("FK",)),
         Column("SeriesCode", "NVARCHAR(100)"),
@@ -202,7 +204,7 @@ TABLES: list[Table] = [
         Column("Reason", "VARCHAR(30)"),
         Column("ReasonDetail", "NVARCHAR(1000)"),
         Column("RejectedAtUtc", "DATETIME2(3)"),
-    ], note="quarantine; early signal of schema drift"),
+    ], note="quarantine; EFFR / OBFR / TGCR / BGCR land here"),
 
     # ---- sec: identity (FR-9) ----------------------------------------------
     Table("AppUser", "sec", "AppUser", COL_X[0], Y_SEC, [
@@ -257,7 +259,7 @@ BY_KEY = {t.key: t for t in TABLES}
 def build_edges() -> list[Edge]:
     t = BY_KEY
     ds, run, raw = t["DataSource"], t["CollectionRun"], t["RawPayload"]
-    cat, ser, obs, rej = t["SeriesCategory"], t["Series"], t["Observation"], t["RejectedObservation"]
+    cpi, sofr, rej = t["CpiObservation"], t["SofrDailyRate"], t["RejectedObservation"]
     usr, ur, rol = t["AppUser"], t["UserRole"], t["Role"]
     ses, qry, fb = t["AssistantSession"], t["AssistantQuery"], t["AssistantFeedback"]
 
@@ -269,32 +271,16 @@ def build_edges() -> list[Edge]:
         Edge([ds.right(0.35), run.left(0.35)], "1 : N"),
         Edge([run.right(0.30), raw.left(0.30)], "1 : N", cascade=True),
 
-        # DataSource -> Series, down the corridor between the first two columns so it
-        # crosses nothing and stays clear of the CORE band label.
-        Edge([ds.right(0.78), (COL_X[1] - 30, ds.y + HEADER_H + (ds.h - HEADER_H) * 0.78),
-              (COL_X[1] - 30, ser.y + HEADER_H + (ser.h - HEADER_H) * 0.14),
-              ser.left(0.14)], "1 : N", label_offset=(-20, 0)),
-
-        Edge([cat.right(0.30), ser.left(0.30)], "1 : N"),
-
-        # CollectionRun -> Series / Observation / RejectedObservation, fanned out along
-        # the bus so the three routes stay individually traceable.
-        Edge([run.bottom(0.30), (run.x + run.w * 0.30, bus), (ser.x + ser.w * 0.55, bus),
-              ser.top(0.55)], "1 : N", label_offset=(6, -6)),
-        Edge([run.bottom(0.62), (run.x + run.w * 0.62, bus - 16),
-              (obs.x + obs.w * 0.62, bus - 16), obs.top(0.62)], "1 : N",
-             label_offset=(6, -6)),
-        Edge([run.bottom(0.88), (run.x + run.w * 0.88, bus - 32),
-              (rej.x + rej.w * 0.50, bus - 32), rej.top(0.50)], "1 : N",
+        # CollectionRun is the only parent the core tables have: every stored row says
+        # which attempt produced it. Fanned out along the bus so the three routes stay
+        # individually traceable.
+        Edge([run.bottom(0.22), (run.x + run.w * 0.22, bus - 30),
+              (cpi.x + cpi.w * 0.55, bus - 30), cpi.top(0.55)], "1 : N",
+             label_offset=(-6, -6)),
+        Edge([run.bottom(0.55), sofr.top(0.55)], "1 : N", label_offset=(20, -6)),
+        Edge([run.bottom(0.86), (run.x + run.w * 0.86, bus - 30),
+              (rej.x + rej.w * 0.45, bus - 30), rej.top(0.45)], "1 : N",
              cascade=True, label_offset=(6, -6)),
-
-        Edge([ser.right(0.42), obs.left(0.42)], "1 : N"),
-
-        # SeriesCategory self-reference, looped above the card's right half: the left
-        # margin would push the loop and its label off the canvas.
-        Edge([cat.top(0.58), (cat.x + cat.w * 0.58, cat.y - 22),
-              (cat.x + cat.w * 0.86, cat.y - 22), cat.top(0.86)],
-             "parent", label_offset=(0, -6)),
 
         # sec
         Edge([usr.right(0.30), ur.left(0.30)], "1 : N", cascade=True),
@@ -316,11 +302,11 @@ def build_edges() -> list[Edge]:
 EDGES = build_edges()
 
 TITLE = "Data Intelligence Platform - Entity Relationship Diagram"
-SUBTITLE = ("Phase 3 deliverable (SOW 6).  Sources: US Consumer Price Index (BLS) and "
-            "Secured Overnight Financing Rate (NY Fed).")
+SUBTITLE = ("Phase 3 deliverable (SOW 6).  CPI series CUUR0000SA0 (BLS) and the Secured "
+            "Overnight Financing Rate (NY Fed), one table each.")
 FOOTER = ("Generated from docs/erd/generate_erd.py - regenerate after any schema change.  "
-          "Mirrors docs/database-schema.sql.  "
-          "The analytics.* read models are views over core.* and are not shown.")
+          "Mirrors docs/database-schema.sql.  SofrDailyRate's four percentile and three "
+          "average columns are shown collapsed.  analytics.* is views over core.*, not shown.")
 
 LEGEND = [
     ("PK", "Primary key"),
@@ -365,7 +351,7 @@ def render_svg() -> str:
                  f'{esc(TITLE)}</text>')
     parts.append(f'<text x="60" y="88" font-size="13.5" fill="{MUTED}">{esc(SUBTITLE)}</text>')
 
-    # Legend, right-aligned against the title block.
+    # Legend, right-aligned under the title block.
     lx = CANVAS_W - 60
     seg = 0.0
     for tag, meaning in reversed(LEGEND):
@@ -373,9 +359,9 @@ def render_svg() -> str:
         seg += label_w + 46
     x = lx - seg
     for tag, meaning in LEGEND:
-        parts.append(svg_tag_pill(x, 62, tag, INK))
+        parts.append(svg_tag_pill(x, LEGEND_Y, tag, INK))
         tw = 10 + len(tag) * 5.6
-        parts.append(f'<text x="{x + tw + 7:.1f}" y="{66:.1f}" font-size="11.5" '
+        parts.append(f'<text x="{x + tw + 7:.1f}" y="{LEGEND_Y + 4:.1f}" font-size="11.5" '
                      f'fill="{MUTED}">{esc(meaning)}</text>')
         x += tw + 7 + len(meaning) * 6.4 + 24
 
@@ -486,13 +472,13 @@ def render_pdf(path: str) -> None:
     for tag, meaning in LEGEND:
         tw = 10 + len(tag) * 5.6
         c.setFillColor(HexColor(INK), alpha=0.13)
-        c.roundRect(x, Y(62) - 8.5, tw, 12, 3, stroke=0, fill=1)
+        c.roundRect(x, Y(LEGEND_Y) - 8.5, tw, 12, 3, stroke=0, fill=1)
         c.setFillColor(HexColor(INK), alpha=1)
         c.setFont("Helvetica-Bold", 8.5)
-        c.drawCentredString(x + tw / 2, Y(62) - 5.5, tag)
+        c.drawCentredString(x + tw / 2, Y(LEGEND_Y) - 5.5, tag)
         c.setFont("Helvetica", 11.5)
         c.setFillColor(HexColor(MUTED))
-        c.drawString(x + tw + 7, Y(66) + 0.5, meaning)
+        c.drawString(x + tw + 7, Y(LEGEND_Y + 4) + 0.5, meaning)
         x += tw + 7 + len(meaning) * 6.4 + 24
 
     # Edges
