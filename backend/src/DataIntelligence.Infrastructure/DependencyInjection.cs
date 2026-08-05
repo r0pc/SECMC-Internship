@@ -1,4 +1,5 @@
 using DataIntelligence.Core.Interfaces;
+using DataIntelligence.Infrastructure.Analytics;
 using DataIntelligence.Infrastructure.Collection;
 using DataIntelligence.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -42,6 +43,22 @@ public static class DependencyInjection
                 sql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(10),
                     errorNumbersToAdd: null);
             }));
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers the read side the dashboards query (FR-7, FR-10). Separate from
+    /// <see cref="AddCollection"/> because the Worker writes data and never serves it.
+    /// </summary>
+    public static IServiceCollection AddAnalytics(this IServiceCollection services)
+    {
+        // Both services take a TimeProvider so "last 30 days" and "12 months back from today"
+        // are fixable in a test rather than depending on the wall clock.
+        services.TryAddSingleton(TimeProvider.System);
+
+        services.AddScoped<ICatalogService, CatalogService>();
+        services.AddScoped<IDashboardQueryService, DashboardQueryService>();
 
         return services;
     }

@@ -3,9 +3,19 @@
 ## Project Overview
 
 This repository contains the Data Intelligence Platform: a system that automatically
-collects data from a designated online source on an hourly schedule, stores it in
-Microsoft SQL Server, and exposes it through analytics dashboards and a natural-language
-AI query assistant.
+collects US economic data on an hourly schedule, stores it in Microsoft SQL Server, and
+exposes it through analytics dashboards and a natural-language AI query assistant.
+
+Two publishers were designated under SOW 0.1, and ten series are tracked between them:
+
+| Source | Series | Cadence |
+| --- | --- | --- |
+| **Consumer Price Index** — U.S. Bureau of Labor Statistics | 4: all-items and core CPI, each seasonally adjusted and not | Monthly |
+| **Secured Overnight Financing Rate** — Federal Reserve Bank of New York | 6: the rate, transaction volume, and four percentiles | Business-daily |
+
+Both publish official JSON APIs, so the platform consumes those rather than scraping HTML
+(SOW 9: "prefer an official API if one exists"). The full catalogue, units, and history
+windows are in [docs/README.md](docs/README.md#what-the-platform-stores).
 
 The approved blueprint is
 [Scope_of_Work_Data_Intelligence_Platform.pdf](Scope_of_Work_Data_Intelligence_Platform.pdf)
@@ -72,12 +82,26 @@ Per-side detail lives in [backend/README.md](backend/README.md) and
 
 ## Current Status
 
-Project scaffolding only. Both applications build and run; no functional requirement is
-implemented yet. Two SOW items remain open before Phase 3 requirements gathering
-(SOW 0.1):
+The data source gate (SOW 0.1) is closed — CPI and SOFR are signed off — and the collection
+pipeline is running against both live APIs.
 
-- The designated data source is still `[DATA SOURCE — TBD]`.
-- Schema design, architecture doc, and risk log are Phase 3 deliverables.
+| Area | State |
+| --- | --- |
+| Database schema + ERD | Delivered. DDL verified against SQL Server and proven identical to the EF migration |
+| Data collection (FR-1 – FR-4, FR-8) | Implemented. Hourly, per source, with failure categories, deduplication and revision history |
+| Read API (FR-7, FR-10 – FR-12) | Dashboard, catalogue, observation and collection-log endpoints |
+| Authentication (FR-9) | Not started — every endpoint is currently anonymous |
+| AI query assistant (FR-13 – FR-16) | Not started. Schema and audit tables exist |
+| Frontend dashboards | Not started |
+
+Known gaps worth tracking:
+
+- The `analytics.*` views and least-privilege roles exist only in
+  [docs/database-schema.sql](docs/database-schema.sql), not in the EF migration, so a
+  migration-built database lacks them.
+- The Scope of Work still describes a single scraped source; it needs refreshing against the
+  signed-off API sources.
+- Architecture document and risk log (Phase 3 deliverables) are not started.
 
 ## Team
 

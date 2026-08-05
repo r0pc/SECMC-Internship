@@ -1,6 +1,30 @@
+using System.Text.Json.Serialization;
+using DataIntelligence.Api.Endpoints;
+using DataIntelligence.Api.Json;
+using DataIntelligence.Infrastructure;
+using DataIntelligence.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
+
+// Throws at startup when the connection string is missing, rather than at the first request.
+builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddAnalytics();
+
+// One error shape for the whole API (RFC 9457), including unhandled exceptions.
+builder.Services.AddProblemDetails();
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    // Enums as their names. The frontend gets "Monthly" rather than 3, and the OpenAPI document
+    // lists the permitted values — which is what lets its generated types be useful.
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+
+    // Timestamps with an explicit Z. See UtcDateTimeConverter for why this is not optional.
+    options.SerializerOptions.Converters.Add(new UtcDateTimeConverter());
+});
 
 // The frontend is deployed independently of the API (SOW 4.2), so it needs an explicit origin allowance.
 const string FrontendCorsPolicy = "FrontendCorsPolicy";
@@ -11,9 +35,12 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod());
 });
 
-// TODO (Phase 4): register DbContext, collection services, AI orchestration, and authentication.
+// TODO (Phase 4): register AI orchestration (FR-13 - FR-16) and authentication (FR-9).
 
 var app = builder.Build();
+
+app.UseExceptionHandler();
+app.UseStatusCodePages();
 
 if (app.Environment.IsDevelopment())
 {
@@ -26,9 +53,23 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseCors(FrontendCorsPolicy);
 
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+// Liveness plus database reachability. A process that is up but cannot reach SQL Server serves
+// nothing but errors, so reporting it healthy would tell a load balancer exactly the wrong thing.
+app.MapGet("/health", async (DataIntelligenceDbContext db, CancellationToken cancellationToken) =>
+    {
+        var databaseReachable = await db.Database.CanConnectAsync(cancellationToken);
 
-// TODO (Phase 4): map dashboard, reporting, and AI assistant endpoints.
+        return databaseReachable
+            ? Results.Ok(new { status = "ok", database = "ok" })
+            : Results.Json(
+                new { status = "degraded", database = "unreachable" },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+    })
+    .WithTags("Health")
+    .WithName("GetHealth")
+    .WithSummary("Liveness and database reachability.");
+
+app.MapDataIntelligenceApi();
 
 app.Run();
 
