@@ -49,6 +49,4 @@ public class DataSource
     public bool IsEnabled { get; set; } = true;
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
-
-    public ICollection<Series> Series { get; set; } = [];
 }

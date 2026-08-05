@@ -2,13 +2,14 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using DataIntelligence.Core.Analytics;
+using DataIntelligence.Core.Collection;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.IntegrationTests.Collection;
 using DataIntelligence.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DataIntelligence.IntegrationTests.Api;
@@ -22,20 +23,21 @@ namespace DataIntelligence.IntegrationTests.Api;
 /// aggregates by month has to be asserted against known bucket boundaries, and a test whose
 /// expected values move with the calendar cannot do that.
 /// <para>
-/// Series and categories come from the migration's seed data, so the tests exercise the same
-/// reference rows a real deployment has.
+/// The sources come from the migration's seed data, so the tests exercise the same reference rows
+/// a real deployment has. The series themselves are <c>SeriesCatalog</c> entries — fixed in code,
+/// not rows — so there is nothing to seed for them.
 /// </para>
 /// </remarks>
 public sealed class DashboardApiFixture : IAsyncLifetime
 {
-    /// <summary>CPI-U, all items, seasonally adjusted — monthly.</summary>
-    public const int MonthlySeriesId = 2;
+    /// <summary>The CPI series: monthly, plus the annual and semiannual rows BLS publishes.</summary>
+    public const string CpiKey = SeriesCatalog.CpiKey;
 
-    /// <summary>CPI-U, all items less food and energy, NSA — the series the update tests mutate.</summary>
-    public const int MutableSeriesId = 3;
+    /// <summary>The SOFR rate: business-daily.</summary>
+    public const string SofrKey = SeriesCatalog.SofrKey;
 
-    /// <summary>SOFR overnight rate — business-daily.</summary>
-    public const int DailySeriesId = 5;
+    /// <summary>SOFR transaction volume — a different measure of the same rows.</summary>
+    public const string SofrVolumeKey = "sofr.volume";
 
     /// <summary>First month of the seeded monthly history.</summary>
     public static readonly DateOnly MonthlyStart = new(2024, 1, 1);
@@ -49,8 +51,17 @@ public sealed class DashboardApiFixture : IAsyncLifetime
     public const decimal RevisedOriginalValue = 311.5m;
     public const decimal RevisedCurrentValue = 312.0m;
 
-    /// <summary>An annual-average row, on a reference date no monthly row occupies.</summary>
-    public static readonly DateOnly AnnualReferenceDate = new(2023, 1, 1);
+    /// <summary>
+    /// The annual average for 2024, dated 1 January — the same reference date as that year's
+    /// January figure.
+    /// </summary>
+    /// <remarks>
+    /// Seeded deliberately alongside the month it collides with. Under the previous single-fact-table
+    /// design the two could not coexist, because the current-vintage index was keyed on
+    /// (series, date) without the period. Keying on (year, period code) is what makes this row
+    /// storable, so seeding it here is the test that the fix holds.
+    /// </remarks>
+    public static readonly short AnnualYear = 2024;
 
     public const decimal AnnualValue = 299.9m;
 
@@ -75,17 +86,17 @@ public sealed class DashboardApiFixture : IAsyncLifetime
     /// <summary>When the most recent — and failed — run started.</summary>
     public static readonly DateTime FailedRunUtc = AnchorUtc.AddHours(-1);
 
-    /// <summary>Business days seeded for the daily series, with their values.</summary>
-    public static readonly (DateOnly Date, decimal Value)[] DailyPoints =
+    /// <summary>Business days seeded for SOFR, with their rate and volume.</summary>
+    public static readonly (DateOnly Date, decimal Rate, decimal Volume)[] DailyPoints =
     [
-        (new DateOnly(2025, 1, 2), 5.00m),
-        (new DateOnly(2025, 1, 3), 5.10m),
-        (new DateOnly(2025, 1, 6), 5.20m),
-        (new DateOnly(2025, 1, 7), 5.30m),
-        (new DateOnly(2025, 1, 8), 5.40m),
-        (new DateOnly(2025, 2, 3), 4.00m),
-        (new DateOnly(2025, 2, 4), 4.50m),
-        (new DateOnly(2025, 2, 5), 5.00m)
+        (new DateOnly(2025, 1, 2), 5.00m, 1000m),
+        (new DateOnly(2025, 1, 3), 5.10m, 1010m),
+        (new DateOnly(2025, 1, 6), 5.20m, 1020m),
+        (new DateOnly(2025, 1, 7), 5.30m, 1030m),
+        (new DateOnly(2025, 1, 8), 5.40m, 1040m),
+        (new DateOnly(2025, 2, 3), 4.00m, 2000m),
+        (new DateOnly(2025, 2, 4), 4.50m, 2010m),
+        (new DateOnly(2025, 2, 5), 5.00m, 2020m)
     ];
 
     /// <summary>Double underscore is the configuration-section separator for environment variables.</summary>
@@ -108,7 +119,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
 
     public DataIntelligenceDbContext CreateContext() => _database.CreateContext();
 
-    /// <summary>The value seeded for the nth month of the monthly series.</summary>
+    /// <summary>The value seeded for the nth month of the CPI history.</summary>
     public static decimal MonthlyValue(int monthIndex) => 300m + (0.5m * monthIndex);
 
     public async Task InitializeAsync()
@@ -158,34 +169,31 @@ public sealed class DashboardApiFixture : IAsyncLifetime
         // Monthly history, all first vintages.
         for (var month = 0; month < MonthlyCount; month++)
         {
-            db.Observations.Add(NewObservation(
-                MonthlySeriesId,
-                MonthlyStart.AddMonths(month),
+            var referenceDate = MonthlyStart.AddMonths(month);
+
+            db.CpiObservations.Add(NewCpi(
+                referenceDate,
+                $"M{referenceDate.Month:00}",
                 PeriodType.Month,
                 MonthlyValue(month),
                 succeededFirst.CollectionRunId,
                 FirstCollectionUtc));
         }
 
-        // The annual average, in a year the monthly history does not cover. Real BLS M13 rows are
-        // dated 1 January, and UQ_Observation_Current is keyed on (SeriesId, ReferenceDate)
-        // without the period type — so an annual row and that year's January row cannot both be
-        // current. Seeding it in an uncovered year is what lets the period filter be tested at
-        // all; see SeriesPeriods.NativePeriodType.
-        db.Observations.Add(NewObservation(
-            MonthlySeriesId,
-            AnnualReferenceDate,
+        // The annual average, sharing 1 January 2024 with that year's monthly figure.
+        db.CpiObservations.Add(NewCpi(
+            new DateOnly(AnnualYear, 1, 1),
+            CpiPeriod.AnnualCode,
             PeriodType.Annual,
             AnnualValue,
             succeededFirst.CollectionRunId,
-            FirstCollectionUtc,
-            sourcePeriodCode: "M13"));
+            FirstCollectionUtc));
 
         // The revised month, in the order the unique index requires: the superseded vintage
         // first, then the current one.
-        var superseded = NewObservation(
-            MonthlySeriesId,
+        var superseded = NewCpi(
             RevisedMonth,
+            $"M{RevisedMonth.Month:00}",
             PeriodType.Month,
             RevisedOriginalValue,
             succeededFirst.CollectionRunId,
@@ -194,21 +202,20 @@ public sealed class DashboardApiFixture : IAsyncLifetime
         superseded.IsCurrent = false;
         superseded.SupersededAtUtc = RevisionCollectionUtc;
 
-        db.Observations.Add(superseded);
+        db.CpiObservations.Add(superseded);
 
-        db.Observations.Add(NewObservation(
-            MonthlySeriesId,
+        db.CpiObservations.Add(NewCpi(
             RevisedMonth,
+            $"M{RevisedMonth.Month:00}",
             PeriodType.Month,
             RevisedCurrentValue,
             succeededSecond.CollectionRunId,
             RevisionCollectionUtc,
             revisionNumber: 1));
 
-        foreach (var (date, value) in DailyPoints)
+        foreach (var (date, rate, volume) in DailyPoints)
         {
-            db.Observations.Add(NewObservation(
-                DailySeriesId, date, PeriodType.Day, value, sofrRun.CollectionRunId, FirstCollectionUtc));
+            db.SofrDailyRates.Add(NewSofr(date, rate, volume, sofrRun.CollectionRunId, FirstCollectionUtc));
         }
 
         await db.SaveChangesAsync();
@@ -238,29 +245,51 @@ public sealed class DashboardApiFixture : IAsyncLifetime
     private static DateTime TruncateToSecond(DateTime value) =>
         new(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond), value.Kind);
 
-    private static Observation NewObservation(
-        int seriesId,
+    private static CpiObservation NewCpi(
         DateOnly referenceDate,
+        string periodCode,
         PeriodType periodType,
-        decimal value,
+        decimal indexValue,
         long collectionRunId,
         DateTime collectedAtUtc,
-        short revisionNumber = 0,
-        string? sourcePeriodCode = null) =>
+        short revisionNumber = 0) =>
         new()
         {
-            SeriesId = seriesId,
             ReferenceDate = referenceDate,
+            ReferenceYear = (short)referenceDate.Year,
+            PeriodCode = periodCode,
             PeriodType = periodType,
-            SourcePeriodCode = sourcePeriodCode,
+            IndexValue = indexValue,
             RevisionNumber = revisionNumber,
             IsCurrent = true,
-            Value = value,
             CollectionRunId = collectionRunId,
             CollectedAtUtc = collectedAtUtc,
-            RowHash = SHA256.HashData(
-                Encoding.UTF8.GetBytes($"{seriesId}|{referenceDate:O}|{value}|{revisionNumber}"))
+            RowHash = Hash($"cpi|{referenceDate:O}|{periodCode}|{indexValue}|{revisionNumber}")
         };
+
+    private static SofrDailyRate NewSofr(
+        DateOnly effectiveDate,
+        decimal rate,
+        decimal volume,
+        long collectionRunId,
+        DateTime collectedAtUtc) =>
+        new()
+        {
+            EffectiveDate = effectiveDate,
+            RatePercent = rate,
+            Percentile1Percent = rate - 0.05m,
+            Percentile25Percent = rate - 0.02m,
+            Percentile75Percent = rate + 0.02m,
+            Percentile99Percent = rate + 0.05m,
+            VolumeUsdBillions = volume,
+            RevisionNumber = 0,
+            IsCurrent = true,
+            CollectionRunId = collectionRunId,
+            CollectedAtUtc = collectedAtUtc,
+            RowHash = Hash($"sofr|{effectiveDate:O}|{rate}|{volume}")
+        };
+
+    private static byte[] Hash(string value) => SHA256.HashData(Encoding.UTF8.GetBytes(value));
 
     public async Task DisposeAsync()
     {

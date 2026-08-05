@@ -57,9 +57,14 @@ public enum RejectionReason
     MissingField,
     TypeMismatch,
     OutOfRange,
-    /// <summary>The publisher returned a series this platform does not track.</summary>
+    /// <summary>
+    /// The publisher returned a series or rate this platform does not store. The steady case
+    /// rather than the exceptional one: the NY Fed payload carries EFFR, OBFR, TGCR and BGCR
+    /// alongside SOFR, and all four land here every business day. Logged rather than dropped so
+    /// the exclusion is visible in the data instead of invisible in the code.
+    /// </summary>
     UnknownSeries,
-    /// <summary>Two records in one payload claimed the same series and period.</summary>
+    /// <summary>Two records in one payload claimed the same period.</summary>
     DuplicatePeriod,
     /// <summary>The period token could not be turned into a reference date.</summary>
     UnparseablePeriod,
@@ -68,24 +73,27 @@ public enum RejectionReason
 }
 
 /// <summary>
-/// The length of the period an observation describes.
+/// The length of the period a CPI figure describes.
 /// </summary>
 /// <remarks>
-/// Not derivable from the series' frequency: a BLS monthly series also publishes M13 (annual
-/// average) and S01/S02 (semiannual) rows in the same response, and averaging those into a
-/// monthly trend would double-count the year.
+/// Persisted to <c>core.CpiObservation.PeriodType</c> as a string, so renaming a member is a
+/// breaking schema change. Not derivable from the series' frequency: BLS publishes M13 (the
+/// annual average) and S01/S02 (the halves) in the same monthly response, and those are averages
+/// <em>of</em> the monthly figures — charting or aggregating them together counts the year twice
+/// over. SOFR has no equivalent: every row is one business day, so its table carries no such
+/// column.
 /// </remarks>
 public enum PeriodType
 {
-    Day,
-    Week,
     Month,
-    Quarter,
     Semiannual,
     Annual
 }
 
-/// <summary>How often the publisher releases a series.</summary>
+/// <summary>
+/// How often the publisher releases a series. Presentation metadata on the catalogue rather than
+/// a stored column — each dataset's table has exactly one frequency by construction.
+/// </summary>
 public enum SeriesFrequency
 {
     BusinessDaily,
@@ -106,6 +114,33 @@ public enum SeasonalAdjustment
     SeasonallyAdjusted,
     NotSeasonallyAdjusted,
     NotApplicable
+}
+
+/// <summary>The two datasets the platform stores, one table each.</summary>
+public enum Dataset
+{
+    /// <summary>BLS series CUUR0000SA0 — <c>core.CpiObservation</c>.</summary>
+    Cpi,
+
+    /// <summary>The Secured Overnight Financing Rate — <c>core.SofrDailyRate</c>.</summary>
+    Sofr
+}
+
+/// <summary>
+/// Which column of a <c>core.SofrDailyRate</c> row a chartable series reads.
+/// </summary>
+/// <remarks>
+/// A day's six measures are columns on one row, not six rows. Charting still wants them
+/// individually, so the read side names the measure and projects the column.
+/// </remarks>
+public enum SofrMeasure
+{
+    Rate,
+    Percentile1,
+    Percentile25,
+    Percentile75,
+    Percentile99,
+    Volume
 }
 
 /// <summary>How a source is retrieved.</summary>

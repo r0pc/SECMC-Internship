@@ -1,3 +1,4 @@
+using DataIntelligence.Core.Collection;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
@@ -12,15 +13,16 @@ namespace DataIntelligence.IntegrationTests.Collection;
 
 /// <summary>
 /// Collector → database flow against real SQL Server (SOW 11.1). The fetcher is stubbed so the
-/// tests are deterministic and never call the live publishers; the adapter, validator, runner
-/// and schema underneath are all production code.
+/// tests are deterministic and never call the live publishers; the adapter contract, validator,
+/// runner, dataset writers and schema underneath are all production code.
 /// </summary>
 public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
 {
     private static int _slotCounter;
 
     private readonly CollectionDatabaseFixture _fixture;
-    private readonly string _seriesCode;
+    private readonly DateOnly _sofrDate;
+    private readonly short _cpiYear;
     private readonly DateTime _cycle1;
     private readonly DateTime _cycle2;
 
@@ -36,47 +38,38 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
             throw new InvalidOperationException(fixture.UnavailableReason);
         }
 
-        // The class shares one database, so each test gets its own series and schedule slot;
-        // otherwise tests would collide on UQ_Series_Code and on attempt numbering.
+        // The class shares one database, and each dataset is now a single pinned table, so
+        // isolation comes from the period rather than from a per-test series: each test writes
+        // its own business day and its own CPI year, and gets its own schedule slot so attempt
+        // numbering cannot collide either.
         var slot = Interlocked.Increment(ref _slotCounter);
-        _seriesCode = $"TEST_{slot:D4}";
 
-        // Collection time must sit after the observed period, or the validator correctly
-        // rejects every record as a future publication.
+        _sofrDate = new DateOnly(2026, 1, 1).AddDays(slot);
+        _cpiYear = (short)(1950 + slot);
+
+        // Collection time must sit after the observed period, or the validator correctly rejects
+        // every record as a future publication.
         _cycle1 = new DateTime(2026, 8, 4, 0, 0, 0, DateTimeKind.Utc).AddHours(slot * 24);
         _cycle2 = _cycle1.AddHours(1);
-
-        SeedSeries();
     }
 
-    private void SeedSeries()
+    private SofrDailyRateRecord Sofr(decimal rate, string? revisionIndicator = null) => new()
     {
-        using var db = _fixture.CreateContext();
+        EffectiveDate = _sofrDate,
+        RatePercent = rate,
+        Percentile1Percent = rate - 0.05m,
+        Percentile99Percent = rate + 0.05m,
+        VolumeUsdBillions = 3000m,
+        RevisionIndicator = revisionIndicator
+    };
 
-        db.Series.Add(new Series
-        {
-            DataSourceId = DataSource.NyFedSofrId,
-            SeriesCode = _seriesCode,
-            IsSourceAssignedCode = true,
-            Title = $"Test series {_seriesCode}",
-            Unit = "Percent per annum",
-            Frequency = SeriesFrequency.BusinessDaily,
-            SeasonalAdjustment = SeasonalAdjustment.NotApplicable
-        });
-
-        db.SaveChanges();
-    }
-
-    private static readonly DateOnly Period = new(2026, 6, 1);
-
-    private ObservationRecord Record(decimal value, string? annotation = null) => new()
+    private CpiObservationRecord Cpi(string periodCode, decimal indexValue) => new()
     {
-        SeriesCode = _seriesCode,
-        ReferenceDate = Period,
-        PeriodType = PeriodType.Month,
-        SourcePeriodCode = "M06",
-        Value = value,
-        SourceAnnotation = annotation
+        ReferenceYear = _cpiYear,
+        PeriodCode = periodCode,
+        PeriodType = CpiPeriod.PeriodTypeFor(periodCode),
+        ReferenceDate = CpiPeriod.ReferenceDateFor(_cpiYear, periodCode),
+        IndexValue = indexValue
     };
 
     private int _payloadSequence;
@@ -94,140 +87,212 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
         ParseResult? parseResult = null,
         FetchResult? forcedFailure = null,
         string? payload = null,
-        CollectionTriggerType trigger = CollectionTriggerType.Scheduled)
+        CollectionTriggerType trigger = CollectionTriggerType.Scheduled,
+        string sourceCode = DataSource.NyFedSofrCode)
     {
-        payload ??= $$"""{"series":"{{_seriesCode}}","seq":{{++_payloadSequence}}}""";
+        payload ??= $$"""{"slot":"{{_sofrDate:yyyy-MM-dd}}","seq":{{++_payloadSequence}}}""";
 
         await using var db = _fixture.CreateContext();
 
         var runner = new CollectionRunner(
             db,
             new StubFetcher(payload, forcedFailure),
-            [new StubAdapter(parseResult ?? new ParseResult([], [], 0))],
+            [new StubAdapter(sourceCode, parseResult ?? new ParseResult([], [], 0))],
+            [
+                new CpiObservationWriter(db, NullLogger<CpiObservationWriter>.Instance),
+                new SofrDailyRateWriter(db, NullLogger<SofrDailyRateWriter>.Instance)
+            ],
             new AllowAllRobotsPolicy(),
             Options.Create(new CollectionOptions()),
             new FixedTimeProvider(scheduledFor),
             NullLogger<CollectionRunner>.Instance);
 
-        return await runner.RunAsync(
-            DataSource.NyFedSofrCode, scheduledFor, trigger, CancellationToken.None);
+        return await runner.RunAsync(sourceCode, scheduledFor, trigger, CancellationToken.None);
     }
 
+    private Task<CollectionSummary> RunCpiAsync(DateTime scheduledFor, params CpiObservationRecord[] records) =>
+        RunAsync(scheduledFor,
+            new ParseResult(records, [], records.Length),
+            sourceCode: DataSource.BlsCpiCode);
+
     [Fact]
-    public async Task FirstCycle_StoresObservationAsRevisionZero()
+    public async Task FirstCycle_StoresTheDayAsRevisionZero()
     {
-        var summary = await RunAsync(_cycle1,
-            new ParseResult([Record(333.952m)], [], 1));
+        var summary = await RunAsync(_cycle1, new ParseResult([Sofr(3.65m)], [], 1));
 
         Assert.Equal(CollectionRunStatus.Succeeded, summary.Status);
         Assert.Equal(1, summary.Inserted);
 
         await using var verify = _fixture.CreateContext();
-        var observation = await verify.Observations
-            .SingleAsync(o => o.Series!.SeriesCode == _seriesCode);
+        var row = await verify.SofrDailyRates.SingleAsync(r => r.EffectiveDate == _sofrDate);
 
-        Assert.Equal(333.952m, observation.Value);
-        Assert.Equal(0, observation.RevisionNumber);
-        Assert.True(observation.IsCurrent);
-        Assert.Null(observation.SupersededAtUtc);
+        Assert.Equal(3.65m, row.RatePercent);
+        Assert.Equal(0, row.RevisionNumber);
+        Assert.True(row.IsCurrent);
+        Assert.Null(row.SupersededAtUtc);
 
-        // FR-6: the collection timestamp, and the key SQL Server computes from the period.
-        Assert.Equal(20260601, observation.ReferenceDateKey);
-        Assert.Equal(_cycle1, observation.CollectedAtUtc);
+        // The measures land as columns of that one row, not as separate rows.
+        Assert.Equal(3.60m, row.Percentile1Percent);
+        Assert.Equal(3.70m, row.Percentile99Percent);
+        Assert.Equal(3000m, row.VolumeUsdBillions);
+
+        // FR-6: the collection timestamp, distinct from the day the rate describes.
+        Assert.Equal(_cycle1, row.CollectedAtUtc);
     }
 
     [Fact]
-    public async Task ReissuingTheSameValue_WritesNothing()
+    public async Task ReissuingTheSameDay_WritesNothing()
     {
-        // FR-3. Polling monthly data hourly means this is the overwhelmingly common path.
-        await RunAsync(_cycle1, new ParseResult([Record(333.952m)], [], 1));
+        // FR-3. Polling business-daily data hourly means this is the common path.
+        await RunAsync(_cycle1, new ParseResult([Sofr(3.65m)], [], 1));
 
-        var summary = await RunAsync(_cycle2, new ParseResult([Record(333.952m)], [], 1));
+        var summary = await RunAsync(_cycle2, new ParseResult([Sofr(3.65m)], [], 1));
 
         Assert.Equal(0, summary.Inserted);
         Assert.Equal(0, summary.Revised);
         Assert.Equal(1, summary.Unchanged);
 
         await using var verify = _fixture.CreateContext();
-        Assert.Equal(1, await verify.Observations.CountAsync(o => o.Series!.SeriesCode == _seriesCode));
+        Assert.Equal(1, await verify.SofrDailyRates.CountAsync(r => r.EffectiveDate == _sofrDate));
     }
 
     [Fact]
-    public async Task ARevisedValue_SupersedesTheOldVintageAndKeepsIt()
+    public async Task ARevisedRate_SupersedesTheOldVintageAndKeepsIt()
     {
         // FR-4: history is retained, never overwritten.
-        await RunAsync(_cycle1, new ParseResult([Record(333.952m)], [], 1));
+        await RunAsync(_cycle1, new ParseResult([Sofr(3.65m)], [], 1));
 
-        var summary = await RunAsync(_cycle2, new ParseResult([Record(334.100m, "R")], [], 1));
+        var summary = await RunAsync(_cycle2, new ParseResult([Sofr(3.68m, "Y")], [], 1));
 
         Assert.Equal(1, summary.Revised);
         Assert.Equal(0, summary.Inserted);
 
         await using var verify = _fixture.CreateContext();
-        var vintages = await verify.Observations
-            .Where(o => o.Series!.SeriesCode == _seriesCode)
-            .OrderBy(o => o.RevisionNumber)
+        var vintages = await verify.SofrDailyRates
+            .Where(r => r.EffectiveDate == _sofrDate)
+            .OrderBy(r => r.RevisionNumber)
             .ToListAsync();
 
         Assert.Equal(2, vintages.Count);
 
-        Assert.Equal(333.952m, vintages[0].Value);
+        Assert.Equal(3.65m, vintages[0].RatePercent);
         Assert.False(vintages[0].IsCurrent);
         Assert.NotNull(vintages[0].SupersededAtUtc);
 
-        Assert.Equal(334.100m, vintages[1].Value);
+        Assert.Equal(3.68m, vintages[1].RatePercent);
         Assert.Equal(1, vintages[1].RevisionNumber);
         Assert.True(vintages[1].IsCurrent);
-        Assert.Equal("R", vintages[1].SourceAnnotation);
+        Assert.Equal("Y", vintages[1].RevisionIndicator);
+    }
+
+    [Fact]
+    public async Task AVolumeOnlyCorrection_IsStillARevision()
+    {
+        // The reason the hash covers every measure: a restatement that moved only the volume is
+        // still a restatement, and hashing the rate alone would file it as unchanged.
+        await RunAsync(_cycle1, new ParseResult([Sofr(3.65m)], [], 1));
+
+        var corrected = Sofr(3.65m) with { VolumeUsdBillions = 3100m };
+
+        var summary = await RunAsync(_cycle2, new ParseResult([corrected], [], 1));
+
+        Assert.Equal(1, summary.Revised);
     }
 
     [Fact]
     public async Task ExactlyOneVintageStaysCurrentAcrossRepeatedRevisions()
     {
-        // The integrity rule the dashboards depend on: UQ_Observation_Current would reject a
+        // The integrity rule the dashboards depend on: UQ_SofrDailyRate_Current would reject a
         // second live vintage outright, so this proves the supersede-then-append order holds.
-        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1));
-        await RunAsync(_cycle2, new ParseResult([Record(2m)], [], 1));
-        await RunAsync(_cycle2.AddHours(1), new ParseResult([Record(3m)], [], 1));
+        await RunAsync(_cycle1, new ParseResult([Sofr(1m)], [], 1));
+        await RunAsync(_cycle2, new ParseResult([Sofr(2m)], [], 1));
+        await RunAsync(_cycle2.AddHours(1), new ParseResult([Sofr(3m)], [], 1));
 
         await using var verify = _fixture.CreateContext();
-        var live = await verify.Observations
-            .Where(o => o.Series!.SeriesCode == _seriesCode && o.IsCurrent)
+        var live = await verify.SofrDailyRates
+            .Where(r => r.EffectiveDate == _sofrDate && r.IsCurrent)
             .ToListAsync();
 
         Assert.Single(live);
-        Assert.Equal(3m, live[0].Value);
+        Assert.Equal(3m, live[0].RatePercent);
         Assert.Equal(2, live[0].RevisionNumber);
     }
 
     [Fact]
-    public async Task AnnotationOnlyChange_IsStillARevision()
+    public async Task TheAnnualAverageCoexistsWithJanuary()
     {
-        // BLS flips a footnote to "R" without necessarily moving the number; that transition is
-        // meaningful for economic data and must not be swallowed.
-        await RunAsync(_cycle1, new ParseResult([Record(333.952m)], [], 1));
+        // The collision the two-table rewrite exists to survive: M13 and M01 share a reference
+        // date, and under the previous (series, date) current-vintage key one silently
+        // overwrote the other. Keying on (year, period code) is what makes both storable.
+        var summary = await RunCpiAsync(_cycle1,
+            Cpi("M01", 100.0m),
+            Cpi(CpiPeriod.AnnualCode, 105.5m),
+            Cpi(CpiPeriod.FirstHalfCode, 102.0m));
 
-        var summary = await RunAsync(_cycle2, new ParseResult([Record(333.952m, "R")], [], 1));
+        Assert.Equal(3, summary.Inserted);
 
-        Assert.Equal(1, summary.Revised);
+        await using var verify = _fixture.CreateContext();
+        var rows = await verify.CpiObservations
+            .Where(o => o.ReferenceYear == _cpiYear)
+            .OrderBy(o => o.PeriodCode)
+            .ToListAsync();
+
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows, r => Assert.Equal(new DateOnly(_cpiYear, 1, 1), r.ReferenceDate));
+        Assert.All(rows, r => Assert.True(r.IsCurrent));
+
+        Assert.Equal([PeriodType.Month, PeriodType.Annual, PeriodType.Semiannual],
+            rows.Select(r => r.PeriodType));
     }
 
     [Fact]
-    public async Task UnknownSeries_IsRejectedRatherThanAutoCreated()
+    public async Task ARevisedMonth_DoesNotDisturbTheAnnualAverageSharingItsDate()
     {
-        // Silently inventing series is how a publisher typo becomes permanent reference data.
-        var stray = Record(1m) with { SeriesCode = "NOT_REGISTERED" };
+        await RunCpiAsync(_cycle1, Cpi("M01", 100.0m), Cpi(CpiPeriod.AnnualCode, 105.5m));
 
-        var summary = await RunAsync(_cycle1, new ParseResult([stray], [], 1));
+        var summary = await RunCpiAsync(_cycle2, Cpi("M01", 100.4m), Cpi(CpiPeriod.AnnualCode, 105.5m));
 
-        Assert.Equal(0, summary.Inserted);
+        Assert.Equal(1, summary.Revised);
+        Assert.Equal(1, summary.Unchanged);
+
+        await using var verify = _fixture.CreateContext();
+
+        var january = await verify.CpiObservations
+            .SingleAsync(o => o.ReferenceYear == _cpiYear && o.PeriodCode == "M01" && o.IsCurrent);
+        var annual = await verify.CpiObservations
+            .SingleAsync(o => o.ReferenceYear == _cpiYear
+                && o.PeriodCode == CpiPeriod.AnnualCode && o.IsCurrent);
+
+        Assert.Equal(100.4m, january.IndexValue);
+        Assert.Equal(1, january.RevisionNumber);
+        Assert.Equal(105.5m, annual.IndexValue);
+        Assert.Equal(0, annual.RevisionNumber);
+    }
+
+    [Fact]
+    public async Task InvalidRecords_AreRejectedRatherThanStored()
+    {
+        // A rate outside the sanity band is the decimal-shift parse bug; it costs one logged
+        // rejection instead of an opaque constraint violation that aborts the batch — and the
+        // sound record in the same payload still lands.
+        //
+        // The rejected record carries the neighbouring day so that nothing this test writes can
+        // land on another test's slot: the tests share one table, and a stray row with the same
+        // measures would make that test's insert deduplicate against it.
+        var invalid = Sofr(365m) with { EffectiveDate = _sofrDate.AddDays(1) };
+
+        var summary = await RunAsync(_cycle1, new ParseResult([invalid, Sofr(3.65m)], [], 2));
+
+        Assert.Equal(1, summary.Inserted);
         Assert.Equal(1, summary.Rejected);
+        Assert.Equal(CollectionRunStatus.PartialSuccess, summary.Status);
 
         await using var verify = _fixture.CreateContext();
         var rejection = await verify.RejectedObservations
             .SingleAsync(r => r.CollectionRunId == summary.CollectionRunId);
 
-        Assert.Equal(RejectionReason.UnknownSeries, rejection.Reason);
+        Assert.Equal(RejectionReason.OutOfRange, rejection.Reason);
+        Assert.Equal(SofrDailyRate.RateTypeValue, rejection.SeriesCode);
     }
 
     [Fact]
@@ -275,13 +340,13 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     }
 
     [Fact]
-    public async Task PartialSuccess_WhenSomeRecordsAreRejected()
+    public async Task PartialSuccess_WhenSomeRecordsAreRejectedByTheAdapter()
     {
+        // The steady case for SOFR: four out-of-scope rates arrive with every business day.
         var rejection = new RejectedFragment(
-            _seriesCode, "2026-13-01", RejectionReason.UnparseablePeriod, "Bad period.", "{}");
+            "EFFR", null, RejectionReason.UnknownSeries, "Record is of type 'EFFR', not SOFR.", "{}");
 
-        var summary = await RunAsync(_cycle1,
-            new ParseResult([Record(1m)], [rejection], 2));
+        var summary = await RunAsync(_cycle1, new ParseResult([Sofr(3.65m)], [rejection], 2));
 
         Assert.Equal(CollectionRunStatus.PartialSuccess, summary.Status);
         Assert.Equal(1, summary.Inserted);
@@ -292,31 +357,31 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     public async Task AnIdenticalPayload_ShortCircuitsBeforeParsing()
     {
         // The cheapest possible dedup: byte-identical bodies are recognised from the stored
-        // payload hash, so no observation is even parsed. Scoped to this test's series so it
-        // cannot collide with another test's stored payload.
-        var body = $$"""{"series":"{{_seriesCode}}","effectiveDate":"2026-07-31"}""";
+        // payload hash, so nothing is even parsed. Scoped to this test's day so it cannot
+        // collide with another test's stored payload.
+        var body = $$"""{"effectiveDate":"{{_sofrDate:yyyy-MM-dd}}"}""";
 
-        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1), payload: body);
+        await RunAsync(_cycle1, new ParseResult([Sofr(1m)], [], 1), payload: body);
 
         // The adapter would return a different value, but it is never consulted.
-        var summary = await RunAsync(_cycle2, new ParseResult([Record(999m)], [], 1), payload: body);
+        var summary = await RunAsync(_cycle2, new ParseResult([Sofr(9m)], [], 1), payload: body);
 
         Assert.Equal(CollectionRunStatus.Succeeded, summary.Status);
         Assert.Equal(0, summary.Fetched);
 
         await using var verify = _fixture.CreateContext();
-        var values = await verify.Observations
-            .Where(o => o.Series!.SeriesCode == _seriesCode)
-            .Select(o => o.Value)
+        var rates = await verify.SofrDailyRates
+            .Where(r => r.EffectiveDate == _sofrDate)
+            .Select(r => r.RatePercent)
             .ToListAsync();
 
-        Assert.Equal([1m], values);
+        Assert.Equal([1m], rates);
     }
 
     [Fact]
     public async Task RawPayloadIsStoredForDiagnosis()
     {
-        var summary = await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1));
+        var summary = await RunAsync(_cycle1, new ParseResult([Sofr(1m)], [], 1));
 
         await using var verify = _fixture.CreateContext();
         var payload = await verify.RawPayloads.SingleAsync(p => p.CollectionRunId == summary.CollectionRunId);
@@ -329,8 +394,8 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     [Fact]
     public async Task RetryOfTheSameCycle_GetsADistinctAttemptNumber()
     {
-        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1));
-        await RunAsync(_cycle1, new ParseResult([Record(1m)], [], 1), trigger: CollectionTriggerType.Retry);
+        await RunAsync(_cycle1, new ParseResult([Sofr(1m)], [], 1));
+        await RunAsync(_cycle1, new ParseResult([Sofr(1m)], [], 1), trigger: CollectionTriggerType.Retry);
 
         await using var verify = _fixture.CreateContext();
         var attempts = await verify.CollectionRuns
@@ -345,19 +410,31 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     [Fact]
     public async Task UnknownSourceCode_IsSkippedNotCrashed()
     {
+        var summary = await RunAsync(_cycle1, sourceCode: "NO_SUCH_SOURCE");
+
+        Assert.Equal(CollectionRunStatus.Skipped, summary.Status);
+        Assert.Null(summary.CollectionRunId);
+    }
+
+    [Fact]
+    public async Task ASourceWithNoWriter_IsSkippedBeforeAnyRunIsRecorded()
+    {
+        // A dataset with an adapter but nowhere to put the result would otherwise fetch, parse,
+        // and record a run that looks like it did something.
         await using var db = _fixture.CreateContext();
 
         var runner = new CollectionRunner(
             db,
             new StubFetcher("{}", null),
-            [new StubAdapter(new ParseResult([], [], 0))],
+            [new StubAdapter(DataSource.NyFedSofrCode, new ParseResult([], [], 0))],
+            [],
             new AllowAllRobotsPolicy(),
             Options.Create(new CollectionOptions()),
             new FixedTimeProvider(_cycle1),
             NullLogger<CollectionRunner>.Instance);
 
         var summary = await runner.RunAsync(
-            "NO_SUCH_SOURCE", _cycle1, CollectionTriggerType.Scheduled, CancellationToken.None);
+            DataSource.NyFedSofrCode, _cycle1, CollectionTriggerType.Scheduled, CancellationToken.None);
 
         Assert.Equal(CollectionRunStatus.Skipped, summary.Status);
         Assert.Null(summary.CollectionRunId);
@@ -370,9 +447,9 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
             Task.FromResult(forcedFailure ?? FetchResult.Success(content, "application/json", 200, 1));
     }
 
-    private sealed class StubAdapter(ParseResult result) : ISourceAdapter
+    private sealed class StubAdapter(string sourceCode, ParseResult result) : ISourceAdapter
     {
-        public string SourceCode => DataSource.NyFedSofrCode;
+        public string SourceCode => sourceCode;
 
         public SourceRequest BuildRequest(SourceRequestContext context) =>
             SourceRequest.Get("https://example.test/api");

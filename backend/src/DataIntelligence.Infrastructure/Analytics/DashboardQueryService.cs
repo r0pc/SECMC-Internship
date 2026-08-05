@@ -35,20 +35,12 @@ public sealed class DashboardQueryService : IDashboardQueryService
         ObservationQuery query,
         CancellationToken cancellationToken)
     {
-        var series = await _db.Series.AsNoTracking()
-            .Where(s => s.SeriesId == query.SeriesId)
-            .Select(s => new { s.SeriesId, s.Frequency })
-            .FirstOrDefaultAsync(cancellationToken);
-
-        if (series is null)
+        if (!SeriesCatalog.TryGet(query.SeriesKey, out var definition))
         {
             return null;
         }
 
-        var periodType = query.PeriodType ?? SeriesPeriods.NativePeriodType(series.Frequency);
-
-        var filtered = _db.Observations.AsNoTracking()
-            .Where(o => o.SeriesId == query.SeriesId && o.PeriodType == periodType);
+        var filtered = MeasureQueries.Rows(_db, definition, query.PeriodType);
 
         if (query.From is { } from)
         {
@@ -84,25 +76,28 @@ public sealed class DashboardQueryService : IDashboardQueryService
             ? filtered.OrderByDescending(o => o.ReferenceDate).ThenByDescending(o => o.RevisionNumber)
             : filtered.OrderBy(o => o.ReferenceDate).ThenBy(o => o.RevisionNumber);
 
-        var items = await ordered
+        var rows = await ordered
             .Skip(query.Page.Skip)
             .Take(query.Page.PageSize)
+            .ToListAsync(cancellationToken);
+
+        var items = rows
             .Select(o => new ObservationDto
             {
                 ObservationId = o.ObservationId,
-                SeriesId = o.SeriesId,
+                SeriesKey = definition.Key,
                 ReferenceDate = o.ReferenceDate,
                 PeriodType = o.PeriodType,
-                SourcePeriodCode = o.SourcePeriodCode,
+                PeriodCode = o.PeriodCode,
                 Value = o.Value,
                 RevisionNumber = o.RevisionNumber,
                 IsCurrent = o.IsCurrent,
                 SupersededAtUtc = o.SupersededAtUtc,
-                SourceAnnotation = o.SourceAnnotation,
+                SourceAnnotation = o.Annotation,
                 CollectedAtUtc = o.CollectedAtUtc,
                 CollectionRunId = o.CollectionRunId
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
         return PagedResult<ObservationDto>.From(items, query.Page, totalCount);
     }
@@ -113,20 +108,9 @@ public sealed class DashboardQueryService : IDashboardQueryService
         TrendQuery query,
         CancellationToken cancellationToken)
     {
-        var requestedIds = query.SeriesIds.Distinct().ToArray();
+        var requested = Resolve(query.SeriesKeys);
 
-        if (requestedIds.Length == 0)
-        {
-            return [];
-        }
-
-        var series = await _db.Series.AsNoTracking()
-            .Where(s => requestedIds.Contains(s.SeriesId))
-            .Select(s => new TrendSeriesInfo(
-                s.SeriesId, s.SeriesCode, s.Title, s.Unit, s.DecimalPlaces, s.Frequency))
-            .ToListAsync(cancellationToken);
-
-        if (series.Count == 0)
+        if (requested.Count == 0)
         {
             return [];
         }
@@ -136,77 +120,55 @@ public sealed class DashboardQueryService : IDashboardQueryService
         // The densest series decides the bucket: a chart mixing monthly CPI with daily SOFR must
         // not be bucketed as if everything were monthly, or the SOFR line silently loses detail
         // the caller did not ask to lose.
-        var densest = series
-            .OrderByDescending(s => SeriesPeriods.ReleasesPerYear(s.Frequency))
+        var densest = requested
+            .OrderByDescending(d => SeriesPeriods.ReleasesPerYear(d.Frequency))
             .First()
             .Frequency;
 
         var granularity = SeriesPeriods.ResolveGranularity(query.Granularity, densest, from, to);
 
-        var points = granularity == TrendGranularity.Point
-            ? await LoadPointsAsync(series, from, to, cancellationToken)
-            : await LoadBucketsAsync(series, from, to, granularity, cancellationToken);
+        var lines = new List<TrendSeriesDto>(requested.Count);
 
-        // Requested order, so the frontend can pair a colour with a series without re-sorting.
-        return requestedIds
-            .Select(id => series.FirstOrDefault(s => s.SeriesId == id))
-            .Where(s => s is not null)
-            .Select(s => new TrendSeriesDto
-            {
-                SeriesId = s!.SeriesId,
-                SeriesCode = s.SeriesCode,
-                Title = s.Title,
-                Unit = s.Unit,
-                DecimalPlaces = s.DecimalPlaces,
-                Granularity = granularity,
-                Points = points.GetValueOrDefault(s.SeriesId, [])
-            })
-            .ToList();
-    }
-
-    /// <summary>One point per observation, for ranges short enough not to need bucketing.</summary>
-    private async Task<Dictionary<int, IReadOnlyList<TrendPointDto>>> LoadPointsAsync(
-        IReadOnlyCollection<TrendSeriesInfo> series,
-        DateOnly from,
-        DateOnly to,
-        CancellationToken cancellationToken)
-    {
-        var result = new Dictionary<int, IReadOnlyList<TrendPointDto>>();
-
-        foreach (var group in series.GroupBy(s => SeriesPeriods.NativePeriodType(s.Frequency)))
+        // One query per line. Each is an indexed range scan over its own table, and the endpoint
+        // caps how many lines a request may ask for, which bounds the round trips.
+        foreach (var definition in requested)
         {
-            var periodType = group.Key;
-            var ids = group.Select(s => s.SeriesId).ToArray();
+            var points = granularity == TrendGranularity.Point
+                ? await LoadPointsAsync(definition, from, to, cancellationToken)
+                : await LoadBucketsAsync(definition, from, to, granularity, cancellationToken);
 
-            var rows = await _db.Observations.AsNoTracking()
-                .Where(o => ids.Contains(o.SeriesId)
-                    && o.IsCurrent
-                    && o.PeriodType == periodType
-                    && o.ReferenceDate >= from
-                    && o.ReferenceDate <= to)
-                .OrderBy(o => o.SeriesId)
-                .ThenBy(o => o.ReferenceDate)
-                .Select(o => new { o.SeriesId, o.ReferenceDate, o.Value })
-                .ToListAsync(cancellationToken);
-
-            foreach (var seriesRows in rows.GroupBy(r => r.SeriesId))
+            lines.Add(new TrendSeriesDto
             {
-                result[seriesRows.Key] = seriesRows
-                    .Select(r => new TrendPointDto
-                    {
-                        BucketStart = r.ReferenceDate,
-                        BucketEnd = r.ReferenceDate,
-                        Value = r.Value,
-                        Minimum = r.Value,
-                        Maximum = r.Value,
-                        ObservationCount = 1
-                    })
-                    .ToList();
-            }
+                SeriesKey = definition.Key,
+                Title = definition.Title,
+                Unit = definition.Unit,
+                DecimalPlaces = definition.DecimalPlaces,
+                Granularity = granularity,
+                Points = points
+            });
         }
 
-        return result;
+        return lines;
     }
+
+    /// <summary>One point per stored row, for ranges short enough not to need bucketing.</summary>
+    private async Task<IReadOnlyList<TrendPointDto>> LoadPointsAsync(
+        SeriesDefinition definition,
+        DateOnly from,
+        DateOnly to,
+        CancellationToken cancellationToken) =>
+        await CurrentRows(definition, from, to)
+            .OrderBy(o => o.ReferenceDate)
+            .Select(o => new TrendPointDto
+            {
+                BucketStart = o.ReferenceDate,
+                BucketEnd = o.ReferenceDate,
+                Value = o.Value,
+                Minimum = o.Value,
+                Maximum = o.Value,
+                ObservationCount = 1
+            })
+            .ToListAsync(cancellationToken);
 
     /// <summary>
     /// Aggregated buckets, computed by SQL Server.
@@ -216,141 +178,74 @@ public sealed class DashboardQueryService : IDashboardQueryService
     /// <see cref="DateOnly"/> inside a query is not translatable; the parts come back and become
     /// a date in <see cref="SeriesPeriods.BucketStartFromParts"/>.
     /// </remarks>
-    private async Task<Dictionary<int, IReadOnlyList<TrendPointDto>>> LoadBucketsAsync(
-        IReadOnlyCollection<TrendSeriesInfo> series,
+    private async Task<IReadOnlyList<TrendPointDto>> LoadBucketsAsync(
+        SeriesDefinition definition,
         DateOnly from,
         DateOnly to,
         TrendGranularity granularity,
         CancellationToken cancellationToken)
     {
-        var result = new Dictionary<int, IReadOnlyList<TrendPointDto>>();
+        var scope = CurrentRows(definition, from, to);
 
-        foreach (var group in series.GroupBy(s => SeriesPeriods.NativePeriodType(s.Frequency)))
+        var rows = granularity switch
         {
-            var periodType = group.Key;
-            var ids = group.Select(s => s.SeriesId).ToArray();
+            TrendGranularity.Month => await scope
+                .GroupBy(o => new { o.ReferenceDate.Year, Ordinal = o.ReferenceDate.Month })
+                .Select(g => new BucketRow(
+                    g.Key.Year, g.Key.Ordinal,
+                    g.Average(o => o.Value), g.Min(o => o.Value), g.Max(o => o.Value), g.Count()))
+                .ToListAsync(cancellationToken),
 
-            var scope = _db.Observations.AsNoTracking()
-                .Where(o => ids.Contains(o.SeriesId)
-                    && o.IsCurrent
-                    && o.PeriodType == periodType
-                    && o.ReferenceDate >= from
-                    && o.ReferenceDate <= to);
+            TrendGranularity.Quarter => await scope
+                .GroupBy(o => new
+                {
+                    o.ReferenceDate.Year,
+                    Ordinal = ((o.ReferenceDate.Month - 1) / 3) + 1
+                })
+                .Select(g => new BucketRow(
+                    g.Key.Year, g.Key.Ordinal,
+                    g.Average(o => o.Value), g.Min(o => o.Value), g.Max(o => o.Value), g.Count()))
+                .ToListAsync(cancellationToken),
 
-            var rows = granularity switch
+            _ => await scope
+                .GroupBy(o => o.ReferenceDate.Year)
+                .Select(g => new BucketRow(
+                    g.Key, 1,
+                    g.Average(o => o.Value), g.Min(o => o.Value), g.Max(o => o.Value), g.Count()))
+                .ToListAsync(cancellationToken)
+        };
+
+        return rows
+            .Select(r =>
             {
-                TrendGranularity.Month => await scope
-                    .GroupBy(o => new { o.SeriesId, o.ReferenceDate.Year, Ordinal = o.ReferenceDate.Month })
-                    .Select(g => new BucketRow(
-                        g.Key.SeriesId,
-                        g.Key.Year,
-                        g.Key.Ordinal,
-                        g.Average(o => o.Value),
-                        g.Min(o => o.Value),
-                        g.Max(o => o.Value),
-                        g.Count()))
-                    .ToListAsync(cancellationToken),
+                var start = SeriesPeriods.BucketStartFromParts(r.Year, r.Ordinal, granularity);
 
-                TrendGranularity.Quarter => await scope
-                    .GroupBy(o => new
-                    {
-                        o.SeriesId,
-                        o.ReferenceDate.Year,
-                        Ordinal = ((o.ReferenceDate.Month - 1) / 3) + 1
-                    })
-                    .Select(g => new BucketRow(
-                        g.Key.SeriesId,
-                        g.Key.Year,
-                        g.Key.Ordinal,
-                        g.Average(o => o.Value),
-                        g.Min(o => o.Value),
-                        g.Max(o => o.Value),
-                        g.Count()))
-                    .ToListAsync(cancellationToken),
-
-                _ => await scope
-                    .GroupBy(o => new { o.SeriesId, o.ReferenceDate.Year })
-                    .Select(g => new BucketRow(
-                        g.Key.SeriesId,
-                        g.Key.Year,
-                        1,
-                        g.Average(o => o.Value),
-                        g.Min(o => o.Value),
-                        g.Max(o => o.Value),
-                        g.Count()))
-                    .ToListAsync(cancellationToken)
-            };
-
-            foreach (var seriesRows in rows.GroupBy(r => r.SeriesId))
-            {
-                result[seriesRows.Key] = seriesRows
-                    .Select(r =>
-                    {
-                        var start = SeriesPeriods.BucketStartFromParts(r.Year, r.Ordinal, granularity);
-
-                        return new TrendPointDto
-                        {
-                            BucketStart = start,
-                            BucketEnd = SeriesPeriods.BucketEnd(start, granularity),
-                            Value = r.Average,
-                            Minimum = r.Minimum,
-                            Maximum = r.Maximum,
-                            ObservationCount = r.ObservationCount
-                        };
-                    })
-                    .OrderBy(p => p.BucketStart)
-                    .ToList();
-            }
-        }
-
-        return result;
+                return new TrendPointDto
+                {
+                    BucketStart = start,
+                    BucketEnd = SeriesPeriods.BucketEnd(start, granularity),
+                    Value = r.Average,
+                    Minimum = r.Minimum,
+                    Maximum = r.Maximum,
+                    ObservationCount = r.ObservationCount
+                };
+            })
+            .OrderBy(p => p.BucketStart)
+            .ToList();
     }
 
     // --------------------------------------------------------------------- KPIs
 
     public async Task<IReadOnlyList<SeriesKpiDto>> GetKpisAsync(
-        IReadOnlyList<int> seriesIds,
+        IReadOnlyList<string> seriesKeys,
         CancellationToken cancellationToken)
     {
-        var requestedIds = seriesIds.Distinct().ToArray();
+        var requested = Resolve(seriesKeys);
+        var kpis = new List<SeriesKpiDto>(requested.Count);
 
-        if (requestedIds.Length == 0)
+        foreach (var definition in requested)
         {
-            return [];
-        }
-
-        var series = await _db.Series.AsNoTracking()
-            .Where(s => requestedIds.Contains(s.SeriesId))
-            .Select(s => new
-            {
-                s.SeriesId,
-                s.SeriesCode,
-                s.Title,
-                s.Unit,
-                s.DecimalPlaces,
-                s.Frequency,
-                s.SeasonalAdjustment
-            })
-            .ToListAsync(cancellationToken);
-
-        var kpis = new List<SeriesKpiDto>(series.Count);
-
-        // Per series rather than one query across all of them: the period filter differs by
-        // frequency, and each of these is a two-row seek on IX_Observation_Series_Reference. The
-        // endpoint caps how many series a request may ask for, which bounds the round trips.
-        foreach (var id in requestedIds)
-        {
-            var info = series.FirstOrDefault(s => s.SeriesId == id);
-
-            if (info is null)
-            {
-                continue;
-            }
-
-            var periodType = SeriesPeriods.NativePeriodType(info.Frequency);
-
-            var current = _db.Observations.AsNoTracking()
-                .Where(o => o.SeriesId == id && o.IsCurrent && o.PeriodType == periodType);
+            var current = MeasureQueries.Rows(_db, definition).Where(o => o.IsCurrent);
 
             var recent = await current
                 .OrderByDescending(o => o.ReferenceDate)
@@ -375,13 +270,12 @@ public sealed class DashboardQueryService : IDashboardQueryService
 
             kpis.Add(new SeriesKpiDto
             {
-                SeriesId = info.SeriesId,
-                SeriesCode = info.SeriesCode,
-                Title = info.Title,
-                Unit = info.Unit,
-                DecimalPlaces = info.DecimalPlaces,
-                Frequency = info.Frequency,
-                SeasonalAdjustment = info.SeasonalAdjustment,
+                SeriesKey = definition.Key,
+                Title = definition.Title,
+                Unit = definition.Unit,
+                DecimalPlaces = definition.DecimalPlaces,
+                Frequency = definition.Frequency,
+                SeasonalAdjustment = definition.SeasonalAdjustment,
                 Latest = latest is null
                     ? null
                     : new SeriesLatestPointDto
@@ -419,37 +313,38 @@ public sealed class DashboardQueryService : IDashboardQueryService
         CancellationToken cancellationToken)
     {
         var sourceCount = await _db.DataSources.CountAsync(cancellationToken);
-        var activeSeriesCount = await _db.Series.CountAsync(s => s.IsActive, cancellationToken);
-        var categoryCount = await _db.SeriesCategories.CountAsync(cancellationToken);
 
-        var currentObservations = _db.Observations.AsNoTracking().Where(o => o.IsCurrent);
+        // Monthly only for the CPI span: the annual and semiannual rows describe the same years
+        // over again, so including them would not extend the history, only restate it.
+        var cpiMonths = _db.CpiObservations.AsNoTracking()
+            .Where(o => o.IsCurrent && o.PeriodType == PeriodType.Month);
 
-        var observationCount = await currentObservations.LongCountAsync(cancellationToken);
-
-        // Nullable projections so an empty table returns null instead of throwing on Min/Max.
-        var earliest = await currentObservations
-            .Select(o => (DateOnly?)o.ReferenceDate)
-            .MinAsync(cancellationToken);
-
-        var latest = await currentObservations
-            .Select(o => (DateOnly?)o.ReferenceDate)
-            .MaxAsync(cancellationToken);
-
-        var lastCollection = await _db.CollectionRuns.AsNoTracking()
-            .Where(r => r.Status == CollectionRunStatus.Succeeded
-                || r.Status == CollectionRunStatus.PartialSuccess)
-            .Select(r => (DateTime?)r.StartedAtUtc)
-            .MaxAsync(cancellationToken);
+        var sofrDays = _db.SofrDailyRates.AsNoTracking().Where(r => r.IsCurrent);
 
         return new DashboardSummaryDto
         {
             SourceCount = sourceCount,
-            ActiveSeriesCount = activeSeriesCount,
-            CategoryCount = categoryCount,
-            ObservationCount = observationCount,
-            EarliestReferenceDate = earliest,
-            LatestReferenceDate = latest,
-            LastCollectionAtUtc = lastCollection,
+            SeriesCount = SeriesCatalog.All.Count,
+            CpiObservationCount = await _db.CpiObservations.AsNoTracking()
+                .LongCountAsync(o => o.IsCurrent, cancellationToken),
+            SofrObservationCount = await sofrDays.LongCountAsync(cancellationToken),
+
+            // Nullable projections so an empty table returns null instead of throwing on Min/Max.
+            EarliestCpiMonth = await cpiMonths
+                .Select(o => (DateOnly?)o.ReferenceDate).MinAsync(cancellationToken),
+            LatestCpiMonth = await cpiMonths
+                .Select(o => (DateOnly?)o.ReferenceDate).MaxAsync(cancellationToken),
+            EarliestSofrDate = await sofrDays
+                .Select(r => (DateOnly?)r.EffectiveDate).MinAsync(cancellationToken),
+            LatestSofrDate = await sofrDays
+                .Select(r => (DateOnly?)r.EffectiveDate).MaxAsync(cancellationToken),
+
+            LastCollectionAtUtc = await _db.CollectionRuns.AsNoTracking()
+                .Where(r => r.Status == CollectionRunStatus.Succeeded
+                    || r.Status == CollectionRunStatus.PartialSuccess)
+                .Select(r => (DateTime?)r.StartedAtUtc)
+                .MaxAsync(cancellationToken),
+
             Sources = await GetHealthAsync(windowDays, cancellationToken)
         };
     }
@@ -640,6 +535,34 @@ public sealed class DashboardQueryService : IDashboardQueryService
     // ------------------------------------------------------------------ helpers
 
     /// <summary>
+    /// Current vintages for one series over a range — the shape every chart reads.
+    /// </summary>
+    private IQueryable<MeasureRow> CurrentRows(SeriesDefinition definition, DateOnly from, DateOnly to) =>
+        MeasureQueries.Rows(_db, definition)
+            .Where(o => o.IsCurrent && o.ReferenceDate >= from && o.ReferenceDate <= to);
+
+    /// <summary>
+    /// Resolves keys to catalogue entries, preserving the caller's order so the frontend can pair
+    /// a colour with a series without re-sorting. Unknown keys are dropped rather than failing the
+    /// request, so one stale bookmark cannot blank a whole dashboard.
+    /// </summary>
+    private static List<SeriesDefinition> Resolve(IReadOnlyList<string> seriesKeys)
+    {
+        var resolved = new List<SeriesDefinition>(seriesKeys.Count);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var key in seriesKeys)
+        {
+            if (SeriesCatalog.TryGet(key, out var definition) && seen.Add(definition.Key))
+            {
+                resolved.Add(definition);
+            }
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
     /// Fills in a missing range: twelve months back from today, which is the span the
     /// performance target is written against (NFR Performance) and the one a dashboard opens on.
     /// </summary>
@@ -651,17 +574,8 @@ public sealed class DashboardQueryService : IDashboardQueryService
         return (resolvedFrom, resolvedTo);
     }
 
-    private sealed record TrendSeriesInfo(
-        int SeriesId,
-        string SeriesCode,
-        string Title,
-        string Unit,
-        byte? DecimalPlaces,
-        SeriesFrequency Frequency);
-
     /// <summary>One aggregated bucket as SQL Server returns it, before the date is rebuilt.</summary>
     private sealed record BucketRow(
-        int SeriesId,
         int Year,
         int Ordinal,
         decimal Average,

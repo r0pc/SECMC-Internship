@@ -9,34 +9,6 @@ namespace DataIntelligence.Core.Analytics;
 /// </summary>
 public static class SeriesPeriods
 {
-    /// <summary>
-    /// The period length a series' regular releases describe.
-    /// </summary>
-    /// <remarks>
-    /// The reason every analytical query filters on this. A BLS response for a monthly series can
-    /// carry more than monthly rows — <c>BlsPeriod</c> maps M13 to <see cref="PeriodType.Annual"/>
-    /// and S01/S02 to <see cref="PeriodType.Semiannual"/> — and charting them together plots the
-    /// year's average as if it were a thirteenth month. Averaging over that double-counts the
-    /// year: a wrong number that looks entirely plausible.
-    /// <para>
-    /// Today the write side cannot actually store both. <c>UQ_Observation_Current</c> is keyed on
-    /// (SeriesId, ReferenceDate) without the period type, and M13 is dated 1 January — the same
-    /// reference date as that year's M01 row — so the pair collides. The collector does not
-    /// request annual averages, which is why the conflict is latent rather than breaking cycles.
-    /// Filtering here is what keeps the read side correct either way.
-    /// </para>
-    /// </remarks>
-    public static PeriodType NativePeriodType(SeriesFrequency frequency) => frequency switch
-    {
-        SeriesFrequency.BusinessDaily or SeriesFrequency.Daily => PeriodType.Day,
-        SeriesFrequency.Weekly => PeriodType.Week,
-        SeriesFrequency.Monthly => PeriodType.Month,
-        SeriesFrequency.Quarterly => PeriodType.Quarter,
-        SeriesFrequency.Semiannual => PeriodType.Semiannual,
-        SeriesFrequency.Annual => PeriodType.Annual,
-        _ => PeriodType.Month
-    };
-
     /// <summary>Approximate releases per year, used to size an automatic bucket.</summary>
     public static int ReleasesPerYear(SeriesFrequency frequency) => frequency switch
     {

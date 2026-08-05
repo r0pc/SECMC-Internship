@@ -5,8 +5,13 @@ using DataIntelligence.Core.Interfaces;
 namespace DataIntelligence.Api.Endpoints;
 
 /// <summary>
-/// The series catalogue and the observations belonging to a series (FR-7, FR-10, FR-11).
+/// The series catalogue and the rows behind each series (FR-7, FR-10, FR-11).
 /// </summary>
+/// <remarks>
+/// Read-only. A series is a fixed measure of a fixed dataset — CPI's one BLS series, or one
+/// column of a SOFR business day — so there is nothing here a caller could edit that would not
+/// simply make the platform disagree with its own schema.
+/// </remarks>
 public static class SeriesEndpoints
 {
     public static RouteGroupBuilder MapSeriesEndpoints(this IEndpointRouteBuilder app)
@@ -15,10 +20,7 @@ public static class SeriesEndpoints
 
         group.MapGet("/", async (
                 byte? dataSourceId,
-                int? categoryId,
-                SeriesFrequency? frequency,
-                SeasonalAdjustment? seasonalAdjustment,
-                bool? isActive,
+                Dataset? dataset,
                 string? search,
                 bool? includeLatest,
                 int? page,
@@ -29,13 +31,7 @@ public static class SeriesEndpoints
                 var query = new SeriesQuery
                 {
                     DataSourceId = dataSourceId,
-                    CategoryId = categoryId,
-                    Frequency = frequency,
-                    SeasonalAdjustment = seasonalAdjustment,
-                    // Active-only unless asked otherwise: a deactivated series is hidden from
-                    // dashboards by definition, and defaulting the other way would quietly put it
-                    // back on every chart that lists series.
-                    IsActive = isActive ?? true,
+                    Dataset = dataset,
                     Search = search,
                     IncludeLatest = includeLatest ?? true,
                     Page = PageRequest.Normalize(page, pageSize)
@@ -44,60 +40,34 @@ public static class SeriesEndpoints
                 return Results.Ok(await catalog.GetSeriesAsync(query, cancellationToken));
             })
             .WithName("GetSeries")
-            .WithSummary("Lists series, filtered and paged.")
+            .WithSummary("Lists the series a chart can draw.")
             .WithDescription(
-                "Defaults to active series with their latest value attached. Pass isActive=false "
-                + "for deactivated ones, or includeLatest=false to skip the value lookup when only "
-                + "names are needed.")
+                "Seven entries: CPI, and SOFR's rate, volume and four percentiles. Each carries "
+                + "its latest value unless includeLatest=false.\n\n"
+                + "Units are not interchangeable and are returned per series — SOFR volume is in "
+                + "billions of dollars and CPI is an index. Values are stored exactly as "
+                + "published and never rescaled, so a chart that ignores the unit will look fine "
+                + "while being nonsense.")
             .Produces<PagedResult<SeriesDto>>();
 
-        group.MapGet("/{seriesId:int}", async (
-                int seriesId,
+        group.MapGet("/{seriesKey}", async (
+                string seriesKey,
                 ICatalogService catalog,
                 CancellationToken cancellationToken) =>
             {
-                var series = await catalog.GetSeriesByIdAsync(seriesId, cancellationToken);
+                var series = await catalog.GetSeriesByKeyAsync(seriesKey, cancellationToken);
 
                 return series is null
-                    ? ApiEndpoints.NotFound($"No series with id {seriesId}.")
+                    ? ApiEndpoints.NotFound($"No series with key '{seriesKey}'.")
                     : Results.Ok(series);
             })
-            .WithName("GetSeriesById")
-            .WithSummary("Reads one series, including its latest value and concurrency token.")
+            .WithName("GetSeriesByKey")
+            .WithSummary("Reads one series, including its latest value.")
             .Produces<SeriesDto>()
             .ProducesProblem(StatusCodes.Status404NotFound);
 
-        group.MapPut("/{seriesId:int}", async (
-                int seriesId,
-                SeriesUpdateRequest request,
-                ICatalogService catalog,
-                CancellationToken cancellationToken) =>
-            {
-                var invalid = ApiEndpoints.Validate(request);
-
-                if (invalid is not null)
-                {
-                    return invalid;
-                }
-
-                var result = await catalog.UpdateSeriesAsync(seriesId, request, cancellationToken);
-
-                return result.ToHttpResult(Results.Ok);
-            })
-            .WithName("UpdateSeries")
-            .WithSummary("Updates a series' presentation fields.")
-            .WithDescription(
-                "Title, category, decimal places, and active state. Everything that describes the "
-                + "data itself — code, unit, frequency, seasonal adjustment — belongs to the "
-                + "publisher and stays read-only. Send back the rowVersion you read to be told "
-                + "about a concurrent edit (409) instead of silently overwriting it.")
-            .Produces<SeriesDto>()
-            .ProducesValidationProblem()
-            .ProducesProblem(StatusCodes.Status404NotFound)
-            .ProducesProblem(StatusCodes.Status409Conflict);
-
-        group.MapGet("/{seriesId:int}/observations", async (
-                int seriesId,
+        group.MapGet("/{seriesKey}/observations", async (
+                string seriesKey,
                 DateOnly? from,
                 DateOnly? to,
                 PeriodType? periodType,
@@ -118,7 +88,7 @@ public static class SeriesEndpoints
 
                 var query = new ObservationQuery
                 {
-                    SeriesId = seriesId,
+                    SeriesKey = seriesKey,
                     From = from,
                     To = to,
                     PeriodType = periodType,
@@ -131,17 +101,18 @@ public static class SeriesEndpoints
                 var result = await dashboard.GetObservationsAsync(query, cancellationToken);
 
                 return result is null
-                    ? ApiEndpoints.NotFound($"No series with id {seriesId}.")
+                    ? ApiEndpoints.NotFound($"No series with key '{seriesKey}'.")
                     : Results.Ok(result);
             })
             .WithName("GetObservations")
-            .WithSummary("Reads one series' observations over a date range.")
+            .WithSummary("Reads one series' stored values over a date range.")
             .WithDescription(
-                "Read-only by design: observations are append-only (FR-4) and written solely by "
-                + "the collector, which is what makes the historical record trustworthy.\n\n"
-                + "Defaults to current values in the series' own period length, so a BLS "
-                + "annual-average row (M13, stored as PeriodType=Annual) cannot land on a monthly "
-                + "chart as a thirteenth month. Override with periodType to read those rows.\n\n"
+                "Read-only by design: both fact tables are append-only (FR-4) and written solely "
+                + "by the collector, which is what makes the historical record trustworthy.\n\n"
+                + "For CPI, defaults to monthly figures, so the annual average BLS publishes "
+                + "alongside them (period code M13) cannot land on a monthly chart as a "
+                + "thirteenth month. Pass periodType=Annual or Semiannual to read those instead. "
+                + "Ignored for SOFR, where every row is one business day.\n\n"
                 + "includeRevisions=true adds superseded vintages. asOfUtc reads the values the "
                 + "platform held at that instant — 'what did we believe June's CPI was, on 15 "
                 + "July?' — and supersedes includeRevisions, since a point in time has exactly "

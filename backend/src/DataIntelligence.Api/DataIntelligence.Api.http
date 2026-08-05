@@ -9,47 +9,59 @@ GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/summary
 Accept: application/json
 
 ### KPI tiles: latest value, change since the previous release, change year over year
-GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/kpis?seriesIds=2,5
+GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/kpis?seriesKeys=cpi,sofr
 Accept: application/json
 
 ### Trend, bucket width chosen automatically from the range and the densest series
-GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/trend?seriesIds=2&from=2024-01-01&to=2025-12-31
+GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/trend?seriesKeys=cpi&from=2024-01-01&to=2025-12-31
 Accept: application/json
 
 ### Trend, business-daily SOFR forced into monthly buckets (value is the mean; min/max carry the spread)
-GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/trend?seriesIds=5&from=2024-01-01&to=2025-12-31&granularity=Month
+GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/trend?seriesKeys=sofr&from=2024-01-01&to=2025-12-31&granularity=Month
+Accept: application/json
+
+### The SOFR distribution band: four measures read from the same daily rows
+GET {{DataIntelligence.Api_HostAddress}}/api/dashboard/trend?seriesKeys=sofr.p1,sofr.p25,sofr.p75,sofr.p99&from=2026-01-01
 Accept: application/json
 
 ### Publishers
 GET {{DataIntelligence.Api_HostAddress}}/api/sources
 Accept: application/json
 
-### Categories, for drill-down. Flat; the hierarchy is in parentCategoryId
-GET {{DataIntelligence.Api_HostAddress}}/api/categories
+### The series catalogue - seven measures across two datasets, latest value attached
+GET {{DataIntelligence.Api_HostAddress}}/api/series
 Accept: application/json
 
-### Series catalogue - active only, latest value attached
-GET {{DataIntelligence.Api_HostAddress}}/api/series?dataSourceId=1&page=1&pageSize=20
+### Just one dataset's measures
+GET {{DataIntelligence.Api_HostAddress}}/api/series?dataset=Sofr
 Accept: application/json
 
-### Series search, over title and code
-GET {{DataIntelligence.Api_HostAddress}}/api/series?search=seasonally
+### Search, over the title, the key, and the publisher's own code
+GET {{DataIntelligence.Api_HostAddress}}/api/series?search=percentile
 Accept: application/json
 
 ### One series
-GET {{DataIntelligence.Api_HostAddress}}/api/series/2
+GET {{DataIntelligence.Api_HostAddress}}/api/series/cpi
 Accept: application/json
 
-### Observations: current values, in the series' own period length, oldest first
-GET {{DataIntelligence.Api_HostAddress}}/api/series/2/observations?from=2024-01-01&to=2025-12-31
+### Observations: current values, oldest first. For CPI that means monthly figures only
+GET {{DataIntelligence.Api_HostAddress}}/api/series/cpi/observations?from=2024-01-01&to=2025-12-31
+Accept: application/json
+
+### The annual averages BLS publishes alongside the months (period code M13)
+GET {{DataIntelligence.Api_HostAddress}}/api/series/cpi/observations?periodType=Annual
+Accept: application/json
+
+### One measure of the SOFR daily rows
+GET {{DataIntelligence.Api_HostAddress}}/api/series/sofr.volume/observations?from=2026-01-01
 Accept: application/json
 
 ### Every vintage, including superseded ones
-GET {{DataIntelligence.Api_HostAddress}}/api/series/2/observations?from=2025-01-01&includeRevisions=true
+GET {{DataIntelligence.Api_HostAddress}}/api/series/cpi/observations?from=2025-01-01&includeRevisions=true
 Accept: application/json
 
 ### Point-in-time: what we believed on 15 July 2026, ignoring anything learned since
-GET {{DataIntelligence.Api_HostAddress}}/api/series/2/observations?from=2025-01-01&asOfUtc=2026-07-15T00:00:00Z
+GET {{DataIntelligence.Api_HostAddress}}/api/series/cpi/observations?from=2025-01-01&asOfUtc=2026-07-15T00:00:00Z
 Accept: application/json
 
 ### Collection health per source, rolling 30-day window
@@ -59,29 +71,6 @@ Accept: application/json
 ### Recent failures - the operations panel's default view
 GET {{DataIntelligence.Api_HostAddress}}/api/collection/runs?failuresOnly=true&pageSize=20
 Accept: application/json
-
-### Rename a series. rowVersion comes from GET /api/series/2; omit it to skip the concurrency check
-PUT {{DataIntelligence.Api_HostAddress}}/api/series/2
-Content-Type: application/json
-
-{
-  "title": "CPI-U, All items, US city average, seasonally adjusted",
-  "categoryId": 1,
-  "decimalPlaces": 3,
-  "isActive": true,
-  "rowVersion": "AAAAAAAAB9E="
-}
-
-### Create a category
-POST {{DataIntelligence.Api_HostAddress}}/api/categories
-Content-Type: application/json
-
-{
-  "code": "cpi-food",
-  "displayName": "CPI - Food and beverages",
-  "parentCategoryId": 1,
-  "sortOrder": 15
-}
 
 ### Pause a source without losing its history
 PATCH {{DataIntelligence.Api_HostAddress}}/api/sources/2

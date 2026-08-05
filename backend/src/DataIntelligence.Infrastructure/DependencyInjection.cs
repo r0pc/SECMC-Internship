@@ -86,10 +86,14 @@ public static class DependencyInjection
             HttpSourceFetcher.HttpClientName, ConfigureClient);
         services.AddHttpClient<IRobotsPolicy, RobotsTxtPolicy>(ConfigureClient);
 
-        // One adapter per publisher, resolved by SourceCode. Adding a third source is a new
-        // registration here and nothing else.
+        // One adapter and one writer per dataset, both resolved by SourceCode: the adapter knows
+        // the publisher's payload, the writer knows the table. Adding a third dataset is a pair
+        // of registrations here, a table, and nothing else.
         services.AddScoped<ISourceAdapter, BlsCpiAdapter>();
         services.AddScoped<ISourceAdapter, SofrAdapter>();
+
+        services.AddScoped<IDatasetWriter, CpiObservationWriter>();
+        services.AddScoped<IDatasetWriter, SofrDailyRateWriter>();
 
         services.AddScoped<ICollectionRunner, CollectionRunner>();
 

@@ -353,19 +353,16 @@ CREATE TABLE core.CpiObservation
     -- A superseded row is not current, and a current row is not superseded.
     CONSTRAINT CK_Cpi_Superseded CHECK
         ((IsCurrent = 1 AND SupersededAtUtc IS NULL)
-      OR (IsCurrent = 0 AND SupersededAtUtc IS NOT NULL)),
-
-    -- One row per period per vintage (FR-3). PeriodCode is part of the key
-    -- because M01, M13 and S01 all start on 1 January.
-    CONSTRAINT UQ_Cpi_Vintage UNIQUE NONCLUSTERED
-        (ReferenceYear, PeriodCode, RevisionNumber)
+      OR (IsCurrent = 0 AND SupersededAtUtc IS NOT NULL))
 );
 GO
 
--- Clustered on the analytical axis: every chart and trend query is a date range
--- over this one series. Page compression because consecutive index levels share
--- leading digits.
-CREATE CLUSTERED INDEX CIX_CpiObservation_Reference
+-- One row per period per vintage (FR-3), and the analytical ordering, because
+-- those want the same key: every chart and trend query is a date range over this
+-- one series. PeriodCode is in the key because M01, M13 and S01 all start on
+-- 1 January, so the date alone does not identify a period. Page compression
+-- because consecutive index levels share leading digits.
+CREATE UNIQUE CLUSTERED INDEX UQ_Cpi_Vintage
     ON core.CpiObservation (ReferenceDate, PeriodCode, RevisionNumber)
     WITH (DATA_COMPRESSION = PAGE);
 
@@ -408,9 +405,12 @@ GO
   day, and splitting them across rows would mean five self-joins to draw the
   distribution band that is the whole point of publishing them.
 
-  The averages and the index are nullable because the CSV extract leaves them
-  empty; the API populates them, and they are the NY Fed's own compounded
-  figures, not something this platform computes.
+  The averages and the index are modelled but not collected. The NY Fed
+  publishes them on a separate SOFR Averages and Index endpoint rather than on
+  the daily rate record, and they are empty in the CSV extract too. The columns
+  exist so adding that endpoint later is an adapter change rather than a
+  migration — and so nothing is ever tempted to compute a "SOFR average" here
+  and store it where the publisher's own compounded figure belongs.
 ------------------------------------------------------------------------------*/
 CREATE TABLE core.SofrDailyRate
 (
@@ -482,13 +482,13 @@ CREATE TABLE core.SofrDailyRate
     CONSTRAINT CK_Sofr_Revision CHECK (RevisionNumber >= 0),
     CONSTRAINT CK_Sofr_Superseded CHECK
         ((IsCurrent = 1 AND SupersededAtUtc IS NULL)
-      OR (IsCurrent = 0 AND SupersededAtUtc IS NOT NULL)),
-
-    CONSTRAINT UQ_Sofr_Vintage UNIQUE NONCLUSTERED (EffectiveDate, RevisionNumber)
+      OR (IsCurrent = 0 AND SupersededAtUtc IS NOT NULL))
 );
 GO
 
-CREATE CLUSTERED INDEX CIX_SofrDailyRate_Effective
+-- As for CPI: the vintage key and the analytical ordering are the same key, so
+-- one clustered unique index serves both.
+CREATE UNIQUE CLUSTERED INDEX UQ_Sofr_Vintage
     ON core.SofrDailyRate (EffectiveDate, RevisionNumber)
     WITH (DATA_COMPRESSION = PAGE);
 
@@ -1026,10 +1026,14 @@ GO
   an UPDATE trigger restricted to those two columns is the lighter option.
 
   EF Core. This script is the design of record; the equivalent is generated as a
-  migration so the migration history remains the deployment mechanism (NFR
-  Maintainability). The two are verified identical by creating a database from
-  each and diffing columns, indexes and constraints. The existing migration
-  (20260804110441_InitialTimeSeriesSchema) predates this rewrite and still
-  builds core.Series / core.Observation — it must be replaced before the two can
-  be diffed again.
+  migration (20260805122858_InitialTwoTableSchema) so the migration history
+  remains the deployment mechanism (NFR Maintainability). The two are verified
+  identical by creating a database from each and diffing columns, indexes and
+  constraints from sys.*: every index, filter and CHECK matches exactly.
+
+  The one systematic difference is cosmetic and unavoidable. EF emits a scalar
+  default as CONVERT([tinyint],(1)) where this script writes 1, so sys.columns
+  reports DEFAULT (CONVERT([tinyint],(1))) against DEFAULT ((1)). Same type, same
+  value, same behaviour — chasing it would mean writing CONVERT() casts through
+  a script whose readability is the reason it exists.
 ==============================================================================*/

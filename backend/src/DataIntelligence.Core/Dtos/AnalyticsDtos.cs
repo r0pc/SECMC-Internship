@@ -13,12 +13,20 @@ namespace DataIntelligence.Core.Dtos;
 public sealed record ObservationDto
 {
     public required long ObservationId { get; init; }
-    public required int SeriesId { get; init; }
+    public required string SeriesKey { get; init; }
     public required DateOnly ReferenceDate { get; init; }
-    public required PeriodType PeriodType { get; init; }
 
-    /// <summary>The publisher's own period token, verbatim: <c>M06</c>, <c>M13</c>.</summary>
-    public string? SourcePeriodCode { get; init; }
+    /// <summary>
+    /// The period length, for CPI. Null for SOFR, where every row is one business day and the
+    /// table carries no such column.
+    /// </summary>
+    public PeriodType? PeriodType { get; init; }
+
+    /// <summary>
+    /// The publisher's own period token, verbatim: <c>M06</c>, <c>M13</c>. Null for SOFR, whose
+    /// period is the effective date itself.
+    /// </summary>
+    public string? PeriodCode { get; init; }
 
     public required decimal Value { get; init; }
 
@@ -40,14 +48,13 @@ public sealed record ObservationDto
 /// <summary>A trend line: one series' points over the requested range (FR-10).</summary>
 public sealed record TrendSeriesDto
 {
-    public required int SeriesId { get; init; }
-    public required string SeriesCode { get; init; }
+    public required string SeriesKey { get; init; }
     public required string Title { get; init; }
 
     /// <summary>Axis label. Series with different units must not share an axis.</summary>
     public required string Unit { get; init; }
 
-    public byte? DecimalPlaces { get; init; }
+    public required byte DecimalPlaces { get; init; }
 
     /// <summary>The bucket width actually used, after <c>Auto</c> was resolved.</summary>
     public required TrendGranularity Granularity { get; init; }
@@ -85,11 +92,10 @@ public sealed record TrendPointDto
 /// </summary>
 public sealed record SeriesKpiDto
 {
-    public required int SeriesId { get; init; }
-    public required string SeriesCode { get; init; }
+    public required string SeriesKey { get; init; }
     public required string Title { get; init; }
     public required string Unit { get; init; }
-    public byte? DecimalPlaces { get; init; }
+    public required byte DecimalPlaces { get; init; }
     public required SeriesFrequency Frequency { get; init; }
     public required SeasonalAdjustment SeasonalAdjustment { get; init; }
 
@@ -186,14 +192,26 @@ public sealed record SourceHealthDto
 public sealed record DashboardSummaryDto
 {
     public required int SourceCount { get; init; }
-    public required int ActiveSeriesCount { get; init; }
-    public required int CategoryCount { get; init; }
 
-    /// <summary>Current vintages only — superseded revisions are not double-counted.</summary>
-    public required long ObservationCount { get; init; }
+    /// <summary>Chartable series, from the catalogue.</summary>
+    public required int SeriesCount { get; init; }
 
-    public DateOnly? EarliestReferenceDate { get; init; }
-    public DateOnly? LatestReferenceDate { get; init; }
+    /// <summary>
+    /// Stored rows per dataset, current vintages only — superseded revisions are not
+    /// double-counted. Reported separately because they are separate tables measuring different
+    /// things: a CPI row is a month, a SOFR row is a business day, and one total would invite
+    /// the reader to compare them.
+    /// </summary>
+    public required long CpiObservationCount { get; init; }
+
+    public required long SofrObservationCount { get; init; }
+
+    /// <summary>CPI monthly figures only — the annual and semiannual rows are not a span of history.</summary>
+    public DateOnly? EarliestCpiMonth { get; init; }
+
+    public DateOnly? LatestCpiMonth { get; init; }
+    public DateOnly? EarliestSofrDate { get; init; }
+    public DateOnly? LatestSofrDate { get; init; }
     public DateTime? LastCollectionAtUtc { get; init; }
     public required IReadOnlyList<SourceHealthDto> Sources { get; init; }
 }

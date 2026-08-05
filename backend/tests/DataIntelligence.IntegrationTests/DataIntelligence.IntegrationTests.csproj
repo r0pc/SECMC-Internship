@@ -24,4 +24,12 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- Same reference dataset as the unit tests; see the note in that project file. -->
+  <ItemGroup>
+    <Compile Include="..\Shared\PublishedData.cs" Link="Collection\PublishedData.cs" />
+    <Content Include="..\..\..\docs\example_data\*.csv"
+             Link="ExampleData\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

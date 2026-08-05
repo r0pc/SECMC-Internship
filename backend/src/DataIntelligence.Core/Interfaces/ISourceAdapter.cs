@@ -33,12 +33,10 @@ public interface ISourceAdapter
 
 /// <summary>Inputs the adapter needs to build a request.</summary>
 /// <param name="Source">The source row, for its endpoint and timeouts.</param>
-/// <param name="SeriesCodes">
-/// Active series for this source. BLS requires the caller to name the series it wants; the
-/// NY Fed returns everything and ignores this.
-/// </param>
 /// <param name="UtcNow">Current time, injected so request windows are deterministic under test.</param>
-public sealed record SourceRequestContext(
-    DataSource Source,
-    IReadOnlyList<string> SeriesCodes,
-    DateTime UtcNow);
+/// <remarks>
+/// No longer carries a list of series to request. Each adapter serves exactly one dataset and
+/// names its own series — <c>CUUR0000SA0</c>, or rate type SOFR — because that is now a fact
+/// about the schema rather than a row that could be edited out from under the collector.
+/// </remarks>
+public sealed record SourceRequestContext(DataSource Source, DateTime UtcNow);

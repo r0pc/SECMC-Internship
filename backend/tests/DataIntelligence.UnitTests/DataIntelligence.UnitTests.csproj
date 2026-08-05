@@ -23,4 +23,14 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- The published extracts are the reference dataset for the accuracy tests. Copied to the
+       output so the tests do not depend on the working directory, and linked from docs/ so there
+       is one copy in the repository rather than a stale duplicate under tests/. -->
+  <ItemGroup>
+    <Compile Include="..\Shared\PublishedData.cs" Link="Collection\PublishedData.cs" />
+    <Content Include="..\..\..\docs\example_data\*.csv"
+             Link="ExampleData\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

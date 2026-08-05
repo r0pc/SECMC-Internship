@@ -24,9 +24,8 @@ public class DataIntelligenceDbContext : DbContext
     public DbSet<DataSource> DataSources => Set<DataSource>();
     public DbSet<CollectionRun> CollectionRuns => Set<CollectionRun>();
     public DbSet<RawPayload> RawPayloads => Set<RawPayload>();
-    public DbSet<SeriesCategory> SeriesCategories => Set<SeriesCategory>();
-    public DbSet<Series> Series => Set<Series>();
-    public DbSet<Observation> Observations => Set<Observation>();
+    public DbSet<CpiObservation> CpiObservations => Set<CpiObservation>();
+    public DbSet<SofrDailyRate> SofrDailyRates => Set<SofrDailyRate>();
     public DbSet<RejectedObservation> RejectedObservations => Set<RejectedObservation>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
@@ -46,22 +45,26 @@ public class DataIntelligenceDbContext : DbContext
         ConfigureDataSource(modelBuilder.Entity<DataSource>());
         ConfigureCollectionRun(modelBuilder.Entity<CollectionRun>());
         ConfigureRawPayload(modelBuilder.Entity<RawPayload>());
-        ConfigureSeriesCategory(modelBuilder.Entity<SeriesCategory>());
-        ConfigureSeries(modelBuilder.Entity<Series>());
-        ConfigureObservation(modelBuilder.Entity<Observation>());
+        ConfigureCpiObservation(modelBuilder.Entity<CpiObservation>());
+        ConfigureSofrDailyRate(modelBuilder.Entity<SofrDailyRate>());
         ConfigureRejectedObservation(modelBuilder.Entity<RejectedObservation>());
 
         ConfigureSeedData(modelBuilder);
     }
 
     /// <summary>
-    /// The designated sources and their series (SOW 0.1), seeded through the migration so a
-    /// fresh deployment has something to collect from.
+    /// The designated sources (SOW 0.1), seeded through the migration so a fresh deployment has
+    /// something to collect from.
     /// </summary>
     /// <remarks>
     /// Reference data rather than user configuration: the platform is commissioned against these
     /// two publishers, and seeding here keeps identifiers stable across environments so config
     /// and logs can refer to a source by code. Mirrors section 7 of the hand-written schema.
+    /// <para>
+    /// There is no series seed. Each dataset is a table, so "which series do we collect" is
+    /// answered by the schema rather than by rows that could be edited into disagreement with the
+    /// collector; what a chart may draw is <c>SeriesCatalog</c>, in code.
+    /// </para>
     /// </remarks>
     private static void ConfigureSeedData(ModelBuilder modelBuilder)
     {
@@ -74,7 +77,7 @@ public class DataIntelligenceDbContext : DbContext
             {
                 DataSourceId = DataSource.BlsCpiId,
                 Code = DataSource.BlsCpiCode,
-                Name = "US Consumer Price Index",
+                Name = "US Consumer Price Index (CUUR0000SA0)",
                 Publisher = "U.S. Bureau of Labor Statistics",
                 LandingPageUrl = "https://www.bls.gov/data/home.htm",
                 ApiEndpoint = "https://api.bls.gov/publicAPI/v2/timeseries/data/",
@@ -96,7 +99,9 @@ public class DataIntelligenceDbContext : DbContext
                 Name = "Secured Overnight Financing Rate",
                 Publisher = "Federal Reserve Bank of New York",
                 LandingPageUrl = "https://www.newyorkfed.org/markets/reference-rates/sofr",
-                ApiEndpoint = "https://markets.newyorkfed.org/api/rates/secured/sofr/last/10.json",
+                // The adapter appends the date range for the current calendar year; the stored
+                // endpoint is the documentation of where the data comes from.
+                ApiEndpoint = "https://markets.newyorkfed.org/api/rates/secured/sofr/search.json",
                 AccessMethod = SourceAccessMethod.RestApi,
                 HttpMethod = "GET",
                 RequiresApiKey = false,
@@ -107,75 +112,6 @@ public class DataIntelligenceDbContext : DbContext
                 IsEnabled = true,
                 CreatedAtUtc = seededAt
             });
-
-        modelBuilder.Entity<SeriesCategory>().HasData(
-            new SeriesCategory { CategoryId = 1, Code = "cpi-headline", DisplayName = "CPI — All items", SortOrder = 10, CreatedAtUtc = seededAt },
-            new SeriesCategory { CategoryId = 2, Code = "cpi-core", DisplayName = "CPI — All items less food and energy", SortOrder = 20, CreatedAtUtc = seededAt },
-            new SeriesCategory { CategoryId = 3, Code = "sofr-rate", DisplayName = "SOFR — Rate", SortOrder = 30, CreatedAtUtc = seededAt },
-            new SeriesCategory { CategoryId = 4, Code = "sofr-liquidity", DisplayName = "SOFR — Volume and distribution", SortOrder = 40, CreatedAtUtc = seededAt });
-
-        const string cpiUnit = "Index 1982-84=100";
-        const string cpiUrl = "https://www.bls.gov/cpi/";
-        const string sofrUrl = "https://www.newyorkfed.org/markets/reference-rates/sofr";
-        const string rateUnit = "Percent per annum";
-
-        modelBuilder.Entity<Series>().HasData(
-            // CPI: SeriesCode is the BLS series ID. Both adjusted and unadjusted variants are
-            // tracked — SA is the right basis for month-over-month, NSA for year-over-year.
-            NewSeries(1, DataSource.BlsCpiId, "CUUR0000SA0", true, null,
-                "CPI-U, All items, US city average, not seasonally adjusted", 1, cpiUnit, 3,
-                SeriesFrequency.Monthly, SeasonalAdjustment.NotSeasonallyAdjusted, cpiUrl),
-            NewSeries(2, DataSource.BlsCpiId, "CUSR0000SA0", true, null,
-                "CPI-U, All items, US city average, seasonally adjusted", 1, cpiUnit, 3,
-                SeriesFrequency.Monthly, SeasonalAdjustment.SeasonallyAdjusted, cpiUrl),
-            NewSeries(3, DataSource.BlsCpiId, "CUUR0000SA0L1E", true, null,
-                "CPI-U, All items less food and energy, not seasonally adjusted", 2, cpiUnit, 3,
-                SeriesFrequency.Monthly, SeasonalAdjustment.NotSeasonallyAdjusted, cpiUrl),
-            NewSeries(4, DataSource.BlsCpiId, "CUSR0000SA0L1E", true, null,
-                "CPI-U, All items less food and energy, seasonally adjusted", 2, cpiUnit, 3,
-                SeriesFrequency.Monthly, SeasonalAdjustment.SeasonallyAdjusted, cpiUrl),
-
-            // SOFR: one API record carries six measures, so each gets a platform-assigned code
-            // and records the field it is read from.
-            NewSeries(5, DataSource.NyFedSofrId, "SOFR", false, "percentRate",
-                "SOFR, overnight rate", 3, rateUnit, 2,
-                SeriesFrequency.BusinessDaily, SeasonalAdjustment.NotApplicable, sofrUrl),
-            NewSeries(6, DataSource.NyFedSofrId, "SOFR_VOL", false, "volumeInBillions",
-                "SOFR, transaction volume", 4, "USD billions", 0,
-                SeriesFrequency.BusinessDaily, SeasonalAdjustment.NotApplicable, sofrUrl),
-            NewSeries(7, DataSource.NyFedSofrId, "SOFR_P1", false, "percentPercentile1",
-                "SOFR, 1st percentile", 4, rateUnit, 2,
-                SeriesFrequency.BusinessDaily, SeasonalAdjustment.NotApplicable, sofrUrl),
-            NewSeries(8, DataSource.NyFedSofrId, "SOFR_P25", false, "percentPercentile25",
-                "SOFR, 25th percentile", 4, rateUnit, 2,
-                SeriesFrequency.BusinessDaily, SeasonalAdjustment.NotApplicable, sofrUrl),
-            NewSeries(9, DataSource.NyFedSofrId, "SOFR_P75", false, "percentPercentile75",
-                "SOFR, 75th percentile", 4, rateUnit, 2,
-                SeriesFrequency.BusinessDaily, SeasonalAdjustment.NotApplicable, sofrUrl),
-            NewSeries(10, DataSource.NyFedSofrId, "SOFR_P99", false, "percentPercentile99",
-                "SOFR, 99th percentile", 4, rateUnit, 2,
-                SeriesFrequency.BusinessDaily, SeasonalAdjustment.NotApplicable, sofrUrl));
-
-        static Series NewSeries(
-            int id, byte sourceId, string code, bool sourceAssigned, string? fieldPath,
-            string title, int categoryId, string unit, byte decimals,
-            SeriesFrequency frequency, SeasonalAdjustment seasonal, string url) =>
-            new()
-            {
-                SeriesId = id,
-                DataSourceId = sourceId,
-                SeriesCode = code,
-                IsSourceAssignedCode = sourceAssigned,
-                SourceFieldPath = fieldPath,
-                Title = title,
-                CategoryId = categoryId,
-                Unit = unit,
-                DecimalPlaces = decimals,
-                Frequency = frequency,
-                SeasonalAdjustment = seasonal,
-                SourceUrl = url,
-                IsActive = true
-            };
     }
 
     // ---------------------------------------------------------------- collect
@@ -213,9 +149,13 @@ public class DataIntelligenceDbContext : DbContext
         entity.Property(e => e.IsEnabled).HasDefaultValue(true);
         entity.Property(e => e.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
 
+        entity.Property(e => e.RequiresApiKey).HasDefaultValue(false);
+
         // Stored as strings so the schema's CHECK constraints stay readable and the AI
         // assistant's generated SQL can filter on 'RestApi' rather than an opaque integer.
-        entity.Property(e => e.AccessMethod).HasConversion<string>().HasMaxLength(20).IsUnicode(false);
+        entity.Property(e => e.AccessMethod)
+            .HasConversion<string>().HasMaxLength(20).IsUnicode(false)
+            .HasDefaultValue(SourceAccessMethod.RestApi);
     }
 
     private static void ConfigureCollectionRun(EntityTypeBuilder<CollectionRun> entity)
@@ -250,9 +190,24 @@ public class DataIntelligenceDbContext : DbContext
         entity.Property(e => e.RequestUrl).HasMaxLength(1000).IsRequired();
         entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
 
-        entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(20).IsUnicode(false);
-        entity.Property(e => e.TriggerType).HasConversion<string>().HasMaxLength(20).IsUnicode(false);
+        entity.Property(e => e.Status)
+            .HasConversion<string>().HasMaxLength(20).IsUnicode(false)
+            .HasDefaultValue(CollectionRunStatus.Running);
+
+        entity.Property(e => e.TriggerType)
+            .HasConversion<string>().HasMaxLength(20).IsUnicode(false)
+            .HasDefaultValue(CollectionTriggerType.Scheduled);
+
         entity.Property(e => e.FailureCategory).HasConversion<string>().HasMaxLength(30).IsUnicode(false);
+
+        // A run inserted directly in SQL — a backfill script, a repair — starts at zero rather
+        // than failing on NOT NULL. Declared here as well as in the DDL so the migration and the
+        // hand-written script stay byte-identical.
+        entity.Property(e => e.ObservationsFetched).HasDefaultValue(0);
+        entity.Property(e => e.ObservationsInserted).HasDefaultValue(0);
+        entity.Property(e => e.ObservationsRevised).HasDefaultValue(0);
+        entity.Property(e => e.ObservationsUnchanged).HasDefaultValue(0);
+        entity.Property(e => e.ObservationsRejected).HasDefaultValue(0);
 
         entity.Property(e => e.DurationMs)
             .HasComputedColumnSql("DATEDIFF_BIG(MILLISECOND, [StartedAtUtc], [CompletedAtUtc])");
@@ -302,157 +257,170 @@ public class DataIntelligenceDbContext : DbContext
 
     // ------------------------------------------------------------------- core
 
-    private static void ConfigureSeriesCategory(EntityTypeBuilder<SeriesCategory> entity)
+    /// <summary>
+    /// BLS series CUUR0000SA0, one row per (year, period). See <see cref="CpiObservation"/> for
+    /// why the annual and semiannual figures live here alongside the months.
+    /// </summary>
+    private static void ConfigureCpiObservation(EntityTypeBuilder<CpiObservation> entity)
     {
-        entity.ToTable("SeriesCategory", "core", t => t.HasCheckConstraint(
-            "CK_SeriesCategory_NotSelfParent", "[ParentCategoryId] <> [CategoryId]"));
-
-        entity.HasKey(e => e.CategoryId);
-        entity.HasIndex(e => e.Code).IsUnique().HasDatabaseName("UQ_SeriesCategory_Code");
-
-        entity.Property(e => e.Code).HasMaxLength(100).IsRequired();
-        entity.Property(e => e.DisplayName).HasMaxLength(200).IsRequired();
-        entity.Property(e => e.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
-
-        entity.HasOne(e => e.Parent)
-            .WithMany(e => e.Children)
-            .HasForeignKey(e => e.ParentCategoryId)
-            .OnDelete(DeleteBehavior.NoAction);
-
-        // Filtered: most series sit at the top level, so an unfiltered index would be dead weight.
-        entity.HasIndex(e => e.ParentCategoryId, "IX_SeriesCategory_Parent")
-            .HasFilter("[ParentCategoryId] IS NOT NULL");
-    }
-
-    private static void ConfigureSeries(EntityTypeBuilder<Series> entity)
-    {
-        entity.ToTable("Series", "core", t =>
+        entity.ToTable("CpiObservation", "core", t =>
         {
-            t.HasCheckConstraint("CK_Series_Frequency",
-                "[Frequency] IN ('BusinessDaily','Daily','Weekly','Monthly','Quarterly','Semiannual','Annual')");
-            t.HasCheckConstraint("CK_Series_Seasonal",
-                "[SeasonalAdjustment] IN ('SeasonallyAdjusted','NotSeasonallyAdjusted','NotApplicable')");
-            t.HasCheckConstraint("CK_Series_SeenOrder",
-                "[LastSeenAtUtc] IS NULL OR [FirstSeenAtUtc] IS NULL OR [LastSeenAtUtc] >= [FirstSeenAtUtc]");
-            // A platform-assigned code must say where it came from, or the mapping is lost.
-            t.HasCheckConstraint("CK_Series_FieldPath",
-                "[IsSourceAssignedCode] = 1 OR [SourceFieldPath] IS NOT NULL");
-        });
+            t.HasCheckConstraint("CK_Cpi_SeriesCode",
+                $"[SeriesCode] = '{CpiObservation.SeriesCodeValue}'");
 
-        entity.HasKey(e => e.SeriesId);
+            // Enumerated rather than a range: 'M1' sorts inside 'M01'..'M13' and would otherwise
+            // be accepted as a second, silent spelling of January.
+            t.HasCheckConstraint("CK_Cpi_PeriodCode",
+                "[PeriodCode] IN ('M01','M02','M03','M04','M05','M06','M07','M08','M09','M10',"
+                + "'M11','M12','M13','S01','S02')");
 
-        // The dedup anchor (FR-3), scoped per source so two publishers may reuse a code.
-        entity.HasIndex(e => new { e.DataSourceId, e.SeriesCode })
-            .IsUnique()
-            .HasDatabaseName("UQ_Series_Code");
+            // The token and its meaning must agree, or a filter on PeriodType silently lets an
+            // annual average into a monthly trend.
+            t.HasCheckConstraint("CK_Cpi_PeriodType",
+                "([PeriodCode] BETWEEN 'M01' AND 'M12' AND [PeriodType] = 'Month') "
+                + "OR ([PeriodCode] = 'M13' AND [PeriodType] = 'Annual') "
+                + "OR ([PeriodCode] IN ('S01','S02') AND [PeriodType] = 'Semiannual')");
 
-        entity.Property(e => e.SeriesCode).HasMaxLength(100).IsRequired();
-        entity.Property(e => e.SourceFieldPath).HasMaxLength(200);
-        entity.Property(e => e.Title).HasMaxLength(400).IsRequired();
-        entity.Property(e => e.Unit).HasMaxLength(60).IsRequired();
-        entity.Property(e => e.SourceUrl).HasMaxLength(1000);
-        entity.Property(e => e.IsActive).HasDefaultValue(true);
-        entity.Property(e => e.IsSourceAssignedCode).HasDefaultValue(true);
+            // ReferenceDate is derived from (year, period) by the collector; this is the
+            // assertion that the derivation was not skipped or mis-mapped.
+            t.HasCheckConstraint("CK_Cpi_ReferenceDate",
+                "DAY([ReferenceDate]) = 1 "
+                + "AND YEAR([ReferenceDate]) = [ReferenceYear] "
+                + "AND MONTH([ReferenceDate]) = "
+                + "CASE WHEN [PeriodCode] BETWEEN 'M01' AND 'M12' "
+                + "THEN CONVERT(INT, SUBSTRING([PeriodCode], 2, 2)) "
+                + "WHEN [PeriodCode] = 'S02' THEN 7 ELSE 1 END");
 
-        entity.Property(e => e.Frequency).HasConversion<string>().HasMaxLength(20).IsUnicode(false);
-        entity.Property(e => e.SeasonalAdjustment).HasConversion<string>().HasMaxLength(24).IsUnicode(false);
+            t.HasCheckConstraint("CK_Cpi_ReferenceYear", "[ReferenceYear] BETWEEN 1913 AND 2200");
+            t.HasCheckConstraint("CK_Cpi_IndexValue", "[IndexValue] > 0");
+            t.HasCheckConstraint("CK_Cpi_Revision", "[RevisionNumber] >= 0");
 
-        // SQL Server always populates a rowversion column, so it is NOT NULL in the database
-        // even though the CLR property is nullable until the entity is first saved.
-        entity.Property(e => e.RowVersion).IsRowVersion().IsRequired();
-
-        entity.HasOne(e => e.DataSource)
-            .WithMany(d => d.Series)
-            .HasForeignKey(e => e.DataSourceId)
-            .OnDelete(DeleteBehavior.NoAction);
-
-        entity.HasOne(e => e.Category)
-            .WithMany(c => c.Series)
-            .HasForeignKey(e => e.CategoryId)
-            .OnDelete(DeleteBehavior.NoAction);
-
-        entity.HasOne<CollectionRun>()
-            .WithMany()
-            .HasForeignKey(e => e.FirstSeenRunId)
-            .OnDelete(DeleteBehavior.NoAction);
-
-        entity.HasIndex(e => new { e.CategoryId, e.IsActive })
-            .IncludeProperties(e => e.Title)
-            .HasDatabaseName("IX_Series_Category");
-
-        entity.HasIndex(e => new { e.DataSourceId, e.IsActive })
-            .IncludeProperties(e => new { e.SeriesCode, e.Title })
-            .HasDatabaseName("IX_Series_Source");
-    }
-
-    private static void ConfigureObservation(EntityTypeBuilder<Observation> entity)
-    {
-        entity.ToTable("Observation", "core", t =>
-        {
-            t.HasCheckConstraint("CK_Observation_PeriodType",
-                "[PeriodType] IN ('Day','Week','Month','Quarter','Semiannual','Annual')");
-            t.HasCheckConstraint("CK_Observation_Revision", "[RevisionNumber] >= 0");
             // A superseded row is not current, and a current row is not superseded.
-            t.HasCheckConstraint("CK_Observation_Superseded",
+            t.HasCheckConstraint("CK_Cpi_Superseded",
                 "([IsCurrent] = 1 AND [SupersededAtUtc] IS NULL) "
                 + "OR ([IsCurrent] = 0 AND [SupersededAtUtc] IS NOT NULL)");
         });
 
-        // ReferenceDate is carried in every unique key so the table can be partitioned on it
-        // later without redesign (NFR Scalability).
-        entity.HasKey(e => new { e.ObservationId, e.ReferenceDate })
-            .IsClustered(false)
-            .HasName("PK_Observation");
+        entity.HasKey(e => e.CpiObservationId).IsClustered(false).HasName("PK_CpiObservation");
 
-        entity.Property(e => e.ObservationId).UseIdentityColumn();
+        entity.Property(e => e.SeriesCode)
+            .HasMaxLength(20).IsUnicode(false)
+            .HasDefaultValue(CpiObservation.SeriesCodeValue);
 
-        entity.HasIndex(e => new { e.SeriesId, e.ReferenceDate, e.RevisionNumber })
-            .IsUnique()
-            .IsClustered(false)
-            .HasDatabaseName("UQ_Observation_Vintage");
-
-        // Exactly one current vintage per (series, period). The integrity rule the dashboards
-        // depend on: without it a botched revision could double-count a period unnoticed.
-        entity.HasIndex(e => new { e.SeriesId, e.ReferenceDate })
-            .IsUnique()
-            .HasFilter("[IsCurrent] = 1")
-            .HasDatabaseName("UQ_Observation_Current");
-
-        entity.Property(e => e.Value).HasColumnType("decimal(28,8)");
-        entity.Property(e => e.SourcePeriodCode).HasMaxLength(6).IsUnicode(false);
-        entity.Property(e => e.SourceAnnotation).HasMaxLength(100).IsUnicode(false);
-        entity.Property(e => e.RowHash).HasColumnType("binary(32)").IsRequired();
-        entity.Property(e => e.IsCurrent).HasDefaultValue(true);
+        entity.Property(e => e.PeriodCode).HasMaxLength(3).IsUnicode(false).IsRequired();
+        entity.Property(e => e.PeriodType).HasConversion<string>().HasMaxLength(10).IsUnicode(false);
+        entity.Property(e => e.IndexValue).HasColumnType("decimal(12,3)");
+        entity.Property(e => e.Footnotes).HasMaxLength(100).IsUnicode(false);
         entity.Property(e => e.RevisionNumber).HasDefaultValue((short)0);
-        entity.Property(e => e.PeriodType).HasConversion<string>().HasMaxLength(12).IsUnicode(false);
-
-        // Derived from a NOT NULL column so it can never be null; EF omits NOT NULL on computed
-        // columns, which is why the hand-written DDL omits it too — the two must stay identical.
-        entity.Property(e => e.ReferenceDateKey)
-            .HasComputedColumnSql("CONVERT(INT, CONVERT(CHAR(8), [ReferenceDate], 112))", stored: true);
-
-        entity.HasOne(e => e.Series)
-            .WithMany(s => s.Observations)
-            .HasForeignKey(e => e.SeriesId)
-            .OnDelete(DeleteBehavior.NoAction);
+        entity.Property(e => e.IsCurrent).HasDefaultValue(true);
+        entity.Property(e => e.RowHash).HasColumnType("binary(32)").IsRequired();
 
         entity.HasOne(e => e.Run)
             .WithMany()
             .HasForeignKey(e => e.CollectionRunId)
             .OnDelete(DeleteBehavior.NoAction);
 
-        // Clustered on the analytical axis: every dashboard query is a series over a date range,
-        // and this is the partition-aligned ordering.
-        entity.HasIndex(e => new { e.ReferenceDate, e.SeriesId })
+        // One row per period per vintage (FR-3), and clustered on the analytical axis, because
+        // those want the same key: every chart and trend query is a date range over this one
+        // series. PeriodCode is in the key because M01, M13 and S01 all start on 1 January, so
+        // the date alone does not identify a period.
+        entity.HasIndex(e => new { e.ReferenceDate, e.PeriodCode, e.RevisionNumber })
+            .IsUnique()
             .IsClustered()
-            .HasDatabaseName("CIX_Observation_Reference");
+            .HasDatabaseName("UQ_Cpi_Vintage");
 
-        entity.HasIndex(e => new { e.SeriesId, e.ReferenceDate }, "IX_Observation_Series_Reference")
+        // Exactly one current vintage per period. The integrity rule the dashboards depend on:
+        // without it a botched revision could double-count a month unnoticed.
+        entity.HasIndex(e => new { e.ReferenceYear, e.PeriodCode })
+            .IsUnique()
+            .HasFilter("[IsCurrent] = 1")
+            .HasDatabaseName("UQ_CpiObservation_Current");
+
+        entity.HasIndex(e => new { e.PeriodType, e.ReferenceDate }, "IX_CpiObservation_Monthly")
             .IsDescending(false, true)
-            .IncludeProperties(e => new { e.Value, e.RowHash, e.IsCurrent, e.PeriodType });
+            .IncludeProperties(e => new { e.IndexValue, e.RowHash, e.IsCurrent, e.RevisionNumber });
 
-        entity.HasIndex(e => e.CollectionRunId).HasDatabaseName("IX_Observation_Run");
+        entity.HasIndex(e => e.CollectionRunId).HasDatabaseName("IX_CpiObservation_Run");
     }
+
+    /// <summary>
+    /// SOFR, one row per business day. The six measures a day carries are columns, not rows —
+    /// see <see cref="SofrDailyRate"/>.
+    /// </summary>
+    private static void ConfigureSofrDailyRate(EntityTypeBuilder<SofrDailyRate> entity)
+    {
+        entity.ToTable("SofrDailyRate", "core", t =>
+        {
+            t.HasCheckConstraint("CK_Sofr_RateType", $"[RateType] = '{SofrDailyRate.RateTypeValue}'");
+            t.HasCheckConstraint("CK_Sofr_RevisionIndicator",
+                "[RevisionIndicator] IS NULL OR [RevisionIndicator] IN ('Y','N')");
+
+            // A decimal-shift parse bug produces 365 or 0.0365 where 3.65 was meant. The band is
+            // deliberately far wider than any rate the Fed has ever set, so it catches the bug
+            // without ever having an opinion on monetary policy.
+            t.HasCheckConstraint("CK_Sofr_RateRange", "[RatePercent] BETWEEN -5 AND 25");
+            t.HasCheckConstraint("CK_Sofr_Volume",
+                "[VolumeUsdBillions] IS NULL OR [VolumeUsdBillions] >= 0");
+
+            // Percentiles are ordered by definition. If they arrive out of order the columns have
+            // been mapped to the wrong fields.
+            t.HasCheckConstraint("CK_Sofr_PercentileOrder",
+                "([Percentile1Percent] IS NULL OR [Percentile25Percent] IS NULL "
+                + "OR [Percentile1Percent] <= [Percentile25Percent]) "
+                + "AND ([Percentile25Percent] IS NULL OR [Percentile75Percent] IS NULL "
+                + "OR [Percentile25Percent] <= [Percentile75Percent]) "
+                + "AND ([Percentile75Percent] IS NULL OR [Percentile99Percent] IS NULL "
+                + "OR [Percentile75Percent] <= [Percentile99Percent])");
+
+            t.HasCheckConstraint("CK_Sofr_Revision", "[RevisionNumber] >= 0");
+            t.HasCheckConstraint("CK_Sofr_Superseded",
+                "([IsCurrent] = 1 AND [SupersededAtUtc] IS NULL) "
+                + "OR ([IsCurrent] = 0 AND [SupersededAtUtc] IS NOT NULL)");
+        });
+
+        entity.HasKey(e => e.SofrDailyRateId).IsClustered(false).HasName("PK_SofrDailyRate");
+
+        entity.Property(e => e.RateType)
+            .HasMaxLength(5).IsUnicode(false)
+            .HasDefaultValue(SofrDailyRate.RateTypeValue);
+
+        entity.Property(e => e.RatePercent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.Percentile1Percent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.Percentile25Percent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.Percentile75Percent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.Percentile99Percent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.VolumeUsdBillions).HasColumnType("decimal(12,3)");
+        entity.Property(e => e.Average30DayPercent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.Average90DayPercent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.Average180DayPercent).HasColumnType("decimal(9,5)");
+        entity.Property(e => e.SofrIndexValue).HasColumnType("decimal(20,8)");
+        entity.Property(e => e.RevisionIndicator).HasColumnType("char(1)").IsUnicode(false);
+        entity.Property(e => e.FootnoteId).HasMaxLength(20).IsUnicode(false);
+        entity.Property(e => e.RevisionNumber).HasDefaultValue((short)0);
+        entity.Property(e => e.IsCurrent).HasDefaultValue(true);
+        entity.Property(e => e.RowHash).HasColumnType("binary(32)").IsRequired();
+
+        entity.HasOne(e => e.Run)
+            .WithMany()
+            .HasForeignKey(e => e.CollectionRunId)
+            .OnDelete(DeleteBehavior.NoAction);
+
+        // As for CPI: the vintage key and the analytical ordering are the same key, so one
+        // clustered unique index serves both.
+        entity.HasIndex(e => new { e.EffectiveDate, e.RevisionNumber })
+            .IsUnique()
+            .IsClustered()
+            .HasDatabaseName("UQ_Sofr_Vintage");
+
+        // Exactly one current vintage per business day.
+        entity.HasIndex(e => e.EffectiveDate)
+            .IsUnique()
+            .HasFilter("[IsCurrent] = 1")
+            .HasDatabaseName("UQ_SofrDailyRate_Current");
+
+        entity.HasIndex(e => e.CollectionRunId).HasDatabaseName("IX_SofrDailyRate_Run");
+    }
+
 
     private static void ConfigureRejectedObservation(EntityTypeBuilder<RejectedObservation> entity)
     {

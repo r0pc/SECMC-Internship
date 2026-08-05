@@ -1,3 +1,4 @@
+using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Infrastructure.Collection;
@@ -22,7 +23,7 @@ public class BlsCpiAdapterTests
 
     private static BlsCpiAdapter CreateAdapter(Action<BlsOptions>? customise = null)
     {
-        var bls = new BlsOptions { YearsOfHistory = 2, MaxSeriesPerRequest = 50 };
+        var bls = new BlsOptions { YearsOfHistory = 2 };
         customise?.Invoke(bls);
 
         return new BlsCpiAdapter(
@@ -30,12 +31,13 @@ public class BlsCpiAdapterTests
             NullLogger<BlsCpiAdapter>.Instance);
     }
 
-    private static SourceRequestContextBuilder Context() => new();
+    private static CpiObservationRecord Period(ParseResult result, string periodCode) =>
+        result.Records.OfType<CpiObservationRecord>().Single(r => r.PeriodCode == periodCode);
 
     [Fact]
-    public void BuildRequest_PostsSeriesAndYearRange()
+    public void BuildRequest_PostsTheOneSeriesAndTheYearRange()
     {
-        var request = CreateAdapter().BuildRequest(Context().WithSeries("CUUR0000SA0").Build());
+        var request = CreateAdapter().BuildRequest(new SourceRequestContextBuilder().Build());
 
         Assert.Equal(HttpMethod.Post, request.Method);
         Assert.Contains("api.bls.gov", request.Url);
@@ -45,11 +47,21 @@ public class BlsCpiAdapterTests
     }
 
     [Fact]
+    public void BuildRequest_NamesOnlyTheSeriesInScope()
+    {
+        // The series is a fact about the schema, not a row that could be edited: core.CpiObservation
+        // stores nothing else, so asking for anything else could only produce rejections.
+        var request = CreateAdapter().BuildRequest(new SourceRequestContextBuilder().Build());
+
+        Assert.Contains("\"seriesid\":[\"CUUR0000SA0\"]", request.JsonBody);
+    }
+
+    [Fact]
     public void BuildRequest_OmitsRegistrationKey_WhenNoneConfigured()
     {
         // Unregistered v2 calls still work under a smaller quota, so an absent key must not
         // send an empty one — BLS rejects that outright.
-        var request = CreateAdapter().BuildRequest(Context().WithSeries("CUUR0000SA0").Build());
+        var request = CreateAdapter().BuildRequest(new SourceRequestContextBuilder().Build());
 
         Assert.DoesNotContain("registrationkey", request.JsonBody);
     }
@@ -58,30 +70,9 @@ public class BlsCpiAdapterTests
     public void BuildRequest_IncludesRegistrationKey_WhenConfigured()
     {
         var request = CreateAdapter(o => o.ApiKey = "test-key")
-            .BuildRequest(Context().WithSeries("CUUR0000SA0").Build());
+            .BuildRequest(new SourceRequestContextBuilder().Build());
 
         Assert.Contains("\"registrationkey\":\"test-key\"", request.JsonBody);
-    }
-
-    [Fact]
-    public void BuildRequest_TrimsSeriesToTheApiCap()
-    {
-        // Exceeding the per-request cap fails the whole call, so the list is trimmed rather
-        // than discovered as an opaque API error.
-        var many = Enumerable.Range(1, 60).Select(i => $"SERIES{i}").ToArray();
-
-        var request = CreateAdapter(o => o.MaxSeriesPerRequest = 50)
-            .BuildRequest(Context().WithSeries(many).Build());
-
-        Assert.Contains("SERIES50", request.JsonBody);
-        Assert.DoesNotContain("SERIES51", request.JsonBody);
-    }
-
-    [Fact]
-    public void BuildRequest_Throws_WhenNoSeriesAreActive()
-    {
-        Assert.Throws<CollectionFailureException>(() =>
-            CreateAdapter().BuildRequest(Context().Build()));
     }
 
     [Fact]
@@ -92,11 +83,38 @@ public class BlsCpiAdapterTests
         Assert.Equal(2, result.EntriesSeen);
         Assert.Empty(result.Rejections);
 
-        var june = result.Records.Single(r => r.SourcePeriodCode == "M06");
+        var june = Period(result, "M06");
         Assert.Equal("CUUR0000SA0", june.SeriesCode);
+        Assert.Equal((short)2026, june.ReferenceYear);
         Assert.Equal(new DateOnly(2026, 6, 1), june.ReferenceDate);
         Assert.Equal(PeriodType.Month, june.PeriodType);
-        Assert.Equal(333.952m, june.Value);
+        Assert.Equal(333.952m, june.IndexValue);
+    }
+
+    [Fact]
+    public void Parse_KeepsTheAnnualAverageApartFromJanuary()
+    {
+        // M13 and M01 share a reference date, so only the period code tells them apart — and
+        // mislabelling M13 as a month would add a phantom thirteenth reading every year.
+        const string body = """
+            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUUR0000SA0","data":[
+              {"year":"2025","period":"M01","value":"317.671","footnotes":[{}]},
+              {"year":"2025","period":"M13","value":"321.943","footnotes":[{}]},
+              {"year":"2025","period":"S01","value":"320.229","footnotes":[{}]},
+              {"year":"2025","period":"S02","value":"324.000","footnotes":[{}]}]}]}}
+            """;
+
+        var result = CreateAdapter().Parse(body);
+
+        Assert.Empty(result.Rejections);
+        Assert.Equal(4, result.Records.Count);
+
+        Assert.Equal(PeriodType.Month, Period(result, "M01").PeriodType);
+        Assert.Equal(PeriodType.Annual, Period(result, "M13").PeriodType);
+        Assert.Equal(PeriodType.Semiannual, Period(result, "S01").PeriodType);
+
+        Assert.Equal(Period(result, "M01").ReferenceDate, Period(result, "M13").ReferenceDate);
+        Assert.Equal(new DateOnly(2025, 7, 1), Period(result, "S02").ReferenceDate);
     }
 
     [Fact]
@@ -105,8 +123,24 @@ public class BlsCpiAdapterTests
         // "R" is BLS's revised marker, and the signal that a figure has moved.
         var result = CreateAdapter().Parse(SamplePayload);
 
-        Assert.Equal("R", result.Records.Single(r => r.SourcePeriodCode == "M05").SourceAnnotation);
-        Assert.Null(result.Records.Single(r => r.SourcePeriodCode == "M06").SourceAnnotation);
+        Assert.Equal("R", Period(result, "M05").Footnotes);
+        Assert.Null(Period(result, "M06").Footnotes);
+    }
+
+    [Fact]
+    public void Parse_RejectsAnotherSeriesInTheSamePayload()
+    {
+        // Defensive, like the SOFR rate-type filter: we ask for one series, and a payload
+        // carrying another must not be filed against this table.
+        const string body = """
+            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUSR0000SA0","data":[
+              {"year":"2026","period":"M06","value":"333.952","footnotes":[{}]}]}]}}
+            """;
+
+        var result = CreateAdapter().Parse(body);
+
+        Assert.Empty(result.Records);
+        Assert.Equal(RejectionReason.UnknownSeries, result.Rejections.Single().Reason);
     }
 
     [Fact]
@@ -157,7 +191,7 @@ public class BlsCpiAdapterTests
     {
         // BLS publishes "-" for a suppressed figure. Storing that as zero would be a fabrication.
         const string body = """
-            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"X","data":[
+            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUUR0000SA0","data":[
               {"year":"2026","period":"M06","value":"-","footnotes":[{}]}]}]}}
             """;
 
@@ -171,7 +205,7 @@ public class BlsCpiAdapterTests
     public void Parse_RejectsNonNumericValues()
     {
         const string body = """
-            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"X","data":[
+            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUUR0000SA0","data":[
               {"year":"2026","period":"M06","value":"n/a","footnotes":[{}]}]}]}}
             """;
 
@@ -180,12 +214,14 @@ public class BlsCpiAdapterTests
         Assert.Equal(RejectionReason.TypeMismatch, result.Rejections.Single().Reason);
     }
 
-    [Fact]
-    public void Parse_RejectsUnrecognisedPeriodTokens()
+    [Theory]
+    [InlineData("Z99")]
+    [InlineData("Q01")]
+    public void Parse_RejectsUnrecognisedPeriodTokens(string period)
     {
-        const string body = """
-            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"X","data":[
-              {"year":"2026","period":"Z99","value":"1.0","footnotes":[{}]}]}]}}
+        var body = $$$"""
+            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUUR0000SA0","data":[
+              {"year":"2026","period":"{{{period}}}","value":"1.0","footnotes":[{}]}]}]}}
             """;
 
         var result = CreateAdapter().Parse(body);
@@ -197,7 +233,7 @@ public class BlsCpiAdapterTests
     public void Parse_RejectsARepeatedPeriodWithinOnePayload()
     {
         const string body = """
-            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"X","data":[
+            {"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUUR0000SA0","data":[
               {"year":"2026","period":"M06","value":"1.0","footnotes":[{}]},
               {"year":"2026","period":"M06","value":"2.0","footnotes":[{}]}]}]}}
             """;

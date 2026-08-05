@@ -67,9 +67,6 @@ public sealed class CollectionOptions
 
     [Required]
     public BlsOptions Bls { get; set; } = new();
-
-    [Required]
-    public SofrOptions Sofr { get; set; } = new();
 }
 
 /// <summary>Settings for the BLS Consumer Price Index source.</summary>
@@ -88,23 +85,13 @@ public sealed class BlsOptions
 
     /// <summary>
     /// Years of history to request each cycle. Two covers the year-over-year comparison the CPI
-    /// dashboards need, plus room for BLS's annual revision of seasonally adjusted series.
+    /// dashboards need, plus room for a restatement of a recent month.
     /// </summary>
+    /// <remarks>
+    /// The full published history reaches back to 1913 and the API caps a request at 20 years, so
+    /// a backfill is several requests with <c>TriggerType = Backfill</c> rather than a larger
+    /// value here — the day-to-day cycle has no reason to re-request a century of settled figures.
+    /// </remarks>
     [Range(1, 20)]
     public int YearsOfHistory { get; set; } = 2;
-
-    /// <summary>The API's own per-request cap; exceeding it fails the whole call.</summary>
-    [Range(1, 50)]
-    public int MaxSeriesPerRequest { get; set; } = 50;
-}
-
-/// <summary>Settings for the New York Fed SOFR source.</summary>
-public sealed class SofrOptions
-{
-    /// <summary>
-    /// Business days requested per cycle. More than one so a weekend, a holiday, or a short
-    /// outage is backfilled by the next successful cycle rather than leaving a permanent hole.
-    /// </summary>
-    [Range(1, 250)]
-    public int LookbackBusinessDays { get; set; } = 10;
 }

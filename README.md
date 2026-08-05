@@ -6,16 +6,21 @@ This repository contains the Data Intelligence Platform: a system that automatic
 collects US economic data on an hourly schedule, stores it in Microsoft SQL Server, and
 exposes it through analytics dashboards and a natural-language AI query assistant.
 
-Two publishers were designated under SOW 0.1, and ten series are tracked between them:
+Two publishers were designated under SOW 0.1, and one dataset is collected from each:
 
-| Source | Series | Cadence |
-| --- | --- | --- |
-| **Consumer Price Index** — U.S. Bureau of Labor Statistics | 4: all-items and core CPI, each seasonally adjusted and not | Monthly |
-| **Secured Overnight Financing Rate** — Federal Reserve Bank of New York | 6: the rate, transaction volume, and four percentiles | Business-daily |
+| Source | Scope | Cadence | Stored in |
+| --- | --- | --- | --- |
+| **Consumer Price Index** — U.S. Bureau of Labor Statistics | Series `CUUR0000SA0`: all items, U.S. city average, not seasonally adjusted | Monthly, plus the annual and semiannual averages published alongside | `core.CpiObservation` |
+| **Secured Overnight Financing Rate** — Federal Reserve Bank of New York | Rate type SOFR for the current calendar year — the rate, its volume, and four percentiles | Business-daily | `core.SofrDailyRate` |
+
+Each dataset gets its own table. With the scope fixed at one CPI series and one rate, a generic
+series registry with a shared fact table would have added a join to every query and bought
+nothing back; the six SOFR measures are columns of one business day rather than six rows.
 
 Both publish official JSON APIs, so the platform consumes those rather than scraping HTML
-(SOW 9: "prefer an official API if one exists"). The full catalogue, units, and history
-windows are in [docs/README.md](docs/README.md#what-the-platform-stores).
+(SOW 9: "prefer an official API if one exists"). The full scope, units, and history
+windows are in [docs/README.md](docs/README.md#what-the-platform-stores), and sample extracts of
+exactly what arrives are checked in under [docs/example_data/](docs/example_data/).
 
 The approved blueprint is
 [Scope_of_Work_Data_Intelligence_Platform.pdf](Scope_of_Work_Data_Intelligence_Platform.pdf)
@@ -87,7 +92,7 @@ pipeline is running against both live APIs.
 
 | Area | State |
 | --- | --- |
-| Database schema + ERD | Delivered. DDL verified against SQL Server and proven identical to the EF migration |
+| Database schema + ERD | Delivered. DDL verified against SQL Server, loaded with the real published extracts, and diffed against the EF migration |
 | Data collection (FR-1 – FR-4, FR-8) | Implemented. Hourly, per source, with failure categories, deduplication and revision history |
 | Read API (FR-7, FR-10 – FR-12) | Dashboard, catalogue, observation and collection-log endpoints |
 | Authentication (FR-9) | Not started — every endpoint is currently anonymous |
@@ -99,9 +104,13 @@ Known gaps worth tracking:
 - The `analytics.*` views and least-privilege roles exist only in
   [docs/database-schema.sql](docs/database-schema.sql), not in the EF migration, so a
   migration-built database lacks them.
+- The API host registers one read-write `DbContext`. The AI assistant's separate read-only
+  connection (SOW 9, Risk 3) is not wired up — it belongs with the SQL-safety work.
 - The Scope of Work still describes a single scraped source; it needs refreshing against the
-  signed-off API sources.
+  signed-off API sources, and against the narrowing to one CPI series and the current year of SOFR.
 - Architecture document and risk log (Phase 3 deliverables) are not started.
+- No performance measurement has been taken against the 3-second dashboard budget; there is no
+  seeded staging environment to take it in yet.
 
 ## Team
 

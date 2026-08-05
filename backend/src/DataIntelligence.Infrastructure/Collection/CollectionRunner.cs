@@ -27,6 +27,7 @@ public sealed class CollectionRunner : ICollectionRunner
     private readonly DataIntelligenceDbContext _db;
     private readonly ISourceFetcher _fetcher;
     private readonly IEnumerable<ISourceAdapter> _adapters;
+    private readonly IEnumerable<IDatasetWriter> _writers;
     private readonly IRobotsPolicy _robotsPolicy;
     private readonly CollectionOptions _options;
     private readonly TimeProvider _timeProvider;
@@ -36,6 +37,7 @@ public sealed class CollectionRunner : ICollectionRunner
         DataIntelligenceDbContext db,
         ISourceFetcher fetcher,
         IEnumerable<ISourceAdapter> adapters,
+        IEnumerable<IDatasetWriter> writers,
         IRobotsPolicy robotsPolicy,
         IOptions<CollectionOptions> options,
         TimeProvider timeProvider,
@@ -44,6 +46,7 @@ public sealed class CollectionRunner : ICollectionRunner
         _db = db;
         _fetcher = fetcher;
         _adapters = adapters;
+        _writers = writers;
         _robotsPolicy = robotsPolicy;
         _options = options.Value;
         _timeProvider = timeProvider;
@@ -80,11 +83,23 @@ public sealed class CollectionRunner : ICollectionRunner
             return Skipped(sourceCode, $"No adapter registered for '{sourceCode}'.");
         }
 
+        // Resolved before the run starts: a source with an adapter but no writer would fetch,
+        // parse, and then have nowhere to put the result — better to skip than to record a run
+        // that looks like it did something.
+        var writer = _writers.FirstOrDefault(w =>
+            string.Equals(w.SourceCode, sourceCode, StringComparison.Ordinal));
+
+        if (writer is null)
+        {
+            _logger.LogError("No dataset writer is registered for source {SourceCode}.", sourceCode);
+            return Skipped(sourceCode, $"No dataset writer registered for '{sourceCode}'.");
+        }
+
         var run = await StartRunAsync(source, scheduledForUtc, trigger, cancellationToken);
 
         try
         {
-            return await ExecuteAsync(source, adapter, run, cancellationToken);
+            return await ExecuteAsync(source, adapter, writer, run, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -118,7 +133,8 @@ public sealed class CollectionRunner : ICollectionRunner
     }
 
     private async Task<CollectionSummary> ExecuteAsync(
-        DataSource source, ISourceAdapter adapter, CollectionRun run, CancellationToken cancellationToken)
+        DataSource source, ISourceAdapter adapter, IDatasetWriter writer, CollectionRun run,
+        CancellationToken cancellationToken)
     {
         // 1. Compliance gate. Scoped to HTML sources: RFC 9309 governs crawlers of web content,
         //    while both confirmed sources are official APIs published for programmatic use and
@@ -141,13 +157,8 @@ public sealed class CollectionRunner : ICollectionRunner
         }
 
         // 2. Build and send the request.
-        var seriesCodes = await _db.Series
-            .Where(s => s.DataSourceId == source.DataSourceId && s.IsActive)
-            .Select(s => s.SeriesCode)
-            .ToListAsync(cancellationToken);
-
         var request = adapter.BuildRequest(
-            new SourceRequestContext(source, seriesCodes, _timeProvider.GetUtcNow().UtcDateTime));
+            new SourceRequestContext(source, _timeProvider.GetUtcNow().UtcDateTime));
 
         run.RequestUrl = request.Url;
 
@@ -212,7 +223,7 @@ public sealed class CollectionRunner : ICollectionRunner
                 continue;
             }
 
-            AddRejection(run, record.SeriesCode, record.ReferenceDate.ToString("O"),
+            AddRejection(run, record.SeriesCode, record.ReferenceLabel,
                 failure.Reason, failure.Detail, null, collectedAtUtc);
         }
 
@@ -226,7 +237,12 @@ public sealed class CollectionRunner : ICollectionRunner
             return Summarise(source.Code, run);
         }
 
-        await PersistAsync(source, run, accepted, collectedAtUtc, cancellationToken);
+        // 6. Persist, in whichever table this dataset owns.
+        var written = await writer.WriteAsync(run, accepted, collectedAtUtc, cancellationToken);
+
+        run.ObservationsInserted = written.Inserted;
+        run.ObservationsRevised = written.Revised;
+        run.ObservationsUnchanged = written.Unchanged;
 
         // Partial success is distinct on purpose: data landed, but something was lost, and that
         // is worth surfacing rather than reporting a clean run.
@@ -245,109 +261,6 @@ public sealed class CollectionRunner : ICollectionRunner
 
         return Summarise(source.Code, run);
     }
-
-    /// <summary>
-    /// Writes observations, applying deduplication (FR-3) and the revision rule (FR-4).
-    /// </summary>
-    /// <remarks>
-    /// Three outcomes per record: unseen period becomes revision 0; unchanged value writes
-    /// nothing; changed value supersedes the current vintage and appends the next one. Nothing
-    /// is ever updated in place except the IsCurrent flag being cleared.
-    /// </remarks>
-    private async Task PersistAsync(
-        DataSource source,
-        CollectionRun run,
-        List<ObservationRecord> records,
-        DateTime collectedAtUtc,
-        CancellationToken cancellationToken)
-    {
-        var seriesByCode = await _db.Series
-            .Where(s => s.DataSourceId == source.DataSourceId)
-            .ToDictionaryAsync(s => s.SeriesCode, StringComparer.Ordinal, cancellationToken);
-
-        var seriesIds = seriesByCode.Values.Select(s => s.SeriesId).ToList();
-        var referenceDates = records.Select(r => r.ReferenceDate).Distinct().ToList();
-
-        // One query for every current vintage in range, rather than one per record. With ten
-        // years of CPI history the difference between this and an N+1 is the whole cycle.
-        var currentVintages = await _db.Observations
-            .Where(o => seriesIds.Contains(o.SeriesId)
-                     && o.IsCurrent
-                     && referenceDates.Contains(o.ReferenceDate))
-            .ToDictionaryAsync(o => (o.SeriesId, o.ReferenceDate), cancellationToken);
-
-        foreach (var record in records)
-        {
-            if (!seriesByCode.TryGetValue(record.SeriesCode, out var series))
-            {
-                // Series are curated and seeded, so an unknown code means the publisher returned
-                // something we did not ask for. Logged rather than auto-created: silently
-                // inventing series is how a typo becomes permanent reference data.
-                AddRejection(run, record.SeriesCode, record.ReferenceDate.ToString("O"),
-                    RejectionReason.UnknownSeries,
-                    $"Series '{record.SeriesCode}' is not registered for source {source.Code}.",
-                    null, collectedAtUtc);
-                run.ObservationsRejected++;
-                continue;
-            }
-
-            series.LastSeenAtUtc = collectedAtUtc;
-            series.FirstSeenAtUtc ??= collectedAtUtc;
-            series.FirstSeenRunId ??= run.CollectionRunId;
-
-            var rowHash = record.ComputeRowHash();
-
-            if (!currentVintages.TryGetValue((series.SeriesId, record.ReferenceDate), out var current))
-            {
-                _db.Observations.Add(NewObservation(record, series.SeriesId, run, collectedAtUtc, rowHash, 0));
-                run.ObservationsInserted++;
-                continue;
-            }
-
-            // The publisher reissued the same figure. Nothing to record: the run itself is the
-            // evidence that we checked, and a second identical vintage is not merely wasteful —
-            // UQ_Observation_Current forbids it outright (FR-3).
-            if (current.RowHash.AsSpan().SequenceEqual(rowHash))
-            {
-                run.ObservationsUnchanged++;
-                continue;
-            }
-
-            // A genuine revision, in the order the unique index requires: release the current
-            // flag before claiming it, or the insert collides with the row it replaces.
-            current.IsCurrent = false;
-            current.SupersededAtUtc = collectedAtUtc;
-
-            _db.Observations.Add(NewObservation(
-                record, series.SeriesId, run, collectedAtUtc, rowHash, (short)(current.RevisionNumber + 1)));
-
-            run.ObservationsRevised++;
-
-            _logger.LogInformation(
-                "{Source}: {SeriesCode} {ReferenceDate:yyyy-MM-dd} revised from {Old} to {New}.",
-                source.Code, record.SeriesCode, record.ReferenceDate, current.Value, record.Value);
-        }
-
-        await _db.SaveChangesAsync(cancellationToken);
-    }
-
-    private static Observation NewObservation(
-        ObservationRecord record, int seriesId, CollectionRun run,
-        DateTime collectedAtUtc, byte[] rowHash, short revisionNumber) =>
-        new()
-        {
-            SeriesId = seriesId,
-            ReferenceDate = record.ReferenceDate,
-            PeriodType = record.PeriodType,
-            SourcePeriodCode = record.SourcePeriodCode,
-            RevisionNumber = revisionNumber,
-            IsCurrent = true,
-            Value = record.Value,
-            SourceAnnotation = record.SourceAnnotation,
-            CollectionRunId = run.CollectionRunId,
-            CollectedAtUtc = collectedAtUtc,
-            RowHash = rowHash
-        };
 
     /// <summary>
     /// Whether this response is byte-identical to the last successfully fetched one.

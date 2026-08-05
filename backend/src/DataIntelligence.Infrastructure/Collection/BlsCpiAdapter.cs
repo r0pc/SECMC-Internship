@@ -12,12 +12,13 @@ using Microsoft.Extensions.Options;
 namespace DataIntelligence.Infrastructure.Collection;
 
 /// <summary>
-/// Consumer Price Index from the BLS public timeseries API (v2).
+/// The Consumer Price Index series <see cref="CpiObservation.SeriesCodeValue"/>, from the BLS
+/// public timeseries API (v2).
 /// </summary>
 /// <remarks>
-/// Request is a POST naming the series and year range; the API key, when configured, raises the
-/// daily query budget substantially. Unregistered v2 calls still work, which is why an absent
-/// key degrades rather than fails — see <see cref="BlsOptions.ApiKey"/>.
+/// Request is a POST naming the one series in scope and the year range; the API key, when
+/// configured, raises the daily query budget substantially. Unregistered v2 calls still work,
+/// which is why an absent key degrades rather than fails — see <see cref="BlsOptions.ApiKey"/>.
 /// <para>
 /// The response wraps everything in a status envelope: HTTP 200 with
 /// <c>"status": "REQUEST_NOT_PROCESSED"</c> is a failure, so the status is checked before the
@@ -43,28 +44,14 @@ public sealed class BlsCpiAdapter : ISourceAdapter
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        if (context.SeriesCodes.Count == 0)
-        {
-            throw new CollectionFailureException(CollectionFailureCategory.Unknown,
-                "No active BLS series are configured; there is nothing to request.");
-        }
-
-        // The API caps series per request. Exceeding it fails the whole call, so the list is
-        // trimmed here and the drop is logged rather than discovered as an opaque API error.
-        var seriesIds = context.SeriesCodes.Take(_options.MaxSeriesPerRequest).ToArray();
-        if (context.SeriesCodes.Count > seriesIds.Length)
-        {
-            _logger.LogWarning(
-                "{Total} active BLS series exceeds the {Max}-per-request cap; requesting the first {Taken}.",
-                context.SeriesCodes.Count, _options.MaxSeriesPerRequest, seriesIds.Length);
-        }
-
         var endYear = context.UtcNow.Year;
         var startYear = endYear - Math.Max(0, _options.YearsOfHistory - 1);
 
         var payload = new Dictionary<string, object>
         {
-            ["seriesid"] = seriesIds,
+            // One series, named here rather than read from a table: it is the series this
+            // platform is commissioned for, and core.CpiObservation stores nothing else.
+            ["seriesid"] = new[] { CpiObservation.SeriesCodeValue },
             ["startyear"] = startYear.ToString(CultureInfo.InvariantCulture),
             ["endyear"] = endYear.ToString(CultureInfo.InvariantCulture)
         };
@@ -126,9 +113,9 @@ public sealed class BlsCpiAdapter : ISourceAdapter
             var rejections = new List<RejectedFragment>();
             var seen = 0;
 
-            // Guards against the same series and period appearing twice in one payload, which
-            // would otherwise surface as a confusing unique-index violation at save time.
-            var seenKeys = new HashSet<(string, DateOnly, PeriodType)>();
+            // Guards against the same period appearing twice in one payload, which would
+            // otherwise surface as a confusing unique-index violation at save time.
+            var seenPeriods = new HashSet<(short, string)>();
 
             foreach (var series in seriesArray.EnumerateArray())
             {
@@ -138,6 +125,19 @@ public sealed class BlsCpiAdapter : ISourceAdapter
                 {
                     rejections.Add(new RejectedFragment(null, null, RejectionReason.SchemaDrift,
                         "A series entry has no seriesID.", Truncate(series.ToString())));
+                    continue;
+                }
+
+                // Defensive, like the SOFR adapter's rate-type filter: we ask for one series, and
+                // a payload carrying another must not be filed against this table.
+                if (!string.Equals(seriesId, CpiObservation.SeriesCodeValue, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "BLS returned series {SeriesId}, which this platform does not store.", seriesId);
+
+                    rejections.Add(new RejectedFragment(seriesId, null, RejectionReason.UnknownSeries,
+                        $"Series '{seriesId}' is not {CpiObservation.SeriesCodeValue}.",
+                        Truncate(series.ToString())));
                     continue;
                 }
 
@@ -158,11 +158,11 @@ public sealed class BlsCpiAdapter : ISourceAdapter
                     }
 
                     var record = outcome.Record!;
-                    if (!seenKeys.Add((record.SeriesCode, record.ReferenceDate, record.PeriodType)))
+                    if (!seenPeriods.Add((record.ReferenceYear, record.PeriodCode)))
                     {
-                        rejections.Add(new RejectedFragment(record.SeriesCode,
-                            record.ReferenceDate.ToString("O"), RejectionReason.DuplicatePeriod,
-                            "This series and period already appeared in the same payload.",
+                        rejections.Add(new RejectedFragment(seriesId, record.ReferenceLabel,
+                            RejectionReason.DuplicatePeriod,
+                            "This period already appeared in the same payload.",
                             Truncate(entry.ToString())));
                         continue;
                     }
@@ -175,18 +175,19 @@ public sealed class BlsCpiAdapter : ISourceAdapter
         }
     }
 
-    private static (ObservationRecord? Record, RejectedFragment? Rejection) ParseEntry(
+    private static (CpiObservationRecord? Record, RejectedFragment? Rejection) ParseEntry(
         string seriesId, JsonElement entry)
     {
         var year = entry.TryGetProperty("year", out var y) ? y.GetString() : null;
         var period = entry.TryGetProperty("period", out var p) ? p.GetString() : null;
         var rawValue = entry.TryGetProperty("value", out var v) ? v.GetString() : null;
 
-        if (!BlsPeriod.TryParse(year, period, out var referenceDate, out var periodType))
+        if (!CpiPeriod.TryParse(year, period, out var referenceYear, out var periodCode,
+                out var referenceDate, out var periodType))
         {
             return (null, new RejectedFragment(seriesId, $"{year}/{period}",
                 RejectionReason.UnparseablePeriod,
-                $"Could not map BLS period '{period}' in year '{year}' to a reference date.",
+                $"Could not map BLS period '{period}' in year '{year}' to a stored period.",
                 Truncate(entry.ToString())));
         }
 
@@ -205,14 +206,14 @@ public sealed class BlsCpiAdapter : ISourceAdapter
                 $"Value '{Truncate(rawValue, 100)}' is not a number.", Truncate(entry.ToString())));
         }
 
-        return (new ObservationRecord
+        return (new CpiObservationRecord
         {
-            SeriesCode = seriesId,
-            ReferenceDate = referenceDate,
+            ReferenceYear = referenceYear,
+            PeriodCode = periodCode,
             PeriodType = periodType,
-            SourcePeriodCode = period,
-            Value = value,
-            SourceAnnotation = ReadFootnotes(entry)
+            ReferenceDate = referenceDate,
+            IndexValue = value,
+            Footnotes = ReadFootnotes(entry)
         }, null);
     }
 

@@ -31,21 +31,26 @@ public static class DashboardEndpoints
             .WithName("GetDashboardSummary")
             .WithSummary("Everything the landing page needs in one request.")
             .WithDescription(
-                "Catalogue counts, the span of stored history, and per-source collection health "
-                + "over a rolling window (30 days by default, clamped to 1–365).")
+                "Catalogue counts, the span of stored history per dataset, and per-source "
+                + "collection health over a rolling window (30 days by default, clamped to "
+                + "1–365).\n\n"
+                + "Row counts are reported per dataset rather than summed: a CPI row is a month "
+                + "and a SOFR row is a business day, so one total would only invite the reader to "
+                + "compare them.")
             .Produces<DashboardSummaryDto>();
 
         group.MapGet("/kpis", async (
-                string? seriesIds,
+                string? seriesKeys,
                 IDashboardQueryService dashboard,
                 CancellationToken cancellationToken) =>
             {
-                if (!ApiEndpoints.TryParseIds(seriesIds, ApiEndpoints.MaxKpiSeries, out var ids, out var error))
+                if (!ApiEndpoints.TryParseSeriesKeys(
+                        seriesKeys, ApiEndpoints.MaxKpiSeries, out var keys, out var error))
                 {
                     return ApiEndpoints.BadRequest(error!);
                 }
 
-                return Results.Ok(await dashboard.GetKpisAsync(ids, cancellationToken));
+                return Results.Ok(await dashboard.GetKpisAsync(keys, cancellationToken));
             })
             .WithName("GetKpis")
             .WithSummary("Headline numbers for the requested series.")
@@ -55,20 +60,21 @@ public static class DashboardEndpoints
                 + "The year-ago comparison matches the most recent release at or before one year "
                 + "prior rather than an exact date: SOFR does not publish on weekends, so an exact "
                 + "lookup would come back empty about two days in seven.\n\n"
-                + $"Accepts ?seriesIds=1,2 or repeated ?seriesIds=. At most {ApiEndpoints.MaxKpiSeries} "
-                + "series per request; unknown ids are skipped.")
+                + "Accepts ?seriesKeys=cpi,sofr or repeated ?seriesKeys=. At most "
+                + $"{ApiEndpoints.MaxKpiSeries} series per request; unknown keys are skipped.")
             .Produces<IReadOnlyList<SeriesKpiDto>>()
             .ProducesProblem(StatusCodes.Status400BadRequest);
 
         group.MapGet("/trend", async (
-                string? seriesIds,
+                string? seriesKeys,
                 DateOnly? from,
                 DateOnly? to,
                 TrendGranularity? granularity,
                 IDashboardQueryService dashboard,
                 CancellationToken cancellationToken) =>
             {
-                if (!ApiEndpoints.TryParseIds(seriesIds, ApiEndpoints.MaxTrendSeries, out var ids, out var error))
+                if (!ApiEndpoints.TryParseSeriesKeys(
+                        seriesKeys, ApiEndpoints.MaxTrendSeries, out var keys, out var error))
                 {
                     return ApiEndpoints.BadRequest(error!);
                 }
@@ -82,7 +88,7 @@ public static class DashboardEndpoints
 
                 var query = new TrendQuery
                 {
-                    SeriesIds = ids,
+                    SeriesKeys = keys,
                     From = from,
                     To = to,
                     Granularity = granularity ?? TrendGranularity.Auto

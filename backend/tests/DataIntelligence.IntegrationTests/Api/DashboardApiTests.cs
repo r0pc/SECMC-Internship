@@ -1,4 +1,5 @@
 using System.Net;
+using DataIntelligence.Core.Collection;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
@@ -13,6 +14,9 @@ namespace DataIntelligence.IntegrationTests.Api;
 public class DashboardApiTests
 {
     private const string MonthlyRange = "from=2023-01-01&to=2025-12-31";
+
+    private static readonly string Cpi = DashboardApiFixture.CpiKey;
+    private static readonly string Sofr = DashboardApiFixture.SofrKey;
 
     private readonly HttpClient _client;
 
@@ -29,13 +33,13 @@ public class DashboardApiTests
     // ------------------------------------------------------------- observations
 
     [Fact]
-    public async Task GetObservations_DefaultsToCurrentValuesInTheSeriesOwnPeriod()
+    public async Task GetObservations_DefaultsToCurrentMonthlyFigures()
     {
         var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}/observations?{MonthlyRange}");
+            $"/api/series/{Cpi}/observations?{MonthlyRange}");
 
         // The monthly history plus the current vintage of the revised month — and not the
-        // annual-average row, which sits in the same series with PeriodType=Annual.
+        // annual-average row, which shares 1 January 2024 with that year's January figure.
         Assert.Equal(DashboardApiFixture.MonthlyCount + 1, page.TotalCount);
         Assert.All(page.Items, o => Assert.Equal(PeriodType.Month, o.PeriodType));
         Assert.All(page.Items, o => Assert.True(o.IsCurrent));
@@ -55,22 +59,30 @@ public class DashboardApiTests
     [Fact]
     public async Task GetObservations_PeriodTypeAnnual_ReturnsTheAnnualAverageRow()
     {
+        // The row that could not previously be stored at all: it shares a reference date with
+        // January, and only the period code tells them apart.
         var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}/observations"
-            + $"?{MonthlyRange}&periodType={PeriodType.Annual}");
+            $"/api/series/{Cpi}/observations?{MonthlyRange}&periodType={PeriodType.Annual}");
 
         var annual = Assert.Single(page.Items);
 
-        Assert.Equal(DashboardApiFixture.AnnualReferenceDate, annual.ReferenceDate);
+        Assert.Equal(new DateOnly(DashboardApiFixture.AnnualYear, 1, 1), annual.ReferenceDate);
         Assert.Equal(DashboardApiFixture.AnnualValue, annual.Value);
-        Assert.Equal("M13", annual.SourcePeriodCode);
+        Assert.Equal(CpiPeriod.AnnualCode, annual.PeriodCode);
+
+        // And the monthly read for that same date returns January's figure, not this one.
+        var january = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
+            $"/api/series/{Cpi}/observations"
+            + $"?from={DashboardApiFixture.AnnualYear}-01-01&to={DashboardApiFixture.AnnualYear}-01-01");
+
+        Assert.Equal(DashboardApiFixture.MonthlyValue(0), Assert.Single(january.Items).Value);
     }
 
     [Fact]
     public async Task GetObservations_IncludeRevisions_ReturnsEveryVintage()
     {
         var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}/observations"
+            $"/api/series/{Cpi}/observations"
             + $"?from={DashboardApiFixture.RevisedMonth:yyyy-MM-dd}"
             + $"&to={DashboardApiFixture.RevisedMonth:yyyy-MM-dd}&includeRevisions=true");
 
@@ -94,7 +106,7 @@ public class DashboardApiTests
         var asOf = DashboardApiFixture.FirstCollectionUtc.AddMinutes(30);
 
         var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}/observations"
+            $"/api/series/{Cpi}/observations"
             + $"?from={DashboardApiFixture.RevisedMonth:yyyy-MM-dd}"
             + $"&to={DashboardApiFixture.RevisedMonth:yyyy-MM-dd}&asOfUtc={asOf:O}");
 
@@ -105,10 +117,26 @@ public class DashboardApiTests
     }
 
     [Fact]
+    public async Task GetObservations_ReadsOneMeasureOfASofrDay()
+    {
+        var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
+            $"/api/series/{DashboardApiFixture.SofrVolumeKey}/observations"
+            + "?from=2025-01-01&to=2025-02-28");
+
+        Assert.Equal(DashboardApiFixture.DailyPoints.Length, page.TotalCount);
+
+        // SOFR rows have no period column — every one of them is a business day.
+        Assert.All(page.Items, o => Assert.Null(o.PeriodType));
+        Assert.All(page.Items, o => Assert.Null(o.PeriodCode));
+
+        Assert.Equal(DashboardApiFixture.DailyPoints[0].Volume, page.Items[0].Value);
+    }
+
+    [Fact]
     public async Task GetObservations_SortDescending_ReturnsNewestFirst()
     {
         var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}/observations"
+            $"/api/series/{Cpi}/observations"
             + $"?{MonthlyRange}&sort={SortDirection.Descending}&pageSize=1");
 
         var newest = Assert.Single(page.Items);
@@ -118,9 +146,25 @@ public class DashboardApiTests
     }
 
     [Fact]
+    public async Task GetObservations_RangeWithNoData_ReturnsAnEmptyPageRatherThan404()
+    {
+        // A series that exists but has nothing in the requested window is not an error, and the
+        // distinction matters to a caller: 404 means "you asked for the wrong thing", an empty
+        // page means "there is nothing there yet".
+        var page = await _client.GetJsonAsync<PagedResult<ObservationDto>>(
+            $"/api/series/{Cpi}/observations?from=1990-01-01&to=1990-12-31");
+
+        Assert.Empty(page.Items);
+        Assert.Equal(0, page.TotalCount);
+        Assert.Equal(0, page.TotalPages);
+        Assert.False(page.HasNextPage);
+        Assert.False(page.HasPreviousPage);
+    }
+
+    [Fact]
     public async Task GetObservations_UnknownSeries_Returns404()
     {
-        var response = await _client.GetAsync("/api/series/99999/observations");
+        var response = await _client.GetAsync("/api/series/not-a-series/observations");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -129,8 +173,7 @@ public class DashboardApiTests
     public async Task GetObservations_BackwardsRange_Returns400()
     {
         var response = await _client.GetAsync(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}/observations"
-            + "?from=2025-12-31&to=2024-01-01");
+            $"/api/series/{Cpi}/observations?from=2025-12-31&to=2024-01-01");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -141,7 +184,7 @@ public class DashboardApiTests
     public async Task GetTrend_MonthGranularity_AggregatesDailyObservations()
     {
         var lines = await _client.GetJsonAsync<List<TrendSeriesDto>>(
-            $"/api/dashboard/trend?seriesIds={DashboardApiFixture.DailySeriesId}"
+            $"/api/dashboard/trend?seriesKeys={Sofr}"
             + $"&from=2025-01-01&to=2025-02-28&granularity={TrendGranularity.Month}");
 
         var line = Assert.Single(lines);
@@ -169,8 +212,7 @@ public class DashboardApiTests
     public async Task GetTrend_AutoGranularity_LeavesAShortRangeUnbucketed()
     {
         var lines = await _client.GetJsonAsync<List<TrendSeriesDto>>(
-            $"/api/dashboard/trend?seriesIds={DashboardApiFixture.DailySeriesId}"
-            + "&from=2025-01-01&to=2025-02-28");
+            $"/api/dashboard/trend?seriesKeys={Sofr}&from=2025-01-01&to=2025-02-28");
 
         var line = Assert.Single(lines);
 
@@ -181,14 +223,29 @@ public class DashboardApiTests
 
         // Ascending, and carrying the value as published.
         Assert.Equal(DashboardApiFixture.DailyPoints[0].Date, line.Points[0].BucketStart);
-        Assert.Equal(DashboardApiFixture.DailyPoints[0].Value, line.Points[0].Value, 2);
+        Assert.Equal(DashboardApiFixture.DailyPoints[0].Rate, line.Points[0].Value, 2);
+    }
+
+    [Fact]
+    public async Task GetTrend_ExcludesTheAnnualAverageFromAMonthlyLine()
+    {
+        // The reason CPI's period type is filtered everywhere: 2024's annual average shares a
+        // date with January, and charting both would draw the year twice.
+        var lines = await _client.GetJsonAsync<List<TrendSeriesDto>>(
+            $"/api/dashboard/trend?seriesKeys={Cpi}&from=2024-01-01&to=2024-01-31"
+            + $"&granularity={TrendGranularity.Month}");
+
+        var point = Assert.Single(Assert.Single(lines).Points);
+
+        Assert.Equal(1, point.ObservationCount);
+        Assert.Equal(DashboardApiFixture.MonthlyValue(0), point.Value, 2);
     }
 
     [Fact]
     public async Task GetTrend_ExcludesSupersededVintages()
     {
         var lines = await _client.GetJsonAsync<List<TrendSeriesDto>>(
-            $"/api/dashboard/trend?seriesIds={DashboardApiFixture.MonthlySeriesId}"
+            $"/api/dashboard/trend?seriesKeys={Cpi}"
             + $"&from={DashboardApiFixture.RevisedMonth:yyyy-MM-dd}&to=2025-12-31"
             + $"&granularity={TrendGranularity.Month}");
 
@@ -204,33 +261,31 @@ public class DashboardApiTests
     public async Task GetTrend_PreservesTheRequestedSeriesOrder()
     {
         var lines = await _client.GetJsonAsync<List<TrendSeriesDto>>(
-            $"/api/dashboard/trend?seriesIds={DashboardApiFixture.DailySeriesId},"
-            + $"{DashboardApiFixture.MonthlySeriesId}&from=2024-01-01&to=2025-12-31");
+            $"/api/dashboard/trend?seriesKeys={Sofr},{Cpi}&from=2024-01-01&to=2025-12-31");
 
         Assert.Equal(2, lines.Count);
-        Assert.Equal(DashboardApiFixture.DailySeriesId, lines[0].SeriesId);
-        Assert.Equal(DashboardApiFixture.MonthlySeriesId, lines[1].SeriesId);
+        Assert.Equal(Sofr, lines[0].SeriesKey);
+        Assert.Equal(Cpi, lines[1].SeriesKey);
 
         // Units travel with each line: these two are not comparable on one axis.
         Assert.NotEqual(lines[0].Unit, lines[1].Unit);
     }
 
     [Fact]
-    public async Task GetTrend_UnknownSeriesId_IsSkippedRatherThanFailingTheRequest()
+    public async Task GetTrend_UnknownSeriesKey_IsSkippedRatherThanFailingTheRequest()
     {
         var lines = await _client.GetJsonAsync<List<TrendSeriesDto>>(
-            $"/api/dashboard/trend?seriesIds=99999,{DashboardApiFixture.MonthlySeriesId}"
-            + "&from=2024-01-01&to=2025-12-31");
+            $"/api/dashboard/trend?seriesKeys=not-a-series,{Cpi}&from=2024-01-01&to=2025-12-31");
 
-        Assert.Equal(DashboardApiFixture.MonthlySeriesId, Assert.Single(lines).SeriesId);
+        Assert.Equal(Cpi, Assert.Single(lines).SeriesKey);
     }
 
     [Fact]
     public async Task GetTrend_TooManySeries_Returns400()
     {
-        var ids = string.Join(',', Enumerable.Range(1, 11));
+        var keys = string.Join(',', Enumerable.Range(1, 11).Select(i => $"series{i}"));
 
-        var response = await _client.GetAsync($"/api/dashboard/trend?seriesIds={ids}");
+        var response = await _client.GetAsync($"/api/dashboard/trend?seriesKeys={keys}");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -241,7 +296,7 @@ public class DashboardApiTests
     public async Task GetKpis_ComputesChangeAgainstPreviousAndYearAgoReleases()
     {
         var kpis = await _client.GetJsonAsync<List<SeriesKpiDto>>(
-            $"/api/dashboard/kpis?seriesIds={DashboardApiFixture.MonthlySeriesId}");
+            $"/api/dashboard/kpis?seriesKeys={Cpi}");
 
         var kpi = Assert.Single(kpis);
 
@@ -271,31 +326,40 @@ public class DashboardApiTests
     }
 
     [Fact]
-    public async Task GetKpis_SeriesWithNoObservations_ReturnsNullsRatherThanBeingOmitted()
+    public async Task GetKpis_ReadsEachSofrMeasureIndependently()
     {
-        // Series 10 is seeded reference data with no collected history.
-        var kpis = await _client.GetJsonAsync<List<SeriesKpiDto>>("/api/dashboard/kpis?seriesIds=10");
+        var kpis = await _client.GetJsonAsync<List<SeriesKpiDto>>(
+            $"/api/dashboard/kpis?seriesKeys={Sofr},{DashboardApiFixture.SofrVolumeKey}");
 
-        var kpi = Assert.Single(kpis);
+        Assert.Equal(2, kpis.Count);
 
-        Assert.Null(kpi.Latest);
-        Assert.Null(kpi.PreviousValue);
-        Assert.Null(kpi.PercentChangeFromYearAgo);
-        Assert.Equal("SOFR_P99", kpi.SeriesCode);
+        var latest = DashboardApiFixture.DailyPoints[^1];
+        var previous = DashboardApiFixture.DailyPoints[^2];
+
+        var rate = kpis.Single(k => k.SeriesKey == Sofr);
+
+        Assert.Equal(latest.Rate, rate.Latest!.Value);
+        Assert.Equal(latest.Rate - previous.Rate, rate.ChangeFromPrevious);
+
+        var volume = kpis.Single(k => k.SeriesKey == DashboardApiFixture.SofrVolumeKey);
+
+        Assert.Equal(latest.Volume, volume.Latest!.Value);
+        Assert.Equal(latest.Volume - previous.Volume, volume.ChangeFromPrevious);
     }
 
     [Fact]
-    public async Task GetKpis_WithoutSeriesIds_Returns400()
+    public async Task GetKpis_UnknownKey_IsSkipped()
+    {
+        var kpis = await _client.GetJsonAsync<List<SeriesKpiDto>>(
+            $"/api/dashboard/kpis?seriesKeys=not-a-series,{Cpi}");
+
+        Assert.Equal(Cpi, Assert.Single(kpis).SeriesKey);
+    }
+
+    [Fact]
+    public async Task GetKpis_WithoutSeriesKeys_Returns400()
     {
         var response = await _client.GetAsync("/api/dashboard/kpis");
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task GetKpis_NonNumericSeriesId_Returns400()
-    {
-        var response = await _client.GetAsync("/api/dashboard/kpis?seriesIds=1,abc");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -303,20 +367,23 @@ public class DashboardApiTests
     // ---------------------------------------------------- summary and run health
 
     [Fact]
-    public async Task GetSummary_ReportsCatalogueCountsAndTheSpanOfHistory()
+    public async Task GetSummary_ReportsPerDatasetCountsAndTheSpanOfHistory()
     {
         var summary = await _client.GetJsonAsync<DashboardSummaryDto>("/api/dashboard/summary");
 
         Assert.Equal(2, summary.SourceCount);
-        Assert.Equal(4, summary.CategoryCount);
-        Assert.True(summary.ActiveSeriesCount >= 9);
+        Assert.Equal(7, summary.SeriesCount);
 
-        // Current vintages only: the superseded December row is not counted twice.
-        var expected = DashboardApiFixture.MonthlyCount + 1 + 1 + DashboardApiFixture.DailyPoints.Length;
+        // Current vintages only: the superseded December row is not counted twice. The annual
+        // average is counted — it is a stored row — but does not extend the monthly span.
+        Assert.Equal(DashboardApiFixture.MonthlyCount + 1 + 1, summary.CpiObservationCount);
+        Assert.Equal(DashboardApiFixture.DailyPoints.Length, summary.SofrObservationCount);
 
-        Assert.Equal(expected, summary.ObservationCount);
-        Assert.Equal(DashboardApiFixture.AnnualReferenceDate, summary.EarliestReferenceDate);
-        Assert.Equal(DashboardApiFixture.RevisedMonth, summary.LatestReferenceDate);
+        Assert.Equal(DashboardApiFixture.MonthlyStart, summary.EarliestCpiMonth);
+        Assert.Equal(DashboardApiFixture.RevisedMonth, summary.LatestCpiMonth);
+        Assert.Equal(DashboardApiFixture.DailyPoints[0].Date, summary.EarliestSofrDate);
+        Assert.Equal(DashboardApiFixture.DailyPoints[^1].Date, summary.LatestSofrDate);
+
         Assert.NotNull(summary.LastCollectionAtUtc);
         Assert.Equal(2, summary.Sources.Count);
     }

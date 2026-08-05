@@ -9,17 +9,6 @@ namespace DataIntelligence.UnitTests.Analytics;
 /// </summary>
 public class SeriesPeriodsTests
 {
-    [Theory]
-    [InlineData(SeriesFrequency.BusinessDaily, PeriodType.Day)]
-    [InlineData(SeriesFrequency.Daily, PeriodType.Day)]
-    [InlineData(SeriesFrequency.Weekly, PeriodType.Week)]
-    [InlineData(SeriesFrequency.Monthly, PeriodType.Month)]
-    [InlineData(SeriesFrequency.Quarterly, PeriodType.Quarter)]
-    [InlineData(SeriesFrequency.Semiannual, PeriodType.Semiannual)]
-    [InlineData(SeriesFrequency.Annual, PeriodType.Annual)]
-    public void NativePeriodType_MapsEachFrequency(SeriesFrequency frequency, PeriodType expected) =>
-        Assert.Equal(expected, SeriesPeriods.NativePeriodType(frequency));
-
     [Fact]
     public void ResolveGranularity_HonoursAnExplicitChoice()
     {

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using DataIntelligence.Core.Analytics;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
@@ -7,12 +8,11 @@ using DataIntelligence.Core.Enums;
 namespace DataIntelligence.IntegrationTests.Api;
 
 /// <summary>
-/// The catalogue endpoints the dashboards navigate: sources, categories, and series (FR-7).
+/// The catalogue endpoints the dashboards navigate: sources and series (FR-7).
 /// </summary>
 [Collection(DashboardApiCollection.Name)]
 public class CatalogApiTests
 {
-    private readonly DashboardApiFixture _fixture;
     private readonly HttpClient _client;
 
     public CatalogApiTests(DashboardApiFixture fixture)
@@ -22,7 +22,6 @@ public class CatalogApiTests
             throw new InvalidOperationException(fixture.UnavailableReason);
         }
 
-        _fixture = fixture;
         _client = fixture.Client;
     }
 
@@ -47,8 +46,9 @@ public class CatalogApiTests
         Assert.Equal("U.S. Bureau of Labor Statistics", bls.Publisher);
         Assert.Equal(SourceAccessMethod.RestApi, bls.AccessMethod);
 
-        // Four CPI series are seeded by the migration.
-        Assert.Equal(4, bls.SeriesCount);
+        // One CPI series is in scope; SOFR contributes six measures of one table.
+        Assert.Equal(1, bls.SeriesCount);
+        Assert.Equal(6, sources.Single(s => s.Code == DataSource.NyFedSofrCode).SeriesCount);
     }
 
     [Fact]
@@ -88,37 +88,80 @@ public class CatalogApiTests
     }
 
     [Fact]
-    public async Task GetSeries_ReturnsSeededCatalogueWithLatestValue()
+    public async Task GetSeries_ReturnsTheWholeCatalogue()
+    {
+        var page = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series");
+
+        Assert.Equal(SeriesCatalog.All.Count, page.TotalCount);
+    }
+
+    [Fact]
+    public async Task GetSeries_AttachesTheCurrentVintageAsTheLatestValue()
     {
         var page = await _client.GetJsonAsync<PagedResult<SeriesDto>>(
             $"/api/series?dataSourceId={DataSource.BlsCpiId}");
 
-        Assert.Equal(4, page.TotalCount);
+        var cpi = Assert.Single(page.Items);
 
-        var monthly = page.Items.Single(s => s.SeriesId == DashboardApiFixture.MonthlySeriesId);
+        Assert.Equal(DashboardApiFixture.CpiKey, cpi.SeriesKey);
+        Assert.Equal(Dataset.Cpi, cpi.Dataset);
+        Assert.Equal(SeriesFrequency.Monthly, cpi.Frequency);
+        Assert.Equal(SeasonalAdjustment.NotSeasonallyAdjusted, cpi.SeasonalAdjustment);
+        Assert.Equal(CpiObservation.SeriesCodeValue, cpi.PublisherCode);
 
-        Assert.Equal(SeriesFrequency.Monthly, monthly.Frequency);
-        Assert.Equal(PeriodType.Month, monthly.NativePeriodType);
-        Assert.Equal("CPI — All items", monthly.CategoryName);
-        Assert.NotNull(monthly.RowVersion);
-
-        // The latest value is the current vintage of the revised month, not the superseded one.
-        Assert.NotNull(monthly.Latest);
-        Assert.Equal(DashboardApiFixture.RevisedMonth, monthly.Latest!.ReferenceDate);
-        Assert.Equal(DashboardApiFixture.RevisedCurrentValue, monthly.Latest.Value);
+        // The revised month's current vintage, not the superseded one — and a monthly figure
+        // rather than the annual average that shares a date with January.
+        Assert.NotNull(cpi.Latest);
+        Assert.Equal(DashboardApiFixture.RevisedMonth, cpi.Latest!.ReferenceDate);
+        Assert.Equal(DashboardApiFixture.RevisedCurrentValue, cpi.Latest.Value);
     }
 
     [Fact]
-    public async Task GetSeries_SearchMatchesTitleAndCode()
+    public async Task GetSeries_ReadsEachSofrMeasureFromTheSameRow()
     {
-        var byCode = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series?search=CUUR0000SA0L1E");
+        // Six catalogue entries over one table: the measures are columns of a business day, so
+        // they share an as-of date and differ only in value and unit.
+        var page = await _client.GetJsonAsync<PagedResult<SeriesDto>>(
+            $"/api/series?dataSourceId={DataSource.NyFedSofrId}");
 
-        Assert.Equal(DashboardApiFixture.MutableSeriesId, Assert.Single(byCode.Items).SeriesId);
+        var latestDay = DashboardApiFixture.DailyPoints[^1];
 
-        var byTitle = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series?search=SOFR");
+        var rate = page.Items.Single(s => s.SeriesKey == DashboardApiFixture.SofrKey);
+        var volume = page.Items.Single(s => s.SeriesKey == DashboardApiFixture.SofrVolumeKey);
 
-        Assert.All(byTitle.Items, s => Assert.Equal(DataSource.NyFedSofrId, s.DataSourceId));
-        Assert.NotEmpty(byTitle.Items);
+        Assert.Equal(latestDay.Date, rate.Latest!.ReferenceDate);
+        Assert.Equal(latestDay.Rate, rate.Latest.Value);
+        Assert.Equal("Percent per annum", rate.Unit);
+
+        Assert.Equal(latestDay.Date, volume.Latest!.ReferenceDate);
+        Assert.Equal(latestDay.Volume, volume.Latest.Value);
+        Assert.Equal("USD billions", volume.Unit);
+    }
+
+    [Fact]
+    public async Task GetSeries_FiltersByDataset()
+    {
+        var page = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series?dataset=Sofr");
+
+        Assert.Equal(6, page.TotalCount);
+        Assert.All(page.Items, s => Assert.Equal(Dataset.Sofr, s.Dataset));
+    }
+
+    [Fact]
+    public async Task GetSeries_SearchMatchesTitleKeyAndPublisherCode()
+    {
+        var byPublisherCode = await _client.GetJsonAsync<PagedResult<SeriesDto>>(
+            $"/api/series?search={CpiObservation.SeriesCodeValue}");
+
+        Assert.Equal(DashboardApiFixture.CpiKey, Assert.Single(byPublisherCode.Items).SeriesKey);
+
+        var byKey = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series?search=sofr.p");
+
+        Assert.Equal(4, byKey.TotalCount);
+
+        var byTitle = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series?search=percentile");
+
+        Assert.Equal(4, byTitle.TotalCount);
     }
 
     [Fact]
@@ -131,7 +174,7 @@ public class CatalogApiTests
         Assert.Equal(3, page.Items.Count);
         Assert.True(page.HasPreviousPage);
 
-        // Ten series are seeded, so page 2 of 3 is not the last.
+        // Seven series, so page 2 of 3 is not the last.
         Assert.True(page.HasNextPage);
 
         var clamped = await _client.GetJsonAsync<PagedResult<SeriesDto>>("/api/series?pageSize=100000");
@@ -140,168 +183,41 @@ public class CatalogApiTests
     }
 
     [Fact]
-    public async Task GetSeriesById_UnknownId_Returns404()
+    public async Task GetSeriesByKey_IsCaseInsensitive()
     {
-        var response = await _client.GetAsync("/api/series/99999");
+        var series = await _client.GetJsonAsync<SeriesDto>("/api/series/CPI");
+
+        Assert.Equal(DashboardApiFixture.CpiKey, series.SeriesKey);
+    }
+
+    [Fact]
+    public async Task GetSeriesByKey_UnknownKey_Returns404()
+    {
+        var response = await _client.GetAsync("/api/series/not-a-series");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
-    public async Task UpdateSeries_WithStaleRowVersion_Returns409()
+    public async Task Series_HasNoWriteSurface()
     {
-        var original = await _client.GetJsonAsync<SeriesDto>($"/api/series/{DashboardApiFixture.MutableSeriesId}");
-
-        var staleRowVersion = original.RowVersion;
-
-        var first = await _client.PutAsJsonAsync(
-            $"/api/series/{DashboardApiFixture.MutableSeriesId}",
-            new SeriesUpdateRequest
-            {
-                Title = "Renamed by the first caller",
-                CategoryId = original.CategoryId,
-                IsActive = true,
-                RowVersion = staleRowVersion
-            },
+        // The catalogue is fixed by the schema and the code that reads it; there is nothing to
+        // edit that would not simply make the platform disagree with itself.
+        var put = await _client.PutAsJsonAsync(
+            $"/api/series/{DashboardApiFixture.CpiKey}",
+            new { title = "Renamed" },
             DashboardApiFixture.Json);
 
-        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-
-        var updated = await first.Content.ReadFromJsonAsync<SeriesDto>(DashboardApiFixture.Json);
-
-        Assert.Equal("Renamed by the first caller", updated!.Title);
-        Assert.NotEqual(staleRowVersion, updated.RowVersion);
-
-        // The second caller read the row before the first write landed.
-        var second = await _client.PutAsJsonAsync(
-            $"/api/series/{DashboardApiFixture.MutableSeriesId}",
-            new SeriesUpdateRequest
-            {
-                Title = "Renamed by the second caller",
-                CategoryId = original.CategoryId,
-                IsActive = true,
-                RowVersion = staleRowVersion
-            },
-            DashboardApiFixture.Json);
-
-        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
-
-        var unchanged = await _client.GetJsonAsync<SeriesDto>($"/api/series/{DashboardApiFixture.MutableSeriesId}");
-
-        Assert.Equal("Renamed by the first caller", unchanged.Title);
-
-        await _client.PutAsJsonAsync(
-            $"/api/series/{DashboardApiFixture.MutableSeriesId}",
-            new SeriesUpdateRequest
-            {
-                Title = original.Title,
-                CategoryId = original.CategoryId,
-                IsActive = true,
-                RowVersion = unchanged.RowVersion
-            },
-            DashboardApiFixture.Json);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, put.StatusCode);
     }
 
     [Fact]
-    public async Task UpdateSeries_UnknownCategory_Returns400()
+    public async Task Categories_AreGone()
     {
-        var response = await _client.PutAsJsonAsync(
-            $"/api/series/{DashboardApiFixture.MonthlySeriesId}",
-            new SeriesUpdateRequest { Title = "Whatever", CategoryId = 9999, IsActive = true },
-            DashboardApiFixture.Json);
+        // The grouping dimension existed to organise a registry of many series. Two datasets in
+        // two tables need no such thing.
+        var response = await _client.GetAsync("/api/categories");
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Category_CreateReadUpdateDelete_RoundTrips()
-    {
-        var created = await _client.PostAsJsonAsync(
-            "/api/categories",
-            new SeriesCategoryCreateRequest
-            {
-                Code = $"api-test-{Guid.NewGuid():N}",
-                DisplayName = "Created by a test",
-                SortOrder = 900
-            },
-            DashboardApiFixture.Json);
-
-        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
-
-        var category = await created.Content.ReadFromJsonAsync<SeriesCategoryDto>(DashboardApiFixture.Json);
-
-        Assert.NotNull(category);
-        Assert.Equal($"/api/categories/{category!.CategoryId}", created.Headers.Location?.ToString());
-        Assert.Equal(0, category.SeriesCount);
-
-        var renamed = await _client.PutAsJsonAsync(
-            $"/api/categories/{category.CategoryId}",
-            new SeriesCategoryUpdateRequest { DisplayName = "Renamed", SortOrder = 901 },
-            DashboardApiFixture.Json);
-
-        Assert.Equal(HttpStatusCode.OK, renamed.StatusCode);
-
-        var fetched = await _client.GetJsonAsync<SeriesCategoryDto>($"/api/categories/{category.CategoryId}");
-
-        Assert.Equal("Renamed", fetched.DisplayName);
-
-        var deleted = await _client.DeleteAsync($"/api/categories/{category.CategoryId}");
-
-        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
-
-        var gone = await _client.GetAsync($"/api/categories/{category.CategoryId}");
-
-        Assert.Equal(HttpStatusCode.NotFound, gone.StatusCode);
-    }
-
-    [Fact]
-    public async Task CreateCategory_DuplicateCode_Returns409()
-    {
-        var response = await _client.PostAsJsonAsync(
-            "/api/categories",
-            new SeriesCategoryCreateRequest { Code = "cpi-headline", DisplayName = "Duplicate" },
-            DashboardApiFixture.Json);
-
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task CreateCategory_UnknownParent_Returns400()
-    {
-        var response = await _client.PostAsJsonAsync(
-            "/api/categories",
-            new SeriesCategoryCreateRequest
-            {
-                Code = $"api-test-{Guid.NewGuid():N}",
-                DisplayName = "Orphan",
-                ParentCategoryId = 9999
-            },
-            DashboardApiFixture.Json);
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task CreateCategory_MissingDisplayName_Returns400()
-    {
-        var response = await _client.PostAsJsonAsync(
-            "/api/categories",
-            new SeriesCategoryCreateRequest { Code = $"api-test-{Guid.NewGuid():N}", DisplayName = "" },
-            DashboardApiFixture.Json);
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task DeleteCategory_WithSeries_Returns409()
-    {
-        // Category 1 holds the seeded headline CPI series.
-        var response = await _client.DeleteAsync("/api/categories/1");
-
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-
-        await using var db = _fixture.CreateContext();
-
-        Assert.True(await db.SeriesCategories.FindAsync(1) is not null);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 }

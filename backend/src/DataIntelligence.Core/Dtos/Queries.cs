@@ -3,22 +3,22 @@ using DataIntelligence.Core.Enums;
 namespace DataIntelligence.Core.Dtos;
 
 /// <summary>Filters for the series catalogue (FR-11).</summary>
+/// <remarks>
+/// The catalogue is seven entries, so this is convenience for the caller rather than a way to
+/// keep a query cheap. Paging is kept only so every list endpoint has the same shape.
+/// </remarks>
 public sealed record SeriesQuery
 {
     public byte? DataSourceId { get; init; }
-    public int? CategoryId { get; init; }
-    public SeriesFrequency? Frequency { get; init; }
-    public SeasonalAdjustment? SeasonalAdjustment { get; init; }
 
-    /// <summary>Null returns active and inactive alike; the endpoint defaults it to true.</summary>
-    public bool? IsActive { get; init; }
+    public Dataset? Dataset { get; init; }
 
-    /// <summary>Case-insensitive substring of the title or the series code.</summary>
+    /// <summary>Case-insensitive substring of the title, the key, or the publisher's code.</summary>
     public string? Search { get; init; }
 
     /// <summary>
-    /// Include each series' newest value. One extra query per distinct frequency in the page,
-    /// so it is opt-out for callers that only need names.
+    /// Include each series' newest value. One extra query per dataset in the page, so it is
+    /// opt-out for callers that only need names.
     /// </summary>
     public bool IncludeLatest { get; init; } = true;
 
@@ -26,22 +26,25 @@ public sealed record SeriesQuery
 }
 
 /// <summary>
-/// A window onto one series' observations.
+/// A window onto one series' stored rows.
 /// </summary>
 /// <remarks>
-/// The defaults are the ones a chart wants: current vintages only, in the series' own period
-/// length, oldest first. <see cref="IncludeRevisions"/> and <see cref="AsOfUtc"/> open up the
-/// history the append-only table retains (FR-4) for anyone who needs it.
+/// The defaults are the ones a chart wants: current vintages only, oldest first, and — for CPI —
+/// monthly figures rather than the annual and semiannual averages published alongside them.
+/// <see cref="IncludeRevisions"/> and <see cref="AsOfUtc"/> open up the history the append-only
+/// tables retain (FR-4) for anyone who needs it.
 /// </remarks>
 public sealed record ObservationQuery
 {
-    public required int SeriesId { get; init; }
+    public required string SeriesKey { get; init; }
+
     public DateOnly? From { get; init; }
     public DateOnly? To { get; init; }
 
     /// <summary>
-    /// Defaults to the series' native period, which is what keeps a BLS annual-average row out
-    /// of a monthly chart. Set explicitly to read those rows instead.
+    /// CPI only, and defaulted to <see cref="Enums.PeriodType.Month"/> — which is what keeps a
+    /// BLS annual average out of a monthly chart. Set explicitly to read those rows instead.
+    /// Ignored for SOFR, where every row is one business day.
     /// </summary>
     public PeriodType? PeriodType { get; init; }
 
@@ -71,7 +74,7 @@ public sealed record TrendQuery
     /// Capped by the endpoint. Each line is one indexed range scan, and a chart carrying more
     /// than a handful of series is unreadable long before it is slow.
     /// </summary>
-    public required IReadOnlyList<int> SeriesIds { get; init; }
+    public required IReadOnlyList<string> SeriesKeys { get; init; }
 
     public DateOnly? From { get; init; }
     public DateOnly? To { get; init; }

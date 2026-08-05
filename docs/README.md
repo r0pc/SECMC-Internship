@@ -4,7 +4,7 @@ Home for the Phase 3 and Phase 6 artifacts called for in the Scope of Work.
 
 | Document | SOW reference | Status |
 | --- | --- | --- |
-| [Database schema (DDL)](database-schema.sql) | Phase 3 deliverable | Drafted — created on SQL Server 2025 and loaded with the sample extracts below; **ahead of the EF migration** |
+| [Database schema (DDL)](database-schema.sql) | Phase 3 deliverable | Drafted — created on SQL Server 2025, loaded with the sample extracts below, and verified against the EF migration |
 | ERD — [SVG](database-erd.svg) · [PDF](database-erd.pdf) | Phase 3 deliverable | Drafted — 12 tables, 11 relationships |
 | Architecture document | Phase 3 deliverable | Not started |
 | Risk log | Phase 3 deliverable | Not started |
@@ -101,10 +101,16 @@ chart shows a gap instead of a fabricated level.
 ### Adding to it
 
 Another series or another rate gets **its own table**, on the same pattern: a fact table keyed
-on its own period, a `collect.DataSource` row, and an `ISourceAdapter`. It does not get added
-as a value in an existing table — `CK_Cpi_SeriesCode` and `CK_Sofr_RateType` exist to stop that
-happening by accident, because a table that quietly holds two series is one that every query
-then has to remember to filter.
+on its own period, a `collect.DataSource` row, an `ISourceAdapter` for the publisher's payload,
+and an `IDatasetWriter` for the table. It does not get added as a value in an existing table —
+`CK_Cpi_SeriesCode` and `CK_Sofr_RateType` exist to stop that happening by accident, because a
+table that quietly holds two series is one that every query then has to remember to filter.
+
+What a chart may *draw* is a separate, smaller question, answered by `SeriesCatalog` in the
+backend: seven entries, one for CPI and six for the measures a SOFR row carries as columns. That
+list replaced the `core.Series` table — with the scope fixed, a registry of rows was only a
+second place for the answer to live, and a place where a row could be edited into disagreement
+with the collector.
 
 The approved Scope of Work itself lives at
 [Scope_of_Work_Data_Intelligence_Platform.pdf](../Scope_of_Work_Data_Intelligence_Platform.pdf).

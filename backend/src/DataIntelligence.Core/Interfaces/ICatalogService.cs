@@ -3,18 +3,22 @@ using DataIntelligence.Core.Dtos;
 namespace DataIntelligence.Core.Interfaces;
 
 /// <summary>
-/// Reads and edits the catalogue the dashboards navigate: sources, categories, and series
+/// Reads the catalogue the dashboards navigate: the two sources, and the measures they publish
 /// (FR-7, FR-11).
 /// </summary>
 /// <remarks>
-/// The write surface is deliberately narrow. Sources and series are reference data that
-/// describe a publisher's output, so only the fields the platform owns — presentation,
-/// grouping, and polling behaviour — can be edited. Categories are the platform's own
-/// invention and are fully CRUD.
+/// The write surface is one method. Sources describe a publisher's output, so only the fields the
+/// platform owns — polling behaviour and compliance metadata — can be edited.
 /// <para>
-/// Observations have no write surface at all. They are append-only by requirement (FR-4) and
-/// are written solely by the collector, which is what makes the historical record trustworthy;
-/// an API that could edit them would undo that in one call.
+/// Series have no write surface at all any more. Each dataset is its own table with its series
+/// pinned by a CHECK constraint, so what exists is a fact about the schema; presentation comes
+/// from <c>SeriesCatalog</c> in code. There is nothing left to edit that would not simply make
+/// the platform disagree with itself.
+/// </para>
+/// <para>
+/// Nor do observations, for the older and better reason: they are append-only by requirement
+/// (FR-4) and written solely by the collector, which is what makes the historical record
+/// trustworthy. An API that could edit them would undo that in one call.
 /// </para>
 /// </remarks>
 public interface ICatalogService
@@ -28,31 +32,8 @@ public interface ICatalogService
         DataSourceUpdateRequest request,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<SeriesCategoryDto>> GetCategoriesAsync(CancellationToken cancellationToken);
-
-    Task<SeriesCategoryDto?> GetCategoryAsync(int categoryId, CancellationToken cancellationToken);
-
-    Task<WriteResult<SeriesCategoryDto>> CreateCategoryAsync(
-        SeriesCategoryCreateRequest request,
-        CancellationToken cancellationToken);
-
-    Task<WriteResult<SeriesCategoryDto>> UpdateCategoryAsync(
-        int categoryId,
-        SeriesCategoryUpdateRequest request,
-        CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Removes a category. Refused while series or child categories still point at it — the
-    /// alternative is orphaning them or cascading a delete through data the user cannot see.
-    /// </summary>
-    Task<WriteResult<bool>> DeleteCategoryAsync(int categoryId, CancellationToken cancellationToken);
-
     Task<PagedResult<SeriesDto>> GetSeriesAsync(SeriesQuery query, CancellationToken cancellationToken);
 
-    Task<SeriesDto?> GetSeriesByIdAsync(int seriesId, CancellationToken cancellationToken);
-
-    Task<WriteResult<SeriesDto>> UpdateSeriesAsync(
-        int seriesId,
-        SeriesUpdateRequest request,
-        CancellationToken cancellationToken);
+    /// <summary>Null when no series is registered under that key, which the endpoint turns into a 404.</summary>
+    Task<SeriesDto?> GetSeriesByKeyAsync(string seriesKey, CancellationToken cancellationToken);
 }

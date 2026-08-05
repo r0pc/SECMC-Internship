@@ -25,7 +25,6 @@ public static class ApiEndpoints
         var api = app.MapGroup("/api");
 
         api.MapSourceEndpoints();
-        api.MapCategoryEndpoints();
         api.MapSeriesEndpoints();
         api.MapDashboardEndpoints();
         api.MapCollectionEndpoints();
@@ -73,44 +72,42 @@ public static class ApiEndpoints
     }
 
     /// <summary>
-    /// Parses a series-id list. Accepts <c>?seriesIds=1,2,3</c> and <c>?seriesIds=1&amp;seriesIds=2</c>
-    /// alike — ASP.NET joins repeated values with commas before binding them to a string, so one
-    /// parser covers both and the frontend can use whichever its HTTP client produces.
+    /// Parses a series-key list. Accepts <c>?seriesKeys=cpi,sofr</c> and
+    /// <c>?seriesKeys=cpi&amp;seriesKeys=sofr</c> alike — ASP.NET joins repeated values with
+    /// commas before binding them to a string, so one parser covers both and the frontend can use
+    /// whichever its HTTP client produces.
     /// </summary>
-    internal static bool TryParseIds(
+    /// <remarks>
+    /// Unrecognised keys pass through rather than failing here. The query service drops them, so
+    /// one stale bookmark costs a missing line rather than a blank dashboard; only the count and
+    /// an entirely absent parameter are worth a 400.
+    /// </remarks>
+    internal static bool TryParseSeriesKeys(
         string? raw,
         int maximum,
-        out int[] ids,
+        out string[] keys,
         out string? error)
     {
-        ids = [];
+        const string missing =
+            "seriesKeys is required — supply one or more keys, for example ?seriesKeys=cpi,sofr.";
+
+        keys = [];
         error = null;
 
         if (string.IsNullOrWhiteSpace(raw))
         {
-            error = "seriesIds is required — supply one or more ids, for example ?seriesIds=1,2.";
+            error = missing;
             return false;
         }
 
-        var parts = raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var parsed = new List<int>(parts.Length);
-
-        foreach (var part in parts)
-        {
-            if (!int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id))
-            {
-                error = $"'{part}' is not a valid series id.";
-                return false;
-            }
-
-            parsed.Add(id);
-        }
-
-        var distinct = parsed.Distinct().ToArray();
+        var distinct = raw
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         if (distinct.Length == 0)
         {
-            error = "seriesIds is required — supply one or more ids, for example ?seriesIds=1,2.";
+            error = missing;
             return false;
         }
 
@@ -120,7 +117,7 @@ public static class ApiEndpoints
             return false;
         }
 
-        ids = distinct;
+        keys = distinct;
         return true;
     }
 

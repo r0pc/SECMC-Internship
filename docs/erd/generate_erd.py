@@ -163,8 +163,8 @@ TABLES: list[Table] = [
     Table("CpiObservation", "core", "CpiObservation", COL_X[0], Y_CORE, [
         Column("CpiObservationId", "BIGINT", ("PK",)),
         Column("SeriesCode", "VARCHAR(20)"),
-        Column("ReferenceDate", "DATE"),
-        Column("ReferenceYear", "SMALLINT", ("UQ", "UQf")),
+        Column("ReferenceDate", "DATE", ("UQ",)),
+        Column("ReferenceYear", "SMALLINT", ("UQf",)),
         Column("PeriodCode", "VARCHAR(3)", ("UQ", "UQf")),
         Column("PeriodType", "VARCHAR(10)"),
         Column("IndexValue", "DECIMAL(12,3)"),
@@ -311,7 +311,7 @@ FOOTER = ("Generated from docs/erd/generate_erd.py - regenerate after any schema
 LEGEND = [
     ("PK", "Primary key"),
     ("FK", "Foreign key"),
-    ("UQ", "Part of a unique key"),
+    ("UQ", "Part of the vintage key (clustered)"),
     ("UQf", "Unique where IsCurrent = 1"),
 ]
 

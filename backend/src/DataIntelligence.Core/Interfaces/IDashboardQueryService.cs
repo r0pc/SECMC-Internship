@@ -13,7 +13,7 @@ namespace DataIntelligence.Core.Interfaces;
 public interface IDashboardQueryService
 {
     /// <summary>
-    /// One series' observations, paged. Returns null when the series does not exist, which the
+    /// One series' stored rows, paged. Returns null when the series key is unknown, which the
     /// endpoint turns into a 404 — distinguishable from a series that exists but has no data in
     /// the requested range.
     /// </summary>
@@ -22,8 +22,8 @@ public interface IDashboardQueryService
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Trend lines for the requested series. Series ids that do not exist are dropped rather
-    /// than failing the request, so one stale bookmark cannot blank a whole dashboard.
+    /// Trend lines for the requested series. Unknown keys are dropped rather than failing the
+    /// request, so one stale bookmark cannot blank a whole dashboard.
     /// </summary>
     Task<IReadOnlyList<TrendSeriesDto>> GetTrendAsync(
         TrendQuery query,
@@ -31,7 +31,7 @@ public interface IDashboardQueryService
 
     /// <summary>Headline numbers per series, in the order requested.</summary>
     Task<IReadOnlyList<SeriesKpiDto>> GetKpisAsync(
-        IReadOnlyList<int> seriesIds,
+        IReadOnlyList<string> seriesKeys,
         CancellationToken cancellationToken);
 
     Task<DashboardSummaryDto> GetSummaryAsync(int windowDays, CancellationToken cancellationToken);
