@@ -261,6 +261,57 @@ public class SqlSafetyValidatorTests
     }
 
     [Fact]
+    public void ApprovesADateRangeWhoseParametersAreNamedAfterSqlKeywords()
+    {
+        // '@' is not a word character, so there is a word boundary between it and what follows —
+        // which means a naive \bFROM\b matches the "from" inside @from, reads the next token as a
+        // table name, and rejects the query as referencing an object called AND. A date range is
+        // the most common thing anyone asks for, and @from/@to the obvious names for one.
+        var result = Validator.Validate(
+            "SELECT AVG(RatePercent) FROM analytics.vw_Sofr "
+            + "WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+            new Dictionary<string, object?> { ["@from"] = "2026-07-01", ["@to"] = "2026-08-01" });
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+    }
+
+    [Theory]
+    // The same trap for the forbidden-keyword scan: these are parameter names, not statements.
+    [InlineData("@into")]
+    [InlineData("@update")]
+    [InlineData("@delete")]
+    [InlineData("@create")]
+    public void ApprovesAParameterNamedAfterAForbiddenKeyword(string parameter)
+    {
+        var result = Validator.Validate(
+            $"SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = {parameter}",
+            new Dictionary<string, object?> { [parameter] = "2025-06-01" });
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+    }
+
+    [Fact]
+    public void StillRejectsARealForbiddenKeywordAlongsideSuchAParameter()
+    {
+        // The guard must not become a way to smuggle one in.
+        var result = Validator.Validate(
+            "SELECT IndexValue INTO x FROM analytics.vw_Cpi WHERE ReferenceDate = @into",
+            new Dictionary<string, object?> { ["@into"] = "2025-06-01" });
+
+        Assert.Equal(AssistantValidationOutcome.RejectedSyntax, result.Outcome);
+    }
+
+    [Fact]
+    public void StillFindsTheObjectAfterAGenuineFromAlongsideSuchAParameter()
+    {
+        var result = Validator.Validate(
+            "SELECT 1 FROM sec.AppUser WHERE Id = @from",
+            new Dictionary<string, object?> { ["@from"] = 1 });
+
+        Assert.Equal(AssistantValidationOutcome.RejectedForbiddenObject, result.Outcome);
+    }
+
+    [Fact]
     public void DoesNotMistakeAParameterInsideALiteralForAPlaceholder()
     {
         var result = Validator.Validate(

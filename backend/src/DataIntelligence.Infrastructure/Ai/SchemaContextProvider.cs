@@ -29,13 +29,15 @@ namespace DataIntelligence.Infrastructure.Ai;
 public sealed class SchemaContextProvider : ISchemaContextProvider
 {
     private readonly string _connectionString;
+    private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private string? _cached;
+    private string? _structure;
 
-    public SchemaContextProvider(IConfiguration configuration)
+    public SchemaContextProvider(IConfiguration configuration, TimeProvider timeProvider)
     {
         _connectionString = configuration.GetConnectionString(DependencyInjection.ConnectionStringName)
             ?? string.Empty;
+        _timeProvider = timeProvider;
     }
 
     /// <summary>
@@ -58,9 +60,20 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
 
     public async Task<string> GetContextAsync(CancellationToken cancellationToken)
     {
-        if (_cached is not null)
+        var structure = await GetStructureAsync(cancellationToken);
+        var temporal = await BuildTemporalAsync(cancellationToken);
+
+        // Structure is cached; "now" and the coverage window are not. A process that has been up
+        // since yesterday would otherwise answer "last month" against yesterday's idea of the
+        // calendar, and would keep claiming the latest figure is whatever it was at startup.
+        return structure + temporal;
+    }
+
+    private async Task<string> GetStructureAsync(CancellationToken cancellationToken)
+    {
+        if (_structure is not null)
         {
-            return _cached;
+            return _structure;
         }
 
         await _gate.WaitAsync(cancellationToken);
@@ -68,13 +81,121 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         {
             // Re-checked inside the gate: several questions arriving together would otherwise each
             // build it, and the last one would win after the others had already paid for the trip.
-            _cached ??= await BuildAsync(cancellationToken);
-            return _cached;
+            _structure ??= await BuildAsync(cancellationToken);
+            return _structure;
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Today's date and what the database actually holds, rebuilt per question.
+    /// </summary>
+    /// <remarks>
+    /// Without this the model has no notion of "now", so *"the average SOFR rate last month"* is
+    /// unanswerable — not because the query is hard, but because "last month" cannot be resolved.
+    /// It correctly refuses rather than guessing a year, which is the right failure and a useless
+    /// answer. Telling it the date turns the whole class of relative-date questions into ordinary
+    /// ones.
+    /// <para>
+    /// The coverage window is here for a second reason: the newest CPI figure is typically a few
+    /// weeks behind today, so "last month" and "the most recent month with data" are often
+    /// different months. A model told only the date would confidently produce an empty result.
+    /// </para>
+    /// One small query per question, against views that are already indexed on their date axis —
+    /// next to a multi-second model call, it does not register.
+    /// </remarks>
+    private async Task<string> BuildTemporalAsync(CancellationToken cancellationToken)
+    {
+        var today = DateOnly.FromDateTime(_timeProvider.GetUtcNow().UtcDateTime);
+
+        var coverage = await ReadCoverageAsync(cancellationToken);
+
+        var builder = new StringBuilder();
+        builder.AppendLine();
+        builder.AppendLine();
+        builder.Append("Today's date is ").Append(today.ToString("yyyy-MM-dd")).AppendLine(" (UTC).");
+        builder.AppendLine(
+            "Resolve every relative date against it — \"last month\", \"this year\", \"the last 6 "
+            + "months\", \"year to date\" — and write the resulting dates into the query as "
+            + "parameters. Never ask the user which dates they meant.");
+        builder.AppendLine();
+
+        if (coverage.Count > 0)
+        {
+            builder.AppendLine("What the database currently holds:");
+
+            foreach (var (label, earliest, latest) in coverage)
+            {
+                builder.Append("- ").Append(label).Append(": ")
+                    .Append(earliest.ToString("yyyy-MM-dd")).Append(" to ")
+                    .Append(latest.ToString("yyyy-MM-dd")).AppendLine();
+            }
+
+            builder.AppendLine();
+            builder.AppendLine(
+                "A publisher releases in arrears, so the newest figure is normally older than "
+                + "today. If a relative range falls partly or wholly outside what is held, still "
+                + "write the query for the range asked for — an empty or short result is the "
+                + "honest answer, and inventing a different range to fill it is not.");
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>The dataset date axes worth reporting a range for.</summary>
+    private static readonly (string Label, string View, string Column)[] DateAxes =
+    [
+        ("CPI (analytics.vw_Cpi, ReferenceDate)", "analytics.vw_Cpi", "ReferenceDate"),
+        ("SOFR (analytics.vw_Sofr, EffectiveDate)", "analytics.vw_Sofr", "EffectiveDate"),
+    ];
+
+    /// <summary>The first and last date held per dataset.</summary>
+    /// <remarks>
+    /// One query per dataset rather than a single UNION, so a view that is missing costs its own
+    /// line and not the whole block. A partially deployed database should still be able to tell
+    /// the model what it does have.
+    /// </remarks>
+    private async Task<IReadOnlyList<(string Label, DateOnly Earliest, DateOnly Latest)>>
+        ReadCoverageAsync(CancellationToken cancellationToken)
+    {
+        var coverage = new List<(string, DateOnly, DateOnly)>();
+
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        foreach (var (label, view, column) in DateAxes)
+        {
+            try
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = $"SELECT MIN({column}), MAX({column}) FROM {view}";
+
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+                if (!await reader.ReadAsync(cancellationToken)
+                    || reader.IsDBNull(0)
+                    || reader.IsDBNull(1))
+                {
+                    continue; // Nothing collected for that dataset yet — say nothing about it.
+                }
+
+                coverage.Add((
+                    label,
+                    DateOnly.FromDateTime(reader.GetDateTime(0)),
+                    DateOnly.FromDateTime(reader.GetDateTime(1))));
+            }
+            catch (SqlException)
+            {
+                // Coverage is an aid, not a prerequisite. A missing view should cost the hint, not
+                // the question — the structural half of the context is what the model needs to
+                // write SQL at all.
+            }
+        }
+
+        return coverage;
     }
 
     private async Task<string> BuildAsync(CancellationToken cancellationToken)
@@ -174,6 +295,21 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
     /// something wrong without it.
     /// </summary>
     private const string Semantics = """
+        What the words in a question map to. These are the terms people actually ask in, and none
+        of them appear as a column name — without the mapping the question looks unanswerable and
+        gets refused:
+
+        - "inflation", "inflation rate", "how much have prices risen" → YearOverYearPct in
+          analytics.vw_CpiMonthlyChange. Month-over-month inflation is MonthOverMonthPct.
+        - "cost of living", "price level", "CPI" → IndexValue in analytics.vw_Cpi.
+        - "interest rate", "overnight rate", "borrowing rate", "repo rate" → RatePercent in
+          analytics.vw_Sofr.
+        - "trading volume", "how much was borrowed" → VolumeUsdBillions in analytics.vw_Sofr.
+        - "is collection working", "did anything fail", "data freshness" →
+          analytics.vw_CollectionHealth.
+        - "latest", "most recent", "current" for a single headline figure →
+          analytics.vw_LatestIndicator.
+
         Column values — use these exactly. Guessing a plausible-looking code returns zero rows,
         which reads as "no data" when the data is in fact there:
 
@@ -188,12 +324,25 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         each period is stored on the first day of the period it covers — so June 2025 CPI is
         ReferenceDate = '2025-06-01'.
 
+        For a range, use a half-open window — >= the first day and < the first day of the next
+        period. It is the one form that is correct for both datasets: CPI stores one row on the
+        first of the month, while SOFR stores a row per business day, so BETWEEN with a guessed
+        month-end silently drops the 31st.
+
+        "The average SOFR rate last month" is therefore:
+        SELECT AVG(RatePercent) FROM analytics.vw_Sofr
+        WHERE EffectiveDate >= @from AND EffectiveDate < @to
+        with @from and @to as the first days of last month and this month.
+
         Every view already filters to the current vintage, so do not try to deduplicate revisions.
 
         The dialect is Microsoft SQL Server (T-SQL), which is not interchangeable with MySQL or
         PostgreSQL:
         - Row limits are 'SELECT TOP (n) ...'. There is no LIMIT clause; using one is a syntax error.
-        - Date arithmetic is DATEADD/DATEDIFF, not INTERVAL.
+        - Date arithmetic is DATEADD/DATEDIFF, not INTERVAL. Prefer resolving relative dates
+          yourself against today's date and passing them as parameters — a literal date in a
+          parameter is easier to review than DATEADD nested around GETDATE().
+        - Group a date column by month with DATEFROMPARTS(YEAR(c), MONTH(c), 1), not by a string.
         - String concatenation is + or CONCAT(), not ||.
 
         Rules:

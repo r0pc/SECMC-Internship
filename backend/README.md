@@ -182,6 +182,20 @@ that `M13` is an annual average rather than a thirteenth month, that volume is i
 the dialect is T-SQL. Every one of those lines exists because the model got something wrong
 without it.
 
+Two of those parts are worth naming, because both turned refusals into answers:
+
+- **Today's date and the coverage window**, rebuilt per question rather than cached. Without a
+  notion of "now" the model cannot resolve *"the average SOFR rate last month"* — not because the
+  query is hard, but because "last month" has no referent — so it correctly refuses, which is the
+  right failure and a useless answer. The coverage window matters for the same reason in reverse:
+  a publisher releases in arrears, so "last month" and "the most recent month with data" are often
+  different months, and a model told only the date confidently returns an empty result.
+- **A vocabulary mapping** from the words questions are actually asked in to the columns that
+  answer them — "inflation" to `YearOverYearPct`, "interest rate" to `RatePercent`, "is collection
+  working" to `vw_CollectionHealth`. None of these appear as a column name. Before the mapping,
+  *"how has inflation moved over the last 6 months?"* was refused while *"what is the CPI trend
+  this year?"* was answered from the same view.
+
 The model returns a **parameterised** statement, its parameter values, and its own explanation of
 what it wrote. The values never enter the SQL text — they are bound to `SqlCommand`, so a value
 containing SQL is data and is never parsed. All three are stored, because a reviewer reading a

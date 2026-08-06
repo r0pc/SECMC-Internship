@@ -1,6 +1,9 @@
+using DataIntelligence.Core.Entities;
+using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Infrastructure.Ai;
 using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
 namespace DataIntelligence.IntegrationTests.Ai;
@@ -109,14 +112,76 @@ public sealed class SchemaContextProviderTests : IClassFixture<ReadOnlyExecution
     }
 
     [Fact]
-    public async Task ReadsTheSchemaOnceAndReusesIt()
+    public async Task ReusesTheStructuralDescriptionBetweenQuestions()
     {
         var provider = Build();
 
         var first = await provider.GetContextAsync(default);
         var second = await provider.GetContextAsync(default);
 
-        Assert.Same(first, second);
+        // The structural half is cached; the temporal half is not, so the whole string is not
+        // reference-equal. What must hold is that the view descriptions are identical.
+        var firstStructure = first[..first.IndexOf("Today's date is", StringComparison.Ordinal)];
+        var secondStructure = second[..second.IndexOf("Today's date is", StringComparison.Ordinal)];
+
+        Assert.Equal(firstStructure, secondStructure);
+    }
+
+    // ------------------------------------------------------------------ "now"
+
+    [Fact]
+    public async Task TellsTheModelTodaysDate()
+    {
+        // Without this, "the average SOFR rate last month" is unanswerable — not because the query
+        // is hard, but because "last month" cannot be resolved. The model then refuses, which is
+        // the right failure and a useless answer.
+        var clock = new FakeClock(new DateTimeOffset(2026, 8, 6, 9, 30, 0, TimeSpan.Zero));
+
+        var context = await Build(clock).GetContextAsync(default);
+
+        Assert.Contains("Today's date is 2026-08-06", context);
+    }
+
+    [Fact]
+    public async Task MovesTodaysDateWithTheClockRatherThanPinningItAtStartup()
+    {
+        // A process up since yesterday would otherwise answer "last month" against yesterday's
+        // idea of the calendar, and keep doing so until it was restarted.
+        var clock = new FakeClock(new DateTimeOffset(2026, 8, 6, 23, 59, 0, TimeSpan.Zero));
+        var provider = Build(clock);
+
+        Assert.Contains("Today's date is 2026-08-06", await provider.GetContextAsync(default));
+
+        clock.Now = new DateTimeOffset(2026, 8, 7, 0, 1, 0, TimeSpan.Zero);
+
+        Assert.Contains("Today's date is 2026-08-07", await provider.GetContextAsync(default));
+    }
+
+    [Fact]
+    public async Task StatesWhatTheDatabaseActuallyHolds()
+    {
+        // The newest CPI figure is normally weeks behind today, so "last month" and "the most
+        // recent month with data" are often different months. A model told only the date would
+        // confidently produce an empty result.
+        await SeedCpiAsync();
+
+        var context = await Build().GetContextAsync(default);
+
+        Assert.Contains("What the database currently holds", context);
+        Assert.Contains("analytics.vw_Cpi", context);
+    }
+
+    [Fact]
+    public async Task SaysNothingAboutCoverageWhenNothingHasBeenCollected()
+    {
+        // An empty database must not claim a range. Every row here is deleted first.
+        await ExecuteAsync("DELETE FROM core.CpiObservation;");
+
+        var context = await Build().GetContextAsync(default);
+
+        // Still a usable context — the structural half is what the model needs to write SQL.
+        Assert.Contains("analytics.vw_Cpi(", context);
+        Assert.Contains("Today's date is", context);
     }
 
     [Fact]
@@ -124,8 +189,9 @@ public sealed class SchemaContextProviderTests : IClassFixture<ReadOnlyExecution
     {
         // A database that has had the migrations but not section 5 of the schema script. Without
         // this the model would be handed an empty view list and asked to write SQL anyway.
-        var provider = new SchemaContextProvider(Configuration(_fixture.ConnectionString
-            .Replace(_fixture.DatabaseName, "master")));
+        var provider = new SchemaContextProvider(
+            Configuration(_fixture.ConnectionString.Replace(_fixture.DatabaseName, "master")),
+            TimeProvider.System);
 
         await Assert.ThrowsAsync<AssistantNotConfiguredException>(
             () => provider.GetContextAsync(default));
@@ -135,7 +201,8 @@ public sealed class SchemaContextProviderTests : IClassFixture<ReadOnlyExecution
     public async Task SaysSoWhenThereIsNoConnectionStringAtAll()
     {
         var provider = new SchemaContextProvider(
-            new ConfigurationBuilder().AddInMemoryCollection([]).Build());
+            new ConfigurationBuilder().AddInMemoryCollection([]).Build(),
+            TimeProvider.System);
 
         var ex = await Assert.ThrowsAsync<AssistantNotConfiguredException>(
             () => provider.GetContextAsync(default));
@@ -143,8 +210,58 @@ public sealed class SchemaContextProviderTests : IClassFixture<ReadOnlyExecution
         Assert.Contains("DataIntelligenceDb", ex.Message);
     }
 
-    private SchemaContextProvider Build() =>
-        new(Configuration(_fixture.ConnectionString));
+    private SchemaContextProvider Build(TimeProvider? clock = null) =>
+        new(Configuration(_fixture.ConnectionString), clock ?? TimeProvider.System);
+
+    /// <summary>
+    /// One CPI figure, so the coverage window has something to report. Written through the entity
+    /// model rather than raw SQL — the table has enough NOT NULL columns that a hand-written
+    /// INSERT is a list of surprises, and the defaults live on the entity anyway.
+    /// </summary>
+    private async Task SeedCpiAsync()
+    {
+        await using var db = _fixture.CreateContext();
+
+        if (await db.CpiObservations.AnyAsync())
+        {
+            return;
+        }
+
+        var run = new CollectionRun
+        {
+            DataSourceId = 1,
+            ScheduledForUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
+            StartedAtUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
+            Status = CollectionRunStatus.Succeeded,
+            TriggerType = CollectionTriggerType.Manual,
+            RequestUrl = "https://api.bls.gov/publicAPI/v2/timeseries/data/",
+        };
+
+        db.CollectionRuns.Add(run);
+        await db.SaveChangesAsync();
+
+        db.CpiObservations.Add(new CpiObservation
+        {
+            SeriesCode = "CUUR0000SA0",
+            ReferenceDate = new DateOnly(2025, 6, 1),
+            ReferenceYear = 2025,
+            PeriodCode = "M06",
+            PeriodType = PeriodType.Month,
+            IndexValue = 322.561m,
+            CollectionRunId = run.CollectionRunId,
+            RowHash = new byte[32],
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A clock the test moves, so "today" can be asserted without waiting for midnight.</summary>
+    private sealed class FakeClock(DateTimeOffset now) : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = now;
+
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
 
     private static IConfiguration Configuration(string connectionString) =>
         new ConfigurationBuilder()

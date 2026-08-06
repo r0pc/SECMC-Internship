@@ -55,8 +55,16 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
     /// being on the allow-list; a pattern that only matched <c>schema.object</c> would not match it
     /// at all, and an unmatched reference is an unchecked one.
     /// </remarks>
+    /// <remarks>
+    /// The <c>(?&lt;!@)</c> is load-bearing. <c>@</c> is not a word character, so there is a word
+    /// boundary between it and what follows — which means <c>\bFROM\b</c> matches the "from" inside
+    /// a parameter named <c>@from</c>. A perfectly good
+    /// <c>WHERE EffectiveDate &gt;= @from AND EffectiveDate &lt; @to</c> then reads as a FROM clause
+    /// naming a table called <c>AND</c>, and the query is rejected as referencing a forbidden
+    /// object. Date ranges are the most common thing anyone asks for, so this rejected most of them.
+    /// </remarks>
     private static readonly Regex ObjectReference = new(
-        @"\b(?:FROM|JOIN|APPLY)\s+(?!\()(\[?[\w$@#]+\]?(?:\s*\.\s*\[?[\w$@#]*\]?)*)",
+        @"(?<!@)\b(?:FROM|JOIN|APPLY)\s+(?!\()(\[?[\w$#]+\]?(?:\s*\.\s*\[?[\w$#]*\]?)*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>Matches the <c>sp_</c>/<c>xp_</c> procedure prefixes as prefixes, not whole words.</summary>
@@ -122,7 +130,9 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
 
         foreach (var keyword in ForbiddenKeywords)
         {
-            if (Regex.IsMatch(inspected, $@"\b{Regex.Escape(keyword)}\b", RegexOptions.IgnoreCase))
+            // Same `(?<!@)` guard as ObjectReference, for the same reason: a parameter named
+            // @into or @update is a name, not the statement type it happens to spell.
+            if (Regex.IsMatch(inspected, $@"(?<!@)\b{Regex.Escape(keyword)}\b", RegexOptions.IgnoreCase))
             {
                 return new SqlValidationResult(
                     AssistantValidationOutcome.RejectedSyntax,
