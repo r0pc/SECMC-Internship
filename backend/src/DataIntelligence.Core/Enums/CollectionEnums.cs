@@ -58,10 +58,10 @@ public enum RejectionReason
     TypeMismatch,
     OutOfRange,
     /// <summary>
-    /// The publisher returned a series or rate this platform does not store. The steady case
-    /// rather than the exceptional one: the NY Fed payload carries EFFR, OBFR, TGCR and BGCR
-    /// alongside SOFR, and all four land here every business day. Logged rather than dropped so
-    /// the exclusion is visible in the data instead of invisible in the code.
+    /// The publisher returned a series or rate this platform does not store — a BLS series other
+    /// than CUUR0000SA0, or a rate other than SOFR. Logged rather than dropped so the exclusion
+    /// is visible in the data instead of invisible in a filter. Rare in normal operation: both
+    /// endpoints are scoped to what we ask for, so this appearing means the contract moved.
     /// </summary>
     UnknownSeries,
     /// <summary>Two records in one payload claimed the same period.</summary>

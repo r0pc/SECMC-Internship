@@ -44,8 +44,29 @@ public sealed class BlsCpiAdapter : ISourceAdapter
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var endYear = context.UtcNow.Year;
-        var startYear = endYear - Math.Max(0, _options.YearsOfHistory - 1);
+        int startYear;
+        int endYear;
+
+        if (context.Window is { } window)
+        {
+            // A backfill names its own years. Clamped rather than rejected: the caller chunks to
+            // the cap already, and silently returning fewer years than asked for would leave a
+            // hole in the history that nothing downstream could detect.
+            if (window.YearSpan > _options.MaxYearsPerRequest)
+            {
+                throw new CollectionFailureException(CollectionFailureCategory.Unknown,
+                    $"A window of {window.YearSpan} years exceeds the BLS per-request cap of "
+                    + $"{_options.MaxYearsPerRequest}. Split it before requesting.");
+            }
+
+            startYear = window.FromYear;
+            endYear = window.ToYear;
+        }
+        else
+        {
+            endYear = context.UtcNow.Year;
+            startYear = endYear - Math.Max(0, _options.YearsOfHistory - 1);
+        }
 
         var payload = new Dictionary<string, object>
         {
@@ -53,7 +74,14 @@ public sealed class BlsCpiAdapter : ISourceAdapter
             // platform is commissioned for, and core.CpiObservation stores nothing else.
             ["seriesid"] = new[] { CpiObservation.SeriesCodeValue },
             ["startyear"] = startYear.ToString(CultureInfo.InvariantCulture),
-            ["endyear"] = endYear.ToString(CultureInfo.InvariantCulture)
+            ["endyear"] = endYear.ToString(CultureInfo.InvariantCulture),
+
+            // Adds the M13 annual average to the monthly figures. Without it the API returns
+            // M01-M12 only, and core.CpiObservation would hold no annual rows at all despite
+            // being designed for them — a gap that looks like missing data rather than an
+            // unasked question. The semiannual figures (S01/S02) have no equivalent switch and
+            // are not served by this API; they exist only in the CSV download.
+            ["annualaverage"] = "true"
         };
 
         if (!string.IsNullOrWhiteSpace(_options.ApiKey))

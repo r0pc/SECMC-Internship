@@ -107,7 +107,7 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
             new FixedTimeProvider(scheduledFor),
             NullLogger<CollectionRunner>.Instance);
 
-        return await runner.RunAsync(sourceCode, scheduledFor, trigger, CancellationToken.None);
+        return await runner.RunAsync(sourceCode, scheduledFor, trigger, null, CancellationToken.None);
     }
 
     private Task<CollectionSummary> RunCpiAsync(DateTime scheduledFor, params CpiObservationRecord[] records) =>
@@ -342,7 +342,8 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
     [Fact]
     public async Task PartialSuccess_WhenSomeRecordsAreRejectedByTheAdapter()
     {
-        // The steady case for SOFR: four out-of-scope rates arrive with every business day.
+        // A rejection the adapter raised, alongside a record it accepted: data landed, something
+        // was lost, and the run says so rather than reporting a clean cycle.
         var rejection = new RejectedFragment(
             "EFFR", null, RejectionReason.UnknownSeries, "Record is of type 'EFFR', not SOFR.", "{}");
 
@@ -434,7 +435,7 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
             NullLogger<CollectionRunner>.Instance);
 
         var summary = await runner.RunAsync(
-            DataSource.NyFedSofrCode, _cycle1, CollectionTriggerType.Scheduled, CancellationToken.None);
+            DataSource.NyFedSofrCode, _cycle1, CollectionTriggerType.Scheduled, null, CancellationToken.None);
 
         Assert.Equal(CollectionRunStatus.Skipped, summary.Status);
         Assert.Null(summary.CollectionRunId);

@@ -47,6 +47,16 @@ public class BlsCpiAdapterTests
     }
 
     [Fact]
+    public void BuildRequest_AsksForTheAnnualAverage()
+    {
+        // Without this the API returns M01-M12 only, and the annual figures the table is designed
+        // to hold would simply never arrive — a gap indistinguishable from missing data.
+        var request = CreateAdapter().BuildRequest(new SourceRequestContextBuilder().Build());
+
+        Assert.Contains("\"annualaverage\":\"true\"", request.JsonBody);
+    }
+
+    [Fact]
     public void BuildRequest_NamesOnlyTheSeriesInScope()
     {
         // The series is a fact about the schema, not a row that could be edited: core.CpiObservation

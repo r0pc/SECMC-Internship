@@ -16,10 +16,13 @@
               https://www.bls.gov/data/home.htm
               API: POST https://api.bls.gov/publicAPI/v2/timeseries/data/
 
-    2. SOFR — the Secured Overnight Financing Rate for the current calendar
-              year: one row per business day, rate type SOFR only. The other
-              four rates in the same download (EFFR, OBFR, TGCR, BGCR) are out
-              of scope and are rejected on the way in, not stored.
+    2. SOFR — the Secured Overnight Financing Rate: one row per business day,
+              rate type SOFR only. The other four rates in the same CSV download
+              (EFFR, OBFR, TGCR, BGCR) are out of scope and are rejected on the
+              way in, not stored.
+              The scheduled cycle collects the current calendar year; the table
+              is not constrained to it, and the collector's backfill loads the
+              series from its first published day, 2 April 2018.
               https://www.newyorkfed.org/markets/reference-rates/sofr
               API: GET https://markets.newyorkfed.org/api/rates/secured/sofr/
                        search.json?startDate=&endDate=

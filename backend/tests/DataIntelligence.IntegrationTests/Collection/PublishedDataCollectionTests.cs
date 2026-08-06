@@ -168,8 +168,9 @@ public class PublishedDataCollectionTests : IClassFixture<PublishedDataFixture>
     [Fact]
     public async Task TheWholeSofrExtractIsStoredExactlyAsPublished()
     {
-        // Partial, not failed: the four out-of-scope rates are rejected on every business day, so
-        // a clean run against this publisher is the exception rather than the rule.
+        // Partial, not failed: the CSV extract carries all five rates and the four out of scope
+        // are rejected. A live API run is Succeeded instead, because that endpoint sends SOFR
+        // alone — the difference is the payload, not the collector.
         Assert.Equal(CollectionRunStatus.PartialSuccess, _fixture.SofrSummary.Status);
         Assert.Equal(PublishedData.SofrOnly.Count, _fixture.SofrSummary.Inserted);
         Assert.Equal(PublishedData.OtherRates.Count, _fixture.SofrSummary.Rejected);
@@ -367,7 +368,7 @@ internal static class PublishedDataCollector
             NullLogger<CollectionRunner>.Instance);
 
         return await runner.RunAsync(
-            sourceCode, scheduledFor, CollectionTriggerType.Scheduled, CancellationToken.None);
+            sourceCode, scheduledFor, CollectionTriggerType.Scheduled, null, CancellationToken.None);
     }
 
     private sealed class StubFetcher(string content) : ISourceFetcher

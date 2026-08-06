@@ -196,8 +196,9 @@ public class PublishedDataAccuracyTests
     [Fact]
     public void EveryOtherRateInThePayloadIsRejected()
     {
-        // EFFR, OBFR, TGCR and BGCR arrive on every business day. None of them may reach the
-        // table, and each must leave a logged rejection rather than being dropped quietly.
+        // The CSV download carries all five rates. The JSON endpoint returns SOFR alone, so this
+        // exercises the guard rather than a routine path — but the guard is what stops another
+        // rate reaching SOFR's table if that endpoint is ever changed or broadened.
         var parsed = Sofr().Parse(PublishedData.SofrPayload());
 
         Assert.Equal(PublishedData.OtherRates.Count, parsed.Rejections.Count);

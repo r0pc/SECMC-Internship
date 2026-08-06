@@ -17,6 +17,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\DataIntelligence.Core\DataIntelligence.Core.csproj" />
     <ProjectReference Include="..\..\src\DataIntelligence.Infrastructure\DataIntelligence.Infrastructure.csproj" />
+    <!-- For the command-line parsing rules, which are mostly refusals worth testing. -->
+    <ProjectReference Include="..\..\src\DataIntelligence.Worker\DataIntelligence.Worker.csproj" />
   </ItemGroup>
 
   <ItemGroup>

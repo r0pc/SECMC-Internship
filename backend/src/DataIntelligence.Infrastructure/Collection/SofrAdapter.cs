@@ -33,11 +33,16 @@ public sealed class SofrAdapter : ISourceAdapter
         ArgumentNullException.ThrowIfNull(context);
 
         var today = DateOnly.FromDateTime(context.UtcNow);
-        var startOfYear = new DateOnly(today.Year, 1, 1);
+
+        // The scheduled cycle asks for the current calendar year; a caller supplying a window
+        // gets exactly what it asked for. The endpoint takes an arbitrary range, so unlike BLS
+        // there is nothing to chunk.
+        var window = context.Window
+            ?? new CollectionWindow(new DateOnly(today.Year, 1, 1), today);
 
         return SourceRequest.Get(
             "https://markets.newyorkfed.org/api/rates/secured/sofr/search.json"
-            + $"?startDate={Iso(startOfYear)}&endDate={Iso(today)}");
+            + $"?startDate={Iso(window.From)}&endDate={Iso(window.To)}");
     }
 
     public ParseResult Parse(string content)
@@ -71,10 +76,12 @@ public sealed class SofrAdapter : ISourceAdapter
             {
                 seen++;
 
-                // The endpoint is SOFR-specific, but the payload is shared with the other secured
-                // and unsecured rates. Four of them — EFFR, OBFR, TGCR, BGCR — arrive every
-                // business day and are out of scope; rejecting them explicitly means the
-                // exclusion is visible in the data rather than invisible in this filter.
+                // Defensive rather than routine. This endpoint returns SOFR alone — verified
+                // against the live API, which sends nothing else — so in normal operation this
+                // rejects nothing. It matters because the same payload shape carries EFFR, OBFR,
+                // TGCR and BGCR elsewhere: the CSV download has all five, and the unsecured and
+                // secured rate endpoints differ only in their path. If this URL is ever changed
+                // or broadened, another rate must not be filed against SOFR's table.
                 var type = rate.TryGetProperty("type", out var t) ? t.GetString() : null;
                 if (!string.Equals(type, SofrDailyRate.RateTypeValue, StringComparison.OrdinalIgnoreCase))
                 {
@@ -129,6 +136,12 @@ public sealed class SofrAdapter : ISourceAdapter
                     // Verbatim, not interpreted: the NY Fed sets this when a published rate is
                     // corrected, which is precisely what makes the row a new vintage.
                     RevisionIndicator = ReadOptionalString(rate, "revisionIndicator", 1),
+
+                    // The CSV download has a Footnote ID column; the JSON API does not send one —
+                    // confirmed against a stored live payload, whose records carry exactly
+                    // effectiveDate, type, percentRate, the four percentiles, volumeInBillions and
+                    // revisionIndicator. Read anyway so a CSV import or a later API field lands
+                    // without a code change; null from this endpoint, always.
                     FootnoteId = ReadOptionalString(rate, "footnoteId", 20)
                 });
             }

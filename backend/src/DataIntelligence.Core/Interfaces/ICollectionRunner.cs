@@ -1,3 +1,4 @@
+using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Interfaces;
@@ -11,6 +12,10 @@ public interface ICollectionRunner
     /// <summary>
     /// Runs the cycle scheduled for <paramref name="scheduledForUtc"/> against one source.
     /// </summary>
+    /// <param name="window">
+    /// The period to request. Null uses the adapter's default, which is what the schedule wants;
+    /// a backfill names the years it is loading.
+    /// </param>
     /// <remarks>
     /// Does not throw for collection failures — they are recorded on the run and returned, so a
     /// bad cycle can never take the scheduler down (FR-2). Only cancellation propagates.
@@ -19,6 +24,7 @@ public interface ICollectionRunner
         string sourceCode,
         DateTime scheduledForUtc,
         CollectionTriggerType trigger,
+        CollectionWindow? window,
         CancellationToken cancellationToken);
 }
 

@@ -37,8 +37,47 @@ dotnet test DataIntelligence.sln
 
 ```powershell
 dotnet run --project src\DataIntelligence.Api
+
+# Hourly collection, until stopped (FR-1, FR-8)
 dotnet run --project src\DataIntelligence.Worker
+
+# One cycle over every enabled source, then exit
+dotnet run --project src\DataIntelligence.Worker -- --once
+
+# Load history, then exit
+dotnet run --project src\DataIntelligence.Worker -- --backfill              # both datasets
+dotnet run --project src\DataIntelligence.Worker -- --backfill-cpi          # CPI only
+dotnet run --project src\DataIntelligence.Worker -- --backfill-sofr         # SOFR only
+dotnet run --project src\DataIntelligence.Worker -- --backfill --from 2000  # CPI from 2000
 ```
+
+`--once` collects immediately rather than waiting for the next scheduled slot, prints what each
+source did, and shuts down. Use it for a manual collection, a smoke test after deployment, or a
+backfill. The run is recorded with `triggerType = Manual`, so the collection log distinguishes it
+from a cycle the timer produced.
+
+Without `--once` the Worker waits for the next boundary — with the default hourly interval and
+clock alignment that is the top of the next hour, so it can sit idle for up to an hour before
+doing anything. That is correct for a service and unhelpful when you want data now.
+
+The backfill flags load the history the scheduled cycle never asks for. The cycle requests a
+narrow, recent window — two years of CPI, the current year of SOFR — because that is what the
+dashboards read; re-requesting decades of settled figures every hour would be absurd.
+
+| Flag | Loads | Requests |
+| --- | --- | --- |
+| `--backfill` | Both | ~7 |
+| `--backfill-cpi` | CPI, 1913 to now (~1,474 figures) | 6 |
+| `--backfill-sofr` | SOFR, 2 Apr 2018 to now (~2,083 days) | 1 |
+
+`--from <year>` sets the first **CPI** year and applies to `--backfill` and `--backfill-cpi`. It
+is refused with `--backfill-sofr`, and refused on its own, rather than being silently ignored —
+SOFR has one start date and no chunking, so there is nothing for it to choose.
+
+CPI is chunked because BLS caps a request at 20 years; SOFR is not, because the NY Fed endpoint
+takes an arbitrary range and returns the whole series in one ~450 KB response. Every request is
+its own run in the collection log, so a failure part way through says exactly what landed, and
+re-running is safe: figures already stored hash as unchanged and write nothing.
 
 The API listens on `http://localhost:5063`. In Development it also serves:
 
@@ -196,10 +235,19 @@ Three details are load-bearing:
   otherwise a quota rejection would be recorded as a healthy run that collected nothing.
 - **BLS period tokens are not months.** `M13` is the annual average and `S01`/`S02` the halves,
   so `PeriodCode` is stored verbatim and `PeriodType` says what it means. `M13` and `M01` share
-  a reference date, which is why the key is (year, period code) and not the date.
-- **Four other rates share the SOFR payload.** EFFR, OBFR, TGCR and BGCR arrive every business
-  day and are out of scope; they are logged as `UnknownSeries` rejections rather than dropped, so
-  the exclusion is visible in the data instead of invisible in a filter. Expect four per day.
+  a reference date, which is why the key is (year, period code) and not the date. The request
+  must set `annualaverage=true` or the API returns `M01`-`M12` only and no annual row ever
+  arrives — a gap that looks like missing data rather than an unasked question.
+- **The semiannual figures are not available from the API.** `S01`/`S02` appear in the CSV
+  download's HALF1/HALF2 columns, and the table and adapter handle them, but no request
+  parameter makes api.bls.gov serve them for this series — confirmed by probing it. A collected
+  database therefore holds monthly and annual rows only; the ~85 semiannual figures would need
+  the CSV route.
+- **The SOFR rate-type filter is defensive, not routine.** `search.json` under
+  `/rates/secured/sofr/` returns SOFR alone — verified against the live API — so the filter
+  normally rejects nothing. It matters because the same record shape carries EFFR, OBFR, TGCR and
+  BGCR elsewhere: the CSV download has all five, and the rate endpoints differ only by path. A
+  rejection here means the URL or the contract moved.
 
 Adding a dataset is a new adapter, a new writer, a table, and a `collect.DataSource` row.
 
@@ -271,7 +319,13 @@ refreshed — check the difference is new data rather than a parsing change, the
 
 **What this does not prove:** that the JSON field names match the live APIs. The extracts are CSV
 downloads, so the payloads are reconstructed from them — the figures are real, the envelope is
-not. Field names are confirmed by running against the live endpoints.
+not. Field names are confirmed by running against the live endpoints, which has been done; a
+stored `collect.RawPayload` can be decompressed to check what a publisher actually sent.
+
+Two differences between the CSV downloads and the JSON APIs are worth knowing, both found that
+way: the SOFR API returns SOFR rows only where the CSV carries all five rates, and it sends no
+footnote field where the CSV has a Footnote ID column, so `FootnoteId` is always null from the
+API path.
 
 ## Not yet implemented
 

@@ -57,6 +57,7 @@ public sealed class CollectionRunner : ICollectionRunner
         string sourceCode,
         DateTime scheduledForUtc,
         CollectionTriggerType trigger,
+        CollectionWindow? window,
         CancellationToken cancellationToken)
     {
         var source = await _db.DataSources
@@ -99,7 +100,7 @@ public sealed class CollectionRunner : ICollectionRunner
 
         try
         {
-            return await ExecuteAsync(source, adapter, writer, run, cancellationToken);
+            return await ExecuteAsync(source, adapter, writer, run, window, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -134,7 +135,7 @@ public sealed class CollectionRunner : ICollectionRunner
 
     private async Task<CollectionSummary> ExecuteAsync(
         DataSource source, ISourceAdapter adapter, IDatasetWriter writer, CollectionRun run,
-        CancellationToken cancellationToken)
+        CollectionWindow? window, CancellationToken cancellationToken)
     {
         // 1. Compliance gate. Scoped to HTML sources: RFC 9309 governs crawlers of web content,
         //    while both confirmed sources are official APIs published for programmatic use and
@@ -158,7 +159,7 @@ public sealed class CollectionRunner : ICollectionRunner
 
         // 2. Build and send the request.
         var request = adapter.BuildRequest(
-            new SourceRequestContext(source, _timeProvider.GetUtcNow().UtcDateTime));
+            new SourceRequestContext(source, _timeProvider.GetUtcNow().UtcDateTime, window));
 
         run.RequestUrl = request.Url;
 

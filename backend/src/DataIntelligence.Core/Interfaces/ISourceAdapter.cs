@@ -34,9 +34,17 @@ public interface ISourceAdapter
 /// <summary>Inputs the adapter needs to build a request.</summary>
 /// <param name="Source">The source row, for its endpoint and timeouts.</param>
 /// <param name="UtcNow">Current time, injected so request windows are deterministic under test.</param>
+/// <param name="Window">
+/// The period to ask the publisher for. Null means the adapter's own default, which is what the
+/// scheduled cycle uses: the last two years for CPI, the current calendar year for SOFR. A
+/// backfill supplies one explicitly.
+/// </param>
 /// <remarks>
 /// No longer carries a list of series to request. Each adapter serves exactly one dataset and
 /// names its own series — <c>CUUR0000SA0</c>, or rate type SOFR — because that is now a fact
 /// about the schema rather than a row that could be edited out from under the collector.
 /// </remarks>
-public sealed record SourceRequestContext(DataSource Source, DateTime UtcNow);
+public sealed record SourceRequestContext(
+    DataSource Source,
+    DateTime UtcNow,
+    CollectionWindow? Window = null);

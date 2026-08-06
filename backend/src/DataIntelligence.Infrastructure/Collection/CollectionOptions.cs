@@ -94,4 +94,15 @@ public sealed class BlsOptions
     /// </remarks>
     [Range(1, 20)]
     public int YearsOfHistory { get; set; } = 2;
+
+    /// <summary>
+    /// The API's own cap on the span of a single request, which a backfill chunks against.
+    /// </summary>
+    /// <remarks>
+    /// 20 years for a registered caller. An unregistered one is capped at 10, so lower this
+    /// alongside leaving <see cref="ApiKey"/> unset — the API rejects an over-long range outright
+    /// rather than truncating it, which would fail the whole backfill on its first chunk.
+    /// </remarks>
+    [Range(1, 20)]
+    public int MaxYearsPerRequest { get; set; } = 20;
 }

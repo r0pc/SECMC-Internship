@@ -57,6 +57,12 @@ The distinction matters: the annual and semiannual figures are averages *of* the
 so anything that summed a year's rows without filtering would count the same numbers three
 times. Every read model filters on `PeriodType` explicitly.
 
+**What the API actually serves.** Monthly figures plus, with `annualaverage=true`, the `M13`
+annual average. The semiannual `S01`/`S02` are a CSV-download feature — no request parameter
+makes the API return them for this series. So a collected database holds monthly and annual rows
+(1,474 figures back to 1913) where the CSV has 1,559; the table and adapter handle the
+semiannual rows, but only a CSV import would supply them.
+
 ### Secured Overnight Financing Rate — Federal Reserve Bank of New York
 
 `GET https://markets.newyorkfed.org/api/rates/secured/sofr/search.json?startDate=&endDate=` ·
@@ -73,10 +79,13 @@ is one row with its measures as columns:
 | `VolumeUsdBillions` | Transaction volume | **USD billions** |
 | `Average30/90/180DayPercent`, `SofrIndexValue` | The NY Fed's own compounded averages and index | Percent per annum / index |
 
-The download carries four other rates — **EFFR, OBFR, TGCR, BGCR** — and they are out of scope.
-The adapter filters to `type == "SOFR"` and the rest are logged as `UnknownSeries` rejections,
-so the exclusion is visible in the data rather than invisible in the code. Expect four
-rejections per business day; anything else in there is worth looking at.
+The CSV download carries four other rates — **EFFR, OBFR, TGCR, BGCR** — and they are out of
+scope. The JSON API endpoint used here returns SOFR alone, so the adapter's `type == "SOFR"`
+filter is a guard rather than a routine exclusion: it normally rejects nothing, and a rejection
+means the endpoint or the contract moved. Anything appearing there is worth looking at.
+
+The API also sends no footnote field, so `FootnoteId` stays null on API-collected rows even
+though the CSV has the column.
 
 **Units are not interchangeable** and nothing is rescaled on the way in — volume stays in
 billions because that is what the publisher publishes. A chart that silently mixes an index
@@ -88,6 +97,11 @@ with billions of dollars is wrong by a factor no one can see in the data.
 | --- | --- | --- |
 | BLS | Current and previous calendar year | Covers the year-over-year comparison and any restatement of recent months |
 | SOFR | 1 January of the current year to today | The annual extract. Requesting the whole year rather than the last few days means a gap from an outage or a late revision is repaired by the next cycle instead of persisting |
+
+That is what the **scheduled** cycle asks for. Both tables hold more than that when asked: the
+Worker's `--backfill` flags load CPI back to 1913 and SOFR back to its first published day,
+2 April 2018. Nothing in the schema constrains either table to a date range — the narrow window
+is a polling decision, not a storage one.
 
 Collection runs hourly (FR-1), so most cycles find nothing new — CPI is monthly and SOFR is
 business-daily. That is handled rather than wasted: an unchanged value writes no row, and a
