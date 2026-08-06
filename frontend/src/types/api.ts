@@ -1,0 +1,274 @@
+/**
+ * The API contract, mirrored in TypeScript.
+ *
+ * Hand-written rather than generated, because the API's OpenAPI document is only served in
+ * Development (`/openapi/v1.json`) and a build must not depend on a running backend. Every type
+ * here has a counterpart in `DataIntelligence.Core/Dtos`; enums are serialised as their names
+ * (`JsonStringEnumConverter` in `Program.cs`), so they are string unions rather than numbers.
+ *
+ * Two date shapes arrive, and they mean different things:
+ *  - `IsoDate` — a `DateOnly`, e.g. `"2026-06-01"`. The period a number describes.
+ *  - `IsoUtcTimestamp` — a `DateTime` written with an explicit `Z`. When the platform acted.
+ */
+
+/** `DateOnly` — `yyyy-MM-dd`. */
+export type IsoDate = string;
+
+/** `DateTime`, round-trip format, always UTC. See the API's `UtcDateTimeConverter`. */
+export type IsoUtcTimestamp = string;
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+export type Dataset = "Cpi" | "Sofr";
+
+export type SeriesFrequency =
+  | "BusinessDaily"
+  | "Daily"
+  | "Weekly"
+  | "Monthly"
+  | "Quarterly"
+  | "Semiannual"
+  | "Annual";
+
+export type SeasonalAdjustment =
+  | "SeasonallyAdjusted"
+  | "NotSeasonallyAdjusted"
+  | "NotApplicable";
+
+/** The length of the period a CPI figure describes. Null for SOFR. */
+export type PeriodType = "Month" | "Semiannual" | "Annual";
+
+export type TrendGranularity = "Auto" | "Point" | "Month" | "Quarter" | "Year";
+
+export type SortDirection = "Ascending" | "Descending";
+
+export type CollectionRunStatus =
+  | "Running"
+  | "Succeeded"
+  | "PartialSuccess"
+  | "Failed"
+  | "Skipped";
+
+export type CollectionTriggerType = "Scheduled" | "Manual" | "Retry" | "Backfill";
+
+export type CollectionFailureCategory =
+  | "Unreachable"
+  | "Timeout"
+  | "HttpError"
+  | "RateLimited"
+  | "ParseError"
+  | "SchemaChanged"
+  | "Validation"
+  | "Persistence"
+  | "Unknown";
+
+export type SourceAccessMethod = "RestApi" | "Html" | "Csv";
+
+// ---------------------------------------------------------------------------
+// Paging
+// ---------------------------------------------------------------------------
+
+/** `PagedResult<T>`. The computed members are serialised too, so the pager needs no arithmetic. */
+export interface PagedResult<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  /** Total matching rows, ignoring paging. */
+  totalCount: number;
+  totalPages: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+export interface DataSourceDto {
+  dataSourceId: number;
+  code: string;
+  name: string;
+  publisher: string;
+  landingPageUrl: string;
+  accessMethod: SourceAccessMethod;
+  /** How often the publisher releases — not how often the platform polls. */
+  publicationCadence: string;
+  collectionIntervalMinutes: number;
+  requestTimeoutSec: number;
+  maxRetries: number;
+  userAgent: string | null;
+  /** Compliance evidence for the dashboard footer (SOW 3). */
+  termsOfUseUrl: string | null;
+  requiresApiKey: boolean;
+  isEnabled: boolean;
+  seriesCount: number;
+}
+
+export interface SeriesLatestPointDto {
+  referenceDate: IsoDate;
+  value: number;
+  /** When the platform learned this value (FR-6), not when it was published. */
+  collectedAtUtc: IsoUtcTimestamp;
+}
+
+export interface SeriesDto {
+  seriesKey: string;
+  dataset: Dataset;
+  dataSourceId: number;
+  sourceCode: string;
+  publisherCode: string;
+  title: string;
+  /** Verbatim from the publisher. Axis labels must use it; values are never rescaled. */
+  unit: string;
+  decimalPlaces: number;
+  frequency: SeriesFrequency;
+  seasonalAdjustment: SeasonalAdjustment;
+  sourceUrl: string;
+  latest: SeriesLatestPointDto | null;
+}
+
+// ---------------------------------------------------------------------------
+// Observations and trends
+// ---------------------------------------------------------------------------
+
+export interface ObservationDto {
+  observationId: number;
+  seriesKey: string;
+  /** The period the number describes. */
+  referenceDate: IsoDate;
+  periodType: PeriodType | null;
+  /** The publisher's own period token, verbatim: `M06`, `M13`. Null for SOFR. */
+  periodCode: string | null;
+  value: number;
+  /** 0 is the first value seen for this period; each correction increments. */
+  revisionNumber: number;
+  isCurrent: boolean;
+  supersededAtUtc: IsoUtcTimestamp | null;
+  sourceAnnotation: string | null;
+  collectedAtUtc: IsoUtcTimestamp;
+  collectionRunId: number;
+}
+
+export interface TrendPointDto {
+  bucketStart: IsoDate;
+  /** Inclusive. Equal to `bucketStart` for unbucketed points. */
+  bucketEnd: IsoDate;
+  /** Mean of the observations in the bucket. */
+  value: number;
+  minimum: number;
+  maximum: number;
+  observationCount: number;
+}
+
+export interface TrendSeriesDto {
+  seriesKey: string;
+  title: string;
+  /** Series with different units must not share an axis. */
+  unit: string;
+  decimalPlaces: number;
+  /** The bucket width actually used, after `Auto` was resolved. */
+  granularity: TrendGranularity;
+  points: TrendPointDto[];
+}
+
+export interface SeriesKpiDto {
+  seriesKey: string;
+  title: string;
+  unit: string;
+  decimalPlaces: number;
+  frequency: SeriesFrequency;
+  seasonalAdjustment: SeasonalAdjustment;
+  /** Null when nothing has been collected for this series yet. */
+  latest: SeriesLatestPointDto | null;
+  previousValue: number | null;
+  previousReferenceDate: IsoDate | null;
+  changeFromPrevious: number | null;
+  percentChangeFromPrevious: number | null;
+  /** The most recent release at or before one year prior — not an exact-date match. */
+  yearAgoValue: number | null;
+  yearAgoReferenceDate: IsoDate | null;
+  changeFromYearAgo: number | null;
+  /** For CPI, the inflation rate as normally quoted. */
+  percentChangeFromYearAgo: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Collection
+// ---------------------------------------------------------------------------
+
+export interface CollectionRunDto {
+  collectionRunId: number;
+  dataSourceId: number;
+  sourceCode: string;
+  scheduledForUtc: IsoUtcTimestamp;
+  attempt: number;
+  triggerType: CollectionTriggerType;
+  startedAtUtc: IsoUtcTimestamp;
+  completedAtUtc: IsoUtcTimestamp | null;
+  durationMs: number | null;
+  status: CollectionRunStatus;
+  httpStatusCode: number | null;
+  observationsFetched: number;
+  observationsInserted: number;
+  /** Counted apart from inserts: a revision means a published figure moved. */
+  observationsRevised: number;
+  observationsUnchanged: number;
+  observationsRejected: number;
+  failureCategory: CollectionFailureCategory | null;
+  errorMessage: string | null;
+}
+
+export interface SourceHealthDto {
+  dataSourceId: number;
+  sourceCode: string;
+  name: string;
+  isEnabled: boolean;
+  windowDays: number;
+  totalRuns: number;
+  succeededRuns: number;
+  partialRuns: number;
+  failedRuns: number;
+  /** Null when the window holds no runs — which is not the same state as 100%. */
+  successRatePercent: number | null;
+  lastRunAtUtc: IsoUtcTimestamp | null;
+  lastSuccessAtUtc: IsoUtcTimestamp | null;
+  lastRunStatus: CollectionRunStatus | null;
+  lastFailureCategory: CollectionFailureCategory | null;
+  lastErrorMessage: string | null;
+  /** Non-zero means collection is broken now, not merely at some point in the window. */
+  consecutiveFailures: number;
+}
+
+export interface DashboardSummaryDto {
+  sourceCount: number;
+  seriesCount: number;
+  /**
+   * Reported per dataset rather than summed: a CPI row is a month and a SOFR row is a business
+   * day, so one total would only invite the reader to compare them.
+   */
+  cpiObservationCount: number;
+  sofrObservationCount: number;
+  earliestCpiMonth: IsoDate | null;
+  latestCpiMonth: IsoDate | null;
+  earliestSofrDate: IsoDate | null;
+  latestSofrDate: IsoDate | null;
+  lastCollectionAtUtc: IsoUtcTimestamp | null;
+  sources: SourceHealthDto[];
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/** RFC 9457. The API returns this shape for every failure, including validation problems. */
+export interface ProblemDetails {
+  type?: string;
+  title?: string;
+  status?: number;
+  detail?: string;
+  instance?: string;
+  /** Present on 400s produced by `Results.ValidationProblem`. */
+  errors?: Record<string, string[]>;
+}
