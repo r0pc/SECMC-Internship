@@ -26,6 +26,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new UtcDateTimeConverter());
 });
 
+builder.Services.AddAssistant(builder.Configuration);
+
 // The frontend is deployed independently of the API (SOW 4.2), so it needs an explicit origin allowance.
 const string FrontendCorsPolicy = "FrontendCorsPolicy";
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
@@ -75,3 +77,4 @@ app.Run();
 
 /// <summary>Exposed so integration tests can host the API via <c>WebApplicationFactory</c>.</summary>
 public partial class Program { }
+

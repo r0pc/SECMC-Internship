@@ -113,4 +113,23 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds * 2);
         }
     }
+    public static IServiceCollection AddAssistant(
+    this IServiceCollection services, IConfiguration configuration)
+{
+    services.AddOptions<AssistantOptions>()
+        .Bind(configuration.GetSection(AssistantOptions.SectionName))
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+
+    services.TryAddSingleton(TimeProvider.System);
+
+    services.AddHttpClient<INlToSqlClient, AnthropicNlToSqlClient>(client =>
+        client.Timeout = TimeSpan.FromSeconds(60));
+
+    services.AddSingleton<ISqlSafetyValidator, SqlSafetyValidator>();
+    services.AddScoped<ReadOnlySqlExecutor>();
+    services.AddScoped<IAssistantService, AssistantService>();
+
+    return services;
+}
 }
