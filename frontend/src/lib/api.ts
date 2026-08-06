@@ -10,6 +10,9 @@
  */
 
 import type {
+  AskQuestionRequest,
+  AssistantAnswerDto,
+  AssistantFeedbackRequest,
   CollectionRunDto,
   CollectionRunStatus,
   DashboardSummaryDto,
@@ -154,6 +157,55 @@ async function apiFetch<T>(
   return (await response.json()) as T;
 }
 
+/**
+ * A call that sends a JSON body.
+ *
+ * Separate from `apiFetch` rather than folded into it with an optional body: every other call in
+ * this file is a read, and keeping the one verb that changes something visibly distinct is worth
+ * a little duplication. `204 No Content` is answered with `undefined`, since a body would be a
+ * contract violation rather than something to parse.
+ */
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const url = `${API_BASE_URL}${path}`;
+
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+
+    throw new ApiError(
+      0,
+      {
+        title: "API unreachable",
+        detail:
+          `Could not reach the Data Intelligence API at ${API_BASE_URL} (${reason}). ` +
+          "Check that it is running and that NEXT_PUBLIC_API_BASE_URL points at it.",
+      },
+      url,
+    );
+  }
+
+  if (!response.ok) {
+    throw await readProblem(response, url);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
+}
+
 /** A call that either produced data or an error, rather than one that threw. */
 export type ApiResult<T> =
   | { readonly ok: true; readonly data: T }
@@ -287,4 +339,30 @@ export function getCollectionRun(collectionRunId: number) {
 
 export function getCollectionHealth(windowDays?: number) {
   return apiFetch<SourceHealthDto[]>("/api/collection/health", { windowDays });
+}
+
+// ---------------------------------------------------------------------------
+// AI query assistant (FR-13 – FR-16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Asks a question and waits for the whole round trip — question to SQL, validation, execution,
+ * results back to the model, answer.
+ *
+ * Slow by the standards of everything else here: the API budgets 30 seconds for the model and 10
+ * for the query, and observed latency is several seconds. The UI has to show that it is working
+ * rather than appearing to have frozen.
+ */
+export function askAssistant(request: AskQuestionRequest) {
+  return apiPost<AssistantAnswerDto>("/api/assistant/ask", request);
+}
+
+export function submitAssistantFeedback(
+  assistantQueryId: number,
+  request: AssistantFeedbackRequest,
+) {
+  return apiPost<void>(
+    `/api/assistant/queries/${assistantQueryId}/feedback`,
+    request,
+  );
 }

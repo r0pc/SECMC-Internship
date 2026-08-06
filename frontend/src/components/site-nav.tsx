@@ -18,6 +18,7 @@ const LINKS: readonly {
 }[] = [
   { href: "/", label: "Dashboard", exact: true },
   { href: "/series", label: "Series" },
+  { href: "/assistant", label: "Assistant" },
   { href: "/collection", label: "Collection" },
   { href: "/sources", label: "Sources" },
 ];

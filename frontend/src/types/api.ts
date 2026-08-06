@@ -259,6 +259,79 @@ export interface DashboardSummaryDto {
 }
 
 // ---------------------------------------------------------------------------
+// AI query assistant (FR-13 – FR-16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a generated statement was or was not allowed to run.
+ *
+ * `NotADataQuestion` is separate from `RejectedNoSql` on purpose: both produce no SQL, but a
+ * greeting is not a finding and a question the schema cannot answer might be. Only the second
+ * belongs in a reviewer's queue.
+ */
+export type AssistantValidationOutcome =
+  | "Pending"
+  | "Approved"
+  | "RejectedNotSelect"
+  | "RejectedForbiddenObject"
+  | "RejectedSyntax"
+  | "RejectedComplexity"
+  | "RejectedNoSql"
+  | "NotADataQuestion";
+
+export type AssistantExecutionStatus =
+  | "Succeeded"
+  | "Failed"
+  | "Timeout"
+  | "Cancelled";
+
+export interface AskQuestionRequest {
+  /** Continues an existing conversation. Omit to start one. */
+  sessionId?: string;
+  question: string;
+}
+
+/**
+ * One answer, with everything needed to judge it.
+ *
+ * The SQL, its parameters and the model's explanation travel with the answer rather than being
+ * hidden behind a toggle in the API: an answer whose query cannot be inspected is a number the
+ * reader has to take on trust, which is the opposite of what this platform is for.
+ */
+export interface AssistantAnswerDto {
+  assistantQueryId: number;
+  sessionId: string;
+  questionText: string;
+
+  validationOutcome: AssistantValidationOutcome;
+
+  /** Null when validation rejected the query before it ran. */
+  generatedSql: string | null;
+
+  /** Values bound to the placeholders in `generatedSql`, never inlined into it. */
+  sqlParameters: Record<string, unknown> | null;
+
+  /** The model's own account of what the query does. */
+  explanation: string | null;
+
+  wasExecuted: boolean;
+  executionStatus: AssistantExecutionStatus | null;
+
+  /** The natural-language answer, or an explanation of why there is none. */
+  answerText: string;
+
+  /** Result rows, capped by the API. Column order is whatever the query selected. */
+  rows: Record<string, unknown>[] | null;
+
+  resultRowCount: number | null;
+}
+
+export interface AssistantFeedbackRequest {
+  isHelpful: boolean;
+  comment?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 

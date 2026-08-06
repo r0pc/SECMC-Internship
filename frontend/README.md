@@ -39,11 +39,21 @@ still needs this app's origin in it before anything moves client-side.
 | `/` | KPI tiles, trend charts, stored-history counts, per-source collection health (FR-10) |
 | `/series` | The catalogue — seven series with unit, frequency and latest value (FR-11) |
 | `/series/[seriesKey]` | One series: headline figures, trend, and the observation rows behind them, with range, bucket, period-type, revision and sort filters |
+| `/assistant` | Ask questions in plain language. Each answer carries the SQL that produced it, its bound parameters, and the model's explanation (FR-13 – FR-16) |
 | `/collection` | Collection health and the log of every attempt, filterable by status and source (FR-2) |
 | `/sources` | Publishers, polling settings and terms-of-use links (FR-7, SOW 3) |
 
 Every route is server-rendered on demand. Filters live in the query string, so any view is
 a link that can be pasted into a ticket.
+
+`/assistant` is the one page with client state — a conversation is state — so the chat itself is a
+Client Component. It still does not call the API from the browser: the two mutations go through
+Server Functions in `src/app/assistant/actions.ts`, which keeps the rule that only the server talks
+to the backend and means no CORS allowance is needed for the app's first interactive page.
+
+The transcript is deliberately not persisted to `localStorage`. Sessions are server-side and the
+audit log is the durable record; a second copy in the browser would put users' questions somewhere
+nobody has agreed they should be, for no benefit a reload does not already provide.
 
 ## Layout
 
