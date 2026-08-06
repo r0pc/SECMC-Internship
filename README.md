@@ -97,7 +97,7 @@ pipeline is running against both live APIs.
 | Read API (FR-7, FR-10 – FR-12) | Dashboard, catalogue, observation and collection-log endpoints |
 | Authentication (FR-9) | Not started — every endpoint is currently anonymous |
 | AI query assistant (FR-13 – FR-16) | Not started. Schema and audit tables exist |
-| Frontend dashboards | Not started |
+| Frontend dashboards (FR-10 – FR-12) | Delivered. Dashboard, series catalogue, series detail, collection log and sources, server-rendered against the live API |
 
 Known gaps worth tracking:
 
