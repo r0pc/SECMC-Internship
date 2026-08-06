@@ -28,6 +28,7 @@ public static class ApiEndpoints
         api.MapSeriesEndpoints();
         api.MapDashboardEndpoints();
         api.MapCollectionEndpoints();
+        api.MapAssistantEndpoints();
 
         return app;
     }

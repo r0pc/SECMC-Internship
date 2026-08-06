@@ -162,7 +162,48 @@ Paging is uniform: `?page=` (1-based) and `?pageSize=`, answered with `items`, `
 `pageSize`, `totalCount`, `totalPages`, `hasNextPage`, `hasPreviousPage`. Out-of-range values are
 clamped rather than rejected — 500 per page for catalogue lists, 2000 for observations.
 
-Authentication is not wired up yet (FR-9). Every endpoint is currently anonymous.
+### AI query assistant (FR-13 – FR-16)
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/assistant/ask` | A question in, a natural-language answer out, with the SQL that produced it and the rows it returned |
+| `POST /api/assistant/queries/{id}/feedback` | Thumbs up/down on one answer |
+
+The round trip is question → SQL → **validate** → execute read-only → results back to the model →
+answer. It is natural-language-to-SQL, not retrieval over documents: the data is numeric time
+series, so the model writes a query rather than reading passages.
+
+Two independent controls stand between the model and the database, and neither is sufficient alone:
+
+- **`ISqlSafetyValidator`** — a single `SELECT`, one statement, and only the nine `analytics.*`
+  views. Comments are stripped and string literals blanked *before* inspection, so a keyword
+  hidden in a comment cannot dodge the scan and a literal containing the word `delete` cannot
+  trigger a false rejection. `CROSS APPLY` is checked alongside `FROM` and `JOIN` — it introduces
+  a table expression the same way — and an unqualified name is rejected rather than unmatched.
+- **A separate read-only connection** — `ConnectionStrings:DataIntelligenceDbReadOnly`,
+  authenticating as a login in the `di_ai_readonly` role, which holds `SELECT` on `analytics.*`
+  and `DENY SELECT` on `sec` and `ai`. A statement that somehow passed validation still cannot
+  write, and cannot read the audit log or the identity tables.
+
+Results are capped twice: the validator injects `TOP (2000)` when the model set no limit, and the
+executor stops reading at the same ceiling — an injected `TOP` binds to one `SELECT`, so a `UNION`
+would otherwise return the cap per branch.
+
+Every question is written to `ai.AssistantQuery` **before** its SQL is generated, and updated at
+each step, so a rejected query is on the record with the reason it was refused (NFR Auditability).
+`CK_AssistantQuery_NoUnvalidatedRun` is the database's own backstop: a row cannot claim it executed
+unless validation approved it.
+
+The assistant needs `Assistant:ApiKey`. Without it the API still starts and the dashboards still
+work — `/api/assistant/ask` answers `503` naming the missing setting. A missing LLM key is not a
+reason for the whole API to be down.
+
+Authentication is not wired up yet (FR-9). Every endpoint is currently anonymous, and
+`/api/assistant/ask` records a placeholder user id — see the TODO in `AssistantEndpoints`.
+`ai.AssistantSession.UserId` and `ai.AssistantQuery.UserId` carry a foreign key to `sec.AppUser` in
+`docs/database-schema.sql`, so **a row must exist in `sec.AppUser` for that id before the assistant
+can write its audit log**. The EF migration creates the columns and their indexes but not the
+constraint, because the table it points at arrives with FR-9.
 
 ## Configuration and secrets
 
@@ -183,6 +224,10 @@ Use environment variables in deployed environments.
 | `Collection:Bls:ApiKey` | Api, Worker | BLS registration key. **Never committed** — user secrets or environment only. Optional: unregistered v2 calls still work under a much smaller daily quota, so an absent key degrades rather than stops collection. |
 | `Collection:IntervalMinutes` | Worker | 60 (hourly, FR-1). Cycles align to the wall clock unless `AlignToClock` is false. |
 | `Collection:Bls:YearsOfHistory` | Worker | 2 — current and previous calendar year per request. |
+| `ConnectionStrings:DataIntelligenceDbReadOnly` | Api | The connection the assistant executes generated SQL on. Must authenticate as a login in the `di_ai_readonly` role. **Never the app's read-write login** — that would remove the second of the two controls. |
+| `Assistant:ApiKey` | Api | DeepSeek platform key. **Never committed.** Absent or rejected, the assistant returns 503 naming the problem and the rest of the API is unaffected. |
+| `Assistant:BaseUrl` · `Assistant:Model` | Api | `https://api.deepseek.com/` and `deepseek-v4-flash`. Any gateway speaking OpenAI's `/chat/completions` shape is a settings change; one that does not means a new `INlToSqlClient`. Model ids are **not** portable between gateways — DeepSeek's own API uses the bare `deepseek-v4-flash`, while a reseller such as OpenRouter spells the same model `deepseek/deepseek-v4-flash`. `GET https://api.deepseek.com/models` lists what a key can reach. |
+| `Assistant:RequestTimeoutSeconds` · `SqlExecutionTimeoutSeconds` · `MaxOutputTokens` | Api | 30 / 10 / 1024. The response-time budget FR-15 asks for. |
 
 SOFR has no window setting: the adapter asks for the current calendar year every cycle, which is
 the annual extract the schema is written against and means a gap left by an outage or a late
@@ -329,5 +374,17 @@ API path.
 
 ## Not yet implemented
 
-Authentication (FR-9) and the AI orchestration layer (FR-13 – FR-16) are the remaining
-backend work for Phase 4.
+Authentication (FR-9) is the remaining backend work for Phase 4. The AI assistant
+(FR-13 – FR-16) is in place but depends on it in two ways: every question is attributed to a
+hard-coded user id, and the audit log's foreign key to `sec.AppUser` cannot be created until that
+table exists.
+
+Two pieces of the AI scope are also still open:
+
+- **Parameterised SQL.** Issue #6 asks the model for a parameterised statement plus its own
+  explanation of what it wrote. The current client returns a literal statement and no explanation;
+  `ai.AssistantQuery.SqlParametersJson` is created but never populated. The safety validator does
+  not depend on parameterisation — it allows only `SELECT` over nine views — so this is a fidelity
+  gap against the issue rather than an open security hole.
+- **The admin review endpoint** for the audit log (issue #9). The rows are written and indexed
+  (`IX_AssistantQuery_Rejected` covers the rejected-query review queue); nothing serves them yet.

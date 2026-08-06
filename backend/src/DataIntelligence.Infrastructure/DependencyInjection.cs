@@ -1,4 +1,5 @@
 using DataIntelligence.Core.Interfaces;
+using DataIntelligence.Infrastructure.Ai;
 using DataIntelligence.Infrastructure.Analytics;
 using DataIntelligence.Infrastructure.Collection;
 using DataIntelligence.Infrastructure.Persistence;
@@ -113,23 +114,34 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds * 2);
         }
     }
+    /// <summary>Registers the AI query assistant (FR-13 – FR-16).</summary>
+    /// <remarks>
+    /// Deliberately does not <c>ValidateOnStart</c>: the assistant's API key is not required for
+    /// the dashboards to work, and a missing key must not take the whole API down with it. The
+    /// key is checked when a question is actually asked, which turns a missing secret into one
+    /// failed endpoint rather than a process that will not boot.
+    /// </remarks>
     public static IServiceCollection AddAssistant(
-    this IServiceCollection services, IConfiguration configuration)
-{
-    services.AddOptions<AssistantOptions>()
-        .Bind(configuration.GetSection(AssistantOptions.SectionName))
-        .ValidateDataAnnotations()
-        .ValidateOnStart();
+        this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddOptions<AssistantOptions>()
+            .Bind(configuration.GetSection(AssistantOptions.SectionName))
+            .ValidateDataAnnotations();
 
-    services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton(TimeProvider.System);
 
-    services.AddHttpClient<INlToSqlClient, AnthropicNlToSqlClient>(client =>
-        client.Timeout = TimeSpan.FromSeconds(60));
+        services.AddHttpClient<INlToSqlClient, DeepSeekNlToSqlClient>((provider, client) =>
+        {
+            var options = provider.GetRequiredService<IOptions<AssistantOptions>>().Value;
+            // Outlives the per-request timeout the client applies itself, so the cancellation
+            // that fires is the one carrying a useful message.
+            client.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds * 2);
+        });
 
-    services.AddSingleton<ISqlSafetyValidator, SqlSafetyValidator>();
-    services.AddScoped<ReadOnlySqlExecutor>();
-    services.AddScoped<IAssistantService, AssistantService>();
+        services.AddSingleton<ISqlSafetyValidator, SqlSafetyValidator>();
+        services.AddScoped<ReadOnlySqlExecutor>();
+        services.AddScoped<IAssistantService, AssistantService>();
 
-    return services;
-}
+        return services;
+    }
 }

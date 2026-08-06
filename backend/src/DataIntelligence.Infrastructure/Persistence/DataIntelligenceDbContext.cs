@@ -11,8 +11,12 @@ namespace DataIntelligence.Infrastructure.Persistence;
 /// from this context are the deployment mechanism (NFR Maintainability).
 /// </summary>
 /// <remarks>
-/// The <c>sec</c> and <c>ai</c> schemas are not mapped here — they belong to the
-/// authentication and AI-assistant work and are untouched by collection.
+/// The <c>sec</c> schema is not mapped here — it belongs to the authentication work (FR-9) and is
+/// untouched by collection. The <c>ai</c> schema is mapped, because the assistant's audit log is
+/// written through this context (NFR Auditability). Its <c>UserId</c> columns are plain integers
+/// rather than mapped relationships: <c>docs/database-schema.sql</c> gives them a foreign key to
+/// <c>sec.AppUser</c>, and that constraint can only be added once FR-9 creates the table it points
+/// at. Recorded in the migration as a TODO rather than silently dropped.
 /// </remarks>
 public class DataIntelligenceDbContext : DbContext
 {
@@ -27,6 +31,9 @@ public class DataIntelligenceDbContext : DbContext
     public DbSet<CpiObservation> CpiObservations => Set<CpiObservation>();
     public DbSet<SofrDailyRate> SofrDailyRates => Set<SofrDailyRate>();
     public DbSet<RejectedObservation> RejectedObservations => Set<RejectedObservation>();
+    public DbSet<AssistantSession> AssistantSessions => Set<AssistantSession>();
+    public DbSet<AssistantQuery> AssistantQueries => Set<AssistantQuery>();
+    public DbSet<AssistantFeedback> AssistantFeedback => Set<AssistantFeedback>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -48,6 +55,9 @@ public class DataIntelligenceDbContext : DbContext
         ConfigureCpiObservation(modelBuilder.Entity<CpiObservation>());
         ConfigureSofrDailyRate(modelBuilder.Entity<SofrDailyRate>());
         ConfigureRejectedObservation(modelBuilder.Entity<RejectedObservation>());
+        ConfigureAssistantSession(modelBuilder.Entity<AssistantSession>());
+        ConfigureAssistantQuery(modelBuilder.Entity<AssistantQuery>());
+        ConfigureAssistantFeedback(modelBuilder.Entity<AssistantFeedback>());
 
         ConfigureSeedData(modelBuilder);
     }
@@ -445,5 +455,92 @@ public class DataIntelligenceDbContext : DbContext
         entity.HasIndex(e => new { e.CollectionRunId, e.RejectedAtUtc })
             .IsDescending(false, true)
             .HasDatabaseName("IX_RejectedObservation_Run");
+    }
+
+    // --------------------------------------------------------------------- ai
+
+    private static void ConfigureAssistantSession(EntityTypeBuilder<AssistantSession> entity)
+    {
+        entity.ToTable("AssistantSession", "ai");
+
+        entity.HasKey(e => e.SessionId);
+        entity.Property(e => e.SessionId).ValueGeneratedNever();
+        entity.Property(e => e.StartedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.LastActivityAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+        entity.HasIndex(e => new { e.UserId, e.StartedAtUtc })
+            .IsDescending(false, true)
+            .HasDatabaseName("IX_AssistantSession_User");
+    }
+
+    private static void ConfigureAssistantQuery(EntityTypeBuilder<AssistantQuery> entity)
+    {
+        entity.ToTable("AssistantQuery", "ai", t =>
+        {
+            t.HasCheckConstraint("CK_AssistantQuery_Validation",
+                "[ValidationOutcome] IN ('Pending','Approved','RejectedNotSelect',"
+                + "'RejectedForbiddenObject','RejectedSyntax','RejectedComplexity','RejectedNoSql')");
+            t.HasCheckConstraint("CK_AssistantQuery_Execution",
+                "[ExecutionStatus] IS NULL OR [ExecutionStatus] IN "
+                + "('Succeeded','Failed','Timeout','Cancelled')");
+            // The backstop behind ISqlSafetyValidator (SOW 9): even a bug in the validator cannot
+            // record a statement as executed unless it was approved first.
+            t.HasCheckConstraint("CK_AssistantQuery_NoUnvalidatedRun",
+                "[WasExecuted] = 0 OR [ValidationOutcome] = 'Approved'");
+        });
+
+        entity.HasKey(e => e.AssistantQueryId);
+
+        entity.Property(e => e.AskedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.QuestionText).HasMaxLength(2000).IsRequired();
+        entity.Property(e => e.ValidationDetail).HasMaxLength(1000);
+        entity.Property(e => e.ExecutionError).HasMaxLength(1000);
+        entity.Property(e => e.ModelName).HasMaxLength(100);
+        entity.Property(e => e.ClientIpHash).HasColumnType("binary(32)");
+        entity.Property(e => e.WasExecuted).HasDefaultValue(false);
+
+        // Stored as strings so the CHECK constraints above stay readable, matching how the
+        // collection enums are persisted.
+        entity.Property(e => e.ValidationOutcome)
+            .HasConversion<string>().HasMaxLength(20).IsUnicode(false)
+            .HasDefaultValue(AssistantValidationOutcome.Pending);
+        entity.Property(e => e.ExecutionStatus)
+            .HasConversion<string>().HasMaxLength(20).IsUnicode(false);
+
+        entity.HasOne(e => e.Session)
+            .WithMany(s => s.Queries)
+            .HasForeignKey(e => e.SessionId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Both of these cover AskedAtUtc. They are declared with the named HasIndex overload
+        // because the expression-only overload identifies an index by its property list — calling
+        // it twice for the same column reconfigures one index rather than declaring two, which
+        // silently loses whichever was declared first.
+        entity.HasIndex(e => e.AskedAtUtc, "IX_AssistantQuery_AskedAtUtc")
+            .IsDescending(true);
+
+        entity.HasIndex(e => new { e.UserId, e.AskedAtUtc }, "IX_AssistantQuery_User")
+            .IsDescending(false, true);
+
+        // The review queue (NFR Auditability): everything the validator turned away.
+        entity.HasIndex(e => e.AskedAtUtc, "IX_AssistantQuery_Rejected")
+            .IsDescending(true)
+            .IncludeProperties(e => new { e.QuestionText, e.ValidationOutcome, e.ValidationDetail })
+            .HasFilter("[ValidationOutcome] <> 'Approved'");
+    }
+
+    private static void ConfigureAssistantFeedback(EntityTypeBuilder<AssistantFeedback> entity)
+    {
+        entity.ToTable("AssistantFeedback", "ai");
+
+        entity.HasKey(e => e.AssistantQueryId);
+        entity.Property(e => e.AssistantQueryId).ValueGeneratedNever();
+        entity.Property(e => e.Comment).HasMaxLength(1000);
+        entity.Property(e => e.SubmittedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+        entity.HasOne(e => e.Query)
+            .WithOne(q => q.Feedback)
+            .HasForeignKey<AssistantFeedback>(e => e.AssistantQueryId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }

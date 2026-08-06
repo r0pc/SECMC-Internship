@@ -41,9 +41,33 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
         "DBCC", "WAITFOR", "XP_", "SP_"
     ];
 
+    /// <summary>
+    /// Every object a statement reads. <c>APPLY</c> is included because <c>CROSS APPLY</c> and
+    /// <c>OUTER APPLY</c> introduce a table expression exactly as <c>JOIN</c> does — matching only
+    /// FROM and JOIN would let <c>CROSS APPLY sec.AppUser</c> through unexamined.
+    /// </summary>
+    /// <remarks>
+    /// The name is captured whole, including any schema and database parts, and is not required to
+    /// be two-part. An unqualified <c>FROM vw_Cpi</c> must be *seen* and then rejected for not
+    /// being on the allow-list; a pattern that only matched <c>schema.object</c> would not match it
+    /// at all, and an unmatched reference is an unchecked one.
+    /// </remarks>
     private static readonly Regex ObjectReference = new(
-        @"\b(?:FROM|JOIN)\s+(\[?\w+\]?\.\[?\w+\]?)",
+        @"\b(?:FROM|JOIN|APPLY)\s+(?!\()(\[?[\w$@#]+\]?(?:\s*\.\s*\[?[\w$@#]*\]?)*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Matches the <c>sp_</c>/<c>xp_</c> procedure prefixes as prefixes, not whole words.</summary>
+    /// <remarks>
+    /// A <c>\bSP_\b</c> word-boundary test never fires on <c>sp_executesql</c>: <c>_</c> is a word
+    /// character, so there is no boundary between <c>sp_</c> and what follows it. The prefix has to
+    /// be matched together with the name it prefixes.
+    /// </remarks>
+    private static readonly Regex ProcedurePrefix = new(
+        @"\b(?:sp|xp)_\w+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Single-quoted literals, including the doubled-quote escape.</summary>
+    private static readonly Regex StringLiteral = new(
+        @"'(?:[^']|'')*'", RegexOptions.Compiled);
 
     /// <summary>Row cap the generated SELECT must not exceed, enforced with an injected TOP.</summary>
     public const int MaxRows = 2000;
@@ -61,17 +85,22 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
 
         var trimmed = StripComments(sql).Trim().TrimEnd(';', ' ', '\r', '\n');
 
+        // Everything below inspects a copy with string literals blanked out. A literal is inert
+        // data to SQL Server, so a title containing "insert" or an apostrophe is a false rejection
+        // waiting to happen — while the statement actually executed keeps its literals intact.
+        var inspected = StringLiteral.Replace(trimmed, "''");
+
         // Exactly one statement: a semicolon anywhere in the middle, or a batch separator, means
         // more than one statement is being smuggled through.
-        if (trimmed.Contains(';', StringComparison.Ordinal)
-            || Regex.IsMatch(trimmed, @"(?<![\w])GO(?![\w])", RegexOptions.IgnoreCase))
+        if (inspected.Contains(';', StringComparison.Ordinal)
+            || Regex.IsMatch(inspected, @"(?<![\w])GO(?![\w])", RegexOptions.IgnoreCase))
         {
             return new SqlValidationResult(
                 AssistantValidationOutcome.RejectedSyntax,
                 "The statement contains more than one batch.", null);
         }
 
-        if (!Regex.IsMatch(trimmed, @"^\s*SELECT\b", RegexOptions.IgnoreCase))
+        if (!Regex.IsMatch(inspected, @"^\s*SELECT\b", RegexOptions.IgnoreCase))
         {
             return new SqlValidationResult(
                 AssistantValidationOutcome.RejectedNotSelect,
@@ -80,7 +109,7 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
 
         foreach (var keyword in ForbiddenKeywords)
         {
-            if (Regex.IsMatch(trimmed, $@"\b{Regex.Escape(keyword)}\b", RegexOptions.IgnoreCase))
+            if (Regex.IsMatch(inspected, $@"\b{Regex.Escape(keyword)}\b", RegexOptions.IgnoreCase))
             {
                 return new SqlValidationResult(
                     AssistantValidationOutcome.RejectedSyntax,
@@ -88,8 +117,15 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
             }
         }
 
-        var references = ObjectReference.Matches(trimmed)
-            .Select(m => m.Groups[1].Value.Replace("[", "").Replace("]", ""))
+        if (ProcedurePrefix.Match(inspected) is { Success: true } procedure)
+        {
+            return new SqlValidationResult(
+                AssistantValidationOutcome.RejectedSyntax,
+                $"'{procedure.Value}' is not permitted in a generated query.", null);
+        }
+
+        var references = ObjectReference.Matches(inspected)
+            .Select(m => NormalizeReference(m.Groups[1].Value))
             .ToList();
 
         if (references.Count == 0)
@@ -134,6 +170,16 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
             sql, @"^\s*SELECT\s+(DISTINCT\s+)?", $"SELECT $1TOP ({MaxRows}) ",
             RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(200));
     }
+
+    /// <summary>
+    /// Reduces a captured object reference to a comparable form: brackets and the whitespace
+    /// SQL Server tolerates around the dots removed, so <c>[analytics] . [vw_Cpi]</c> and
+    /// <c>analytics.vw_Cpi</c> are recognised as the same object rather than the second being
+    /// allowed and the first slipping through unmatched.
+    /// </summary>
+    private static string NormalizeReference(string reference) =>
+        reference.Replace("[", "").Replace("]", "").Replace(" ", "")
+            .Replace("\t", "").Replace("\r", "").Replace("\n", "");
 
     /// <summary>
     /// Strips <c>--</c> and <c>/* */</c> comments before inspection, since a keyword hidden

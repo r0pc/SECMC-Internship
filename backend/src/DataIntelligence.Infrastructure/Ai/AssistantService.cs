@@ -19,6 +19,25 @@ namespace DataIntelligence.Infrastructure.Ai;
 /// </remarks>
 public sealed class AssistantService : IAssistantService
 {
+    /// <summary>
+    /// What the assistant says when the question does not become a query — an unanswerable
+    /// question, or an ordinary greeting.
+    /// </summary>
+    /// <remarks>
+    /// Fixed text, and deliberately not a second trip to the model. Asking it to reply
+    /// conversationally here is the one place the whole design leaks: with no result set in front
+    /// of it, a model asked to be helpful about "what was CPI in June" will answer from memory,
+    /// and a figure recalled from training data is indistinguishable in the UI from one this
+    /// platform collected. FR-16 asks for "I cannot answer that from this data" *without*
+    /// inventing numbers, which means the path that produced no data must not call the model
+    /// again. Saying what it can answer is the useful part; saying it in fresh words is not.
+    /// </remarks>
+    internal const string CannotAnswer =
+        "I can only answer from the data this platform collects: US consumer price index (CPI) "
+        + "figures, SOFR daily rates, and the collection log. I couldn't turn that into a query "
+        + "over them. Try, for example: \"What was CPI in June 2025?\", \"What is the average SOFR "
+        + "rate in 2025?\", or \"Which sources failed to collect this week?\"";
+
     private readonly DataIntelligenceDbContext _db;
     private readonly INlToSqlClient _llm;
     private readonly ISqlSafetyValidator _validator;
@@ -72,8 +91,7 @@ public sealed class AssistantService : IAssistantService
         {
             log.ValidationOutcome = AssistantValidationOutcome.RejectedNoSql;
             log.ValidationDetail = "The model could not express this question against the published views.";
-            log.AnswerText = "I couldn't turn that into a query against the data I have access to. "
-                + "Try asking about CPI, SOFR, or collection health specifically.";
+            log.AnswerText = CannotAnswer;
             log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
             await _db.SaveChangesAsync(cancellationToken);

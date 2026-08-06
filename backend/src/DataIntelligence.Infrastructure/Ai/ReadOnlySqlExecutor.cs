@@ -1,5 +1,8 @@
 // backend/src/DataIntelligence.Infrastructure/Ai/ReadOnlySqlExecutor.cs
+using DataIntelligence.Core.Exceptions;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace DataIntelligence.Infrastructure.Ai;
 
@@ -9,20 +12,28 @@ namespace DataIntelligence.Infrastructure.Ai;
 /// </summary>
 public sealed class ReadOnlySqlExecutor
 {
-    private readonly string _connectionString;
+    public const string ConnectionStringName = "DataIntelligenceDbReadOnly";
+
+    private readonly string? _connectionString;
     private readonly AssistantOptions _options;
 
     public ReadOnlySqlExecutor(IConfiguration configuration, IOptions<AssistantOptions> options)
     {
-        _connectionString = configuration.GetConnectionString("DataIntelligenceDbReadOnly")
-            ?? throw new InvalidOperationException(
-                "ConnectionStrings:DataIntelligenceDbReadOnly is not configured. It must authenticate "
-                + "as di_ai_readonly, which can SELECT from analytics.* only.");
+        _connectionString = configuration.GetConnectionString(ConnectionStringName);
         _options = options.Value;
     }
 
     public async Task<QueryExecutionResult> ExecuteAsync(string sql, CancellationToken cancellationToken)
     {
+        // Checked here rather than in the constructor: this is a scoped service, so throwing
+        // during construction surfaces as an opaque DI failure on every assistant request.
+        if (string.IsNullOrWhiteSpace(_connectionString))
+        {
+            throw new AssistantNotConfiguredException(
+                $"Connection string '{ConnectionStringName}' is not configured. It must authenticate "
+                + "as a login in the di_ai_readonly role, which can SELECT from analytics.* only.");
+        }
+
         await using var connection = new SqlConnection(_connectionString);
 
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_options.SqlExecutionTimeoutSeconds));
@@ -40,7 +51,10 @@ public sealed class ReadOnlySqlExecutor
 
             var rows = new List<IReadOnlyDictionary<string, object?>>();
 
-            while (await reader.ReadAsync(linked.Token))
+            // Second row cap, independent of the TOP the validator injects. An injected TOP binds
+            // to one SELECT, so a UNION would otherwise return MaxRows *per branch*; stopping the
+            // reader is the cap that holds whatever shape the statement turned out to be.
+            while (rows.Count < SqlSafetyValidator.MaxRows && await reader.ReadAsync(linked.Token))
             {
                 var row = new Dictionary<string, object?>(reader.FieldCount);
                 for (var i = 0; i < reader.FieldCount; i++)

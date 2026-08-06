@@ -1,22 +1,27 @@
 // backend/src/DataIntelligence.Infrastructure/Ai/DeepSeekNlToSqlClient.cs
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Core.Interfaces;
 using Microsoft.Extensions.Options;
 
 namespace DataIntelligence.Infrastructure.Ai;
 
 /// <summary>
-/// Calls the DeepSeek chat completions API (OpenAI-compatible format) to turn a question into
-/// SQL, and a result set into prose.
+/// Calls a chat-completions API in OpenAI's request shape to turn a question into SQL, and a
+/// result set into prose. Configured against DeepSeek's own API, model <c>deepseek-v4-flash</c>.
 /// </summary>
 /// <remarks>
-/// DeepSeek's API mirrors OpenAI's <c>/chat/completions</c> shape rather than Anthropic's
-/// <c>/messages</c> shape — a system message is just another entry in the messages array, and
-/// JSON-only output is requested via <c>response_format</c> rather than prompt instructions
-/// alone. Swapping providers again later means implementing <see cref="INlToSqlClient"/> once
-/// more; nothing else in the assistant pipeline depends on this shape.
+/// The wire format is OpenAI's <c>/chat/completions</c> rather than Anthropic's <c>/messages</c> —
+/// a system message is just another entry in the messages array, and JSON-only output is requested
+/// via <c>response_format</c> rather than by prompt instruction alone. Any gateway speaking that
+/// shape is a <c>BaseUrl</c> and <c>Model</c> change, not a code change; a provider that does not
+/// means implementing <see cref="INlToSqlClient"/> once more. Nothing else in the assistant
+/// pipeline depends on either.
 /// </remarks>
 public sealed class DeepSeekNlToSqlClient : INlToSqlClient
 {
@@ -28,9 +33,7 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
         _httpClient = httpClient;
         _options = options.Value;
 
-        _httpClient.BaseAddress ??= new Uri("https://api.deepseek.com/");
-        _httpClient.DefaultRequestHeaders.Remove("Authorization");
-        _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_options.ApiKey}");
+        _httpClient.BaseAddress ??= new Uri(_options.BaseUrl);
     }
 
     public async Task<NlToSqlResult> GenerateSqlAsync(
@@ -85,6 +88,14 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
     private async Task<(string Text, int? PromptTokens, int? CompletionTokens)> SendAsync(
         string system, string userMessage, bool jsonMode, CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(_options.ApiKey))
+        {
+            throw new AssistantNotConfiguredException(
+                $"'{AssistantOptions.SectionName}:ApiKey' is not configured, so the assistant cannot "
+                + "reach its model. Set it with: dotnet user-secrets set "
+                + $"\"{AssistantOptions.SectionName}:ApiKey\" \"<key>\" --project src\\DataIntelligence.Api");
+        }
+
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
@@ -98,7 +109,29 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
             _options.MaxOutputTokens,
             jsonMode ? new DeepSeekResponseFormat("json_object") : null);
 
-        using var response = await _httpClient.PostAsJsonAsync("chat/completions", requestBody, linked.Token);
+        // The key goes on the request rather than on DefaultRequestHeaders: the typed client is
+        // pooled and reused, and mutating shared default headers from a per-call path is a race.
+        using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
+        {
+            Content = JsonContent.Create(requestBody)
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.ApiKey);
+
+        using var response = await _httpClient.SendAsync(request, linked.Token);
+
+        // A key the gateway rejects is a configuration fault, not a transient one — report it as
+        // such rather than letting EnsureSuccessStatusCode turn it into an opaque 500. The most
+        // common cause is a key issued by a different provider than BaseUrl points at.
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.PaymentRequired
+            or HttpStatusCode.Forbidden)
+        {
+            throw new AssistantNotConfiguredException(
+                $"The model gateway at '{_httpClient.BaseAddress}' rejected the request with "
+                + $"{(int)response.StatusCode} {response.StatusCode}. Check that "
+                + $"'{AssistantOptions.SectionName}:ApiKey' is a key for that gateway and that it "
+                + "has credit for the configured model.");
+        }
+
         response.EnsureSuccessStatusCode();
 
         var parsed = await response.Content.ReadFromJsonAsync<DeepSeekResponse>(linked.Token)

@@ -1,5 +1,6 @@
 // backend/src/DataIntelligence.Api/Endpoints/AssistantEndpoints.cs
 using DataIntelligence.Core.Dtos;
+using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Core.Interfaces;
 
 namespace DataIntelligence.Api.Endpoints;
@@ -32,9 +33,20 @@ public static class AssistantEndpoints
                 }
 
                 var clientIp = http.Connection.RemoteIpAddress?.ToString();
-                var answer = await assistant.AskAsync(userId: 1, request, clientIp, cancellationToken);
 
-                return Results.Ok(answer);
+                try
+                {
+                    var answer = await assistant.AskAsync(userId: 1, request, clientIp, cancellationToken);
+                    return Results.Ok(answer);
+                }
+                catch (AssistantNotConfiguredException ex)
+                {
+                    // A deployment problem, not a bad request — say so, and say which setting.
+                    return Results.Problem(
+                        title: "Assistant not configured",
+                        detail: ex.Message,
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
             })
             .WithName("AskAssistant")
             .WithSummary("Asks the AI assistant a question about the collected data.")
@@ -44,7 +56,8 @@ public static class AssistantEndpoints
                 + "analytics views can ever run; anything else is rejected and explained back to "
                 + "the caller rather than attempted.")
             .Produces<AssistantAnswerDto>()
-            .ProducesProblem(StatusCodes.Status400BadRequest);
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
         group.MapPost("/queries/{assistantQueryId:long}/feedback", async (
                 long assistantQueryId,
@@ -68,7 +81,5 @@ public static class AssistantEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound);
 
         return group;
-
-        api.MapAssistantEndpoints();
     }
 }

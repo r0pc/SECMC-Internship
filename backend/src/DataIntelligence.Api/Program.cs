@@ -16,6 +16,13 @@ builder.Services.AddAnalytics();
 // One error shape for the whole API (RFC 9457), including unhandled exceptions.
 builder.Services.AddProblemDetails();
 
+// A malformed JSON body is the caller's mistake, and must be answered 400 — not 500.
+// Minimal APIs default ThrowOnBadRequest to true in Development, which turns a binding failure
+// into an exception that UseExceptionHandler then reports as an unhandled server error. The
+// result is an API that answers the same bad request differently depending on the environment
+// it is running in, and blames itself for the caller's typo.
+builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
+
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     // Enums as their names. The frontend gets "Monthly" rather than 3, and the OpenAPI document
