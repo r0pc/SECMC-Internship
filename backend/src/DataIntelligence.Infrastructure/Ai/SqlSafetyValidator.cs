@@ -19,8 +19,11 @@ namespace DataIntelligence.Infrastructure.Ai;
 /// </remarks>
 public sealed class SqlSafetyValidator : ISqlSafetyValidator
 {
-    /// <summary>The only objects a generated query may reference — see docs/database-schema.sql §5.</summary>
-    private static readonly HashSet<string> AllowedObjects = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// The only objects a generated query may reference — see docs/database-schema.sql §5. This is
+    /// also the list the model is shown, so it cannot be asked about a view it may not read.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AllowedObjects = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "analytics.vw_Cpi",
         "analytics.vw_CpiMonthlyChange",
@@ -69,13 +72,23 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
     private static readonly Regex StringLiteral = new(
         @"'(?:[^']|'')*'", RegexOptions.Compiled);
 
+    /// <summary>A bound parameter placeholder. Deliberately does not match <c>@@</c>.</summary>
+    private static readonly Regex ParameterReference = new(
+        @"(?<!@)@([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Configuration functions — <c>@@VERSION</c>, <c>@@SERVERNAME</c>, <c>@@ROWCOUNT</c>. Not
+    /// parameters, and not something a question about CPI has any reason to reach for.
+    /// </summary>
+    private static readonly Regex SystemVariable = new(@"@@\w+", RegexOptions.Compiled);
+
     /// <summary>Row cap the generated SELECT must not exceed, enforced with an injected TOP.</summary>
     public const int MaxRows = 2000;
 
     /// <summary>Crude complexity ceiling: more joins than this is almost certainly a mistake, not a real question.</summary>
     private const int MaxJoins = 6;
 
-    public SqlValidationResult Validate(string sql)
+    public SqlValidationResult Validate(string sql, IReadOnlyDictionary<string, object?>? parameters = null)
     {
         if (string.IsNullOrWhiteSpace(sql))
         {
@@ -150,6 +163,18 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
                 $"The query joins {references.Count} objects, over the {MaxJoins}-join limit.", null);
         }
 
+        if (SystemVariable.Match(inspected) is { Success: true } systemVariable)
+        {
+            return new SqlValidationResult(
+                AssistantValidationOutcome.RejectedSyntax,
+                $"'{systemVariable.Value}' is a server configuration function, not data.", null);
+        }
+
+        if (CheckParameters(inspected, parameters) is { } parameterFault)
+        {
+            return parameterFault;
+        }
+
         var normalized = InjectRowCap(trimmed);
 
         return new SqlValidationResult(AssistantValidationOutcome.Approved, null, normalized);
@@ -169,6 +194,50 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
         return Regex.Replace(
             sql, @"^\s*SELECT\s+(DISTINCT\s+)?", $"SELECT $1TOP ({MaxRows}) ",
             RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(200));
+    }
+
+    /// <summary>
+    /// Requires the placeholders in the statement and the values supplied for them to be the same
+    /// set, and returns the rejection if they are not.
+    /// </summary>
+    /// <remarks>
+    /// Both directions matter, for different reasons. A placeholder with no value fails at the
+    /// database with a message about a missing scalar variable — recorded as an execution failure,
+    /// which reads like a platform fault rather than a model that produced an incoherent pair. A
+    /// value with no placeholder is the more interesting case: the model described one query and
+    /// wrote another, and whatever the extra value was meant to constrain is not being constrained.
+    /// </remarks>
+    private static SqlValidationResult? CheckParameters(
+        string inspected, IReadOnlyDictionary<string, object?>? parameters)
+    {
+        var used = ParameterReference.Matches(inspected)
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var supplied = (parameters ?? new Dictionary<string, object?>())
+            .Keys
+            .Select(k => k.TrimStart('@'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var unbound = used.Except(supplied, StringComparer.OrdinalIgnoreCase).ToList();
+        if (unbound.Count > 0)
+        {
+            return new SqlValidationResult(
+                AssistantValidationOutcome.RejectedSyntax,
+                $"The statement uses @{string.Join(", @", unbound.Order())} but supplied no value for it.",
+                null);
+        }
+
+        var unused = supplied.Except(used, StringComparer.OrdinalIgnoreCase).ToList();
+        if (unused.Count > 0)
+        {
+            return new SqlValidationResult(
+                AssistantValidationOutcome.RejectedSyntax,
+                $"A value was supplied for @{string.Join(", @", unused.Order())}, which the statement never uses.",
+                null);
+        }
+
+        return null;
     }
 
     /// <summary>

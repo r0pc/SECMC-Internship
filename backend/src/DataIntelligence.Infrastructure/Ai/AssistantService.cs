@@ -40,6 +40,7 @@ public sealed class AssistantService : IAssistantService
 
     private readonly DataIntelligenceDbContext _db;
     private readonly INlToSqlClient _llm;
+    private readonly ISchemaContextProvider _schemaContext;
     private readonly ISqlSafetyValidator _validator;
     private readonly ReadOnlySqlExecutor _executor;
     private readonly TimeProvider _timeProvider;
@@ -47,12 +48,14 @@ public sealed class AssistantService : IAssistantService
     public AssistantService(
         DataIntelligenceDbContext db,
         INlToSqlClient llm,
+        ISchemaContextProvider schemaContext,
         ISqlSafetyValidator validator,
         ReadOnlySqlExecutor executor,
         TimeProvider timeProvider)
     {
         _db = db;
         _llm = llm;
+        _schemaContext = schemaContext;
         _validator = validator;
         _executor = executor;
         _timeProvider = timeProvider;
@@ -79,18 +82,33 @@ public sealed class AssistantService : IAssistantService
 
         var overallStopwatch = Stopwatch.StartNew();
 
+        var schemaContext = await _schemaContext.GetContextAsync(cancellationToken);
+
         var generation = await _llm.GenerateSqlAsync(
-            request.Question, SchemaContextProvider.Context, cancellationToken);
+            request.Question, schemaContext, cancellationToken);
 
         log.ModelName = generation.ModelName;
         log.PromptTokens = generation.PromptTokens;
         log.CompletionTokens = generation.CompletionTokens;
         log.GeneratedSql = generation.Sql;
+        log.Explanation = generation.Explanation;
+
+        // Serialised even when empty, so a reviewer can tell "this query took no parameters" from
+        // "this row predates parameter capture".
+        log.SqlParametersJson = generation.Sql is null
+            ? null
+            : JsonSerializer.Serialize(generation.Parameters);
 
         if (generation.Sql is null)
         {
-            log.ValidationOutcome = AssistantValidationOutcome.RejectedNoSql;
-            log.ValidationDetail = "The model could not express this question against the published views.";
+            var chatter = generation.Refusal == NlRefusalKind.NotADataQuestion;
+
+            log.ValidationOutcome = chatter
+                ? AssistantValidationOutcome.NotADataQuestion
+                : AssistantValidationOutcome.RejectedNoSql;
+            log.ValidationDetail = chatter
+                ? "Not a question about data."
+                : "The model could not express this question against the published views.";
             log.AnswerText = CannotAnswer;
             log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
@@ -98,7 +116,7 @@ public sealed class AssistantService : IAssistantService
             return ToDto(log, null);
         }
 
-        var validation = _validator.Validate(generation.Sql);
+        var validation = _validator.Validate(generation.Sql, generation.Parameters);
         log.ValidationOutcome = validation.Outcome;
         log.ValidationDetail = validation.Detail;
 
@@ -118,7 +136,8 @@ public sealed class AssistantService : IAssistantService
         await _db.SaveChangesAsync(cancellationToken);
 
         var executionStopwatch = Stopwatch.StartNew();
-        var execution = await _executor.ExecuteAsync(validation.NormalizedSql!, cancellationToken);
+        var execution = await _executor.ExecuteAsync(
+            validation.NormalizedSql!, generation.Parameters, cancellationToken);
         log.ExecutionMs = (int)executionStopwatch.ElapsedMilliseconds;
 
         if (!execution.Succeeded)
@@ -181,6 +200,98 @@ public sealed class AssistantService : IAssistantService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<PagedResult<AssistantQueryLogDto>> GetQueryLogAsync(
+        AssistantQueryLogQuery query, CancellationToken cancellationToken)
+    {
+        var rows = _db.AssistantQueries.AsNoTracking();
+
+        if (query.FromUtc is { } from)
+        {
+            rows = rows.Where(q => q.AskedAtUtc >= from);
+        }
+
+        if (query.ToUtc is { } to)
+        {
+            rows = rows.Where(q => q.AskedAtUtc <= to);
+        }
+
+        if (query.UserId is { } userId)
+        {
+            rows = rows.Where(q => q.UserId == userId);
+        }
+
+        if (query.RejectedOnly)
+        {
+            // Matches IX_AssistantQuery_Rejected's filter exactly, so the review queue's default
+            // view is an index seek rather than a scan over every question ever asked.
+            rows = rows.Where(q =>
+                q.ValidationOutcome != AssistantValidationOutcome.Approved
+                && q.ValidationOutcome != AssistantValidationOutcome.Pending
+                && q.ValidationOutcome != AssistantValidationOutcome.NotADataQuestion);
+        }
+
+        if (query.Outcome is { } outcome)
+        {
+            rows = rows.Where(q => q.ValidationOutcome == outcome);
+        }
+
+        var totalCount = await rows.CountAsync(cancellationToken);
+
+        var page = await rows
+            .OrderByDescending(q => q.AskedAtUtc)
+            .ThenByDescending(q => q.AssistantQueryId)
+            .Skip(query.Page.Skip)
+            .Take(query.Page.PageSize)
+            .Select(q => new { Query = q, q.Feedback })
+            .ToListAsync(cancellationToken);
+
+        var items = page.Select(r => ToLogDto(r.Query, r.Feedback)).ToList();
+
+        return PagedResult<AssistantQueryLogDto>.From(items, query.Page, totalCount);
+    }
+
+    public async Task<AssistantQueryLogDto?> GetQueryAsync(
+        long assistantQueryId, CancellationToken cancellationToken)
+    {
+        var row = await _db.AssistantQueries
+            .AsNoTracking()
+            .Where(q => q.AssistantQueryId == assistantQueryId)
+            .Select(q => new { Query = q, q.Feedback })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return row is null ? null : ToLogDto(row.Query, row.Feedback);
+    }
+
+    private static AssistantQueryLogDto ToLogDto(AssistantQuery q, AssistantFeedback? feedback) => new()
+    {
+        AssistantQueryId = q.AssistantQueryId,
+        SessionId = q.SessionId,
+        UserId = q.UserId,
+        AskedAtUtc = q.AskedAtUtc,
+        QuestionText = q.QuestionText,
+
+        // Shown for rejected rows too, unlike the answer DTO: judging whether a refusal was
+        // correct means reading the statement that was refused.
+        GeneratedSql = q.GeneratedSql,
+        SqlParameters = DeserializeParameters(q.SqlParametersJson),
+        Explanation = q.Explanation,
+
+        ValidationOutcome = q.ValidationOutcome,
+        ValidationDetail = q.ValidationDetail,
+        WasExecuted = q.WasExecuted,
+        ExecutionStatus = q.ExecutionStatus,
+        ExecutionError = q.ExecutionError,
+        ResultRowCount = q.ResultRowCount,
+        ExecutionMs = q.ExecutionMs,
+        AnswerText = q.AnswerText,
+        ModelName = q.ModelName,
+        PromptTokens = q.PromptTokens,
+        CompletionTokens = q.CompletionTokens,
+        TotalLatencyMs = q.TotalLatencyMs,
+        FeedbackIsHelpful = feedback?.IsHelpful,
+        FeedbackComment = feedback?.Comment
+    };
+
     private async Task<AssistantSession> GetOrCreateSessionAsync(
         int userId, Guid? sessionId, DateTime now, CancellationToken cancellationToken)
     {
@@ -207,6 +318,28 @@ public sealed class AssistantService : IAssistantService
         return session;
     }
 
+    /// <summary>
+    /// Reads the stored parameter bag back for the response. A row written before this column
+    /// existed, or one that failed to serialise, returns null rather than throwing — the answer
+    /// is not worth losing over the parameter list beside it.
+    /// </summary>
+    private static IReadOnlyDictionary<string, object?>? DeserializeParameters(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, object?>>(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Hashed, not raw (SOW 3 — Security), matching AssistantQuery.ClientIpHash.</summary>
     private static byte[]? HashIp(string? ip) =>
         string.IsNullOrWhiteSpace(ip) ? null : SHA256.HashData(Encoding.UTF8.GetBytes(ip));
@@ -219,6 +352,10 @@ public sealed class AssistantService : IAssistantService
         QuestionText = log.QuestionText,
         ValidationOutcome = log.ValidationOutcome,
         GeneratedSql = log.ValidationOutcome == AssistantValidationOutcome.Approved ? log.GeneratedSql : null,
+        SqlParameters = log.ValidationOutcome == AssistantValidationOutcome.Approved
+            ? DeserializeParameters(log.SqlParametersJson)
+            : null,
+        Explanation = log.Explanation,
         WasExecuted = log.WasExecuted,
         ExecutionStatus = log.ExecutionStatus,
         AnswerText = log.AnswerText ?? string.Empty,

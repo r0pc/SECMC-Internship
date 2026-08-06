@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using DataIntelligence.Core.Exceptions;
+using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Ai;
 using Microsoft.Extensions.Options;
 
@@ -64,6 +65,147 @@ public class DeepSeekNlToSqlClientTests
         var result = await client.GenerateSqlAsync("Unanswerable", SchemaContext, default);
 
         Assert.Null(result.Sql);
+    }
+
+    // ------------------------------------------------- parameters and explanation
+
+    [Fact]
+    public async Task ReadsParametersAndTheExplanationAlongsideTheSql()
+    {
+        var client = ClientReturning(Completion("""
+            {"sql": "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+             "parameters": {"@month": "2025-06-01"},
+             "explanation": "Reads the monthly CPI index value for one month."}
+            """));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.Equal("2025-06-01", result.Parameters["@month"]);
+        Assert.Equal("Reads the monthly CPI index value for one month.", result.Explanation);
+    }
+
+    [Fact]
+    public async Task NormalisesParameterNamesToALeadingAt()
+    {
+        var client = ClientReturning(Completion("""
+            {"sql": "SELECT 1 FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+             "parameters": {"month": "2025-06-01"}}
+            """));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.True(result.Parameters.ContainsKey("@month"));
+    }
+
+    // Bound as the type they arrive as, so a comparison against a numeric column is not a string
+    // comparison that happens to work. Written as separate facts rather than a Theory because
+    // xUnit narrows a boxed 42L in InlineData back to int, which makes the long case untestable
+    // through that route.
+
+    [Fact]
+    public async Task BindsAWholeNumberAsAnInteger() =>
+        Assert.Equal(42L, await ScalarParameterAsync("42"));
+
+    [Fact]
+    public async Task BindsAFractionalNumberAsADouble() =>
+        Assert.Equal(4.25d, await ScalarParameterAsync("4.25"));
+
+    [Fact]
+    public async Task BindsABooleanAsABoolean() =>
+        Assert.Equal(true, await ScalarParameterAsync("true"));
+
+    [Fact]
+    public async Task BindsAStringAsAString() =>
+        Assert.Equal("text", await ScalarParameterAsync("\"text\""));
+
+    [Theory]
+    // A parameter is a single value. Serialising a structure back to text would bind something
+    // the model did not mean and a reviewer would not expect.
+    [InlineData("[1,2,3]")]
+    [InlineData("{\"nested\": 1}")]
+    [InlineData("null")]
+    public async Task RefusesToBindAnythingThatIsNotAScalar(string json)
+    {
+        Assert.Null(await ScalarParameterAsync(json));
+    }
+
+    /// <summary>Round-trips one JSON value through the client and returns what it bound.</summary>
+    private static async Task<object?> ScalarParameterAsync(string json)
+    {
+        var client = ClientReturning(Completion(
+            $$$"""{"sql": "SELECT 1 FROM analytics.vw_Cpi WHERE X = @v", "parameters": {"@v": {{{json}}} }}"""));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        return result.Parameters["@v"];
+    }
+
+    [Fact]
+    public async Task TreatsAMissingParameterBagAsNoParameters()
+    {
+        var client = ClientReturning(Completion("""{"sql": "SELECT 1 FROM analytics.vw_Cpi"}"""));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.Empty(result.Parameters);
+    }
+
+    [Fact]
+    public async Task AsksForParametersAndAnExplanationInThePrompt()
+    {
+        var handler = new CapturingHandler(Completion("""{"sql": null}"""));
+        var client = ClientOver(handler);
+
+        await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var system = doc.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
+
+        Assert.Contains("parameters", system);
+        Assert.Contains("explanation", system);
+        Assert.Contains("refusal", system);
+    }
+
+    // --------------------------------------------------------- refusal classification
+
+    [Theory]
+    [InlineData("not_a_data_question", NlRefusalKind.NotADataQuestion)]
+    [InlineData("unanswerable", NlRefusalKind.Unanswerable)]
+    public async Task ClassifiesWhyItRefused(string refusal, NlRefusalKind expected)
+    {
+        var client = ClientReturning(Completion($$"""{"sql": null, "refusal": "{{refusal}}"}"""));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.Null(result.Sql);
+        Assert.Equal(expected, result.Refusal);
+    }
+
+    [Theory]
+    // Anything unrecognised stays Unanswerable. A rejected query in the review queue that turns
+    // out to be chatter costs a reviewer a glance; chatter filed as nothing costs them the probe
+    // hiding behind it.
+    [InlineData("""{"sql": null}""")]
+    [InlineData("""{"sql": null, "refusal": "something else"}""")]
+    [InlineData("""{"sql": null, "refusal": null}""")]
+    [InlineData("not json at all")]
+    public async Task DefaultsToUnanswerableWhenTheRefusalIsNotOneItKnows(string content)
+    {
+        var client = ClientReturning(Completion(content));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.Equal(NlRefusalKind.Unanswerable, result.Refusal);
+    }
+
+    [Fact]
+    public async Task ReportsNoRefusalWhenItReturnedSql()
+    {
+        var client = ClientReturning(Completion("""{"sql": "SELECT 1 FROM analytics.vw_Cpi"}"""));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.Equal(NlRefusalKind.None, result.Refusal);
     }
 
     [Fact]

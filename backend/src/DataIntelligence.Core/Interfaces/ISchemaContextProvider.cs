@@ -1,0 +1,16 @@
+namespace DataIntelligence.Core.Interfaces;
+
+/// <summary>
+/// Builds the description of the queryable schema that is sent to the model with every question
+/// (FR-13).
+/// </summary>
+/// <remarks>
+/// Asynchronous and cached rather than a constant, because the column lists are read from the
+/// database the query will actually run against. A hand-maintained list drifts silently the first
+/// time a view gains a column, and the failure it produces — a query naming something that is not
+/// there, or missing something that is — surfaces as a bad answer rather than as an error.
+/// </remarks>
+public interface ISchemaContextProvider
+{
+    Task<string> GetContextAsync(CancellationToken cancellationToken);
+}

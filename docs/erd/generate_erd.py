@@ -26,7 +26,8 @@ COL_W = 340.0
 COL_X = [60.0, 460.0, 860.0]
 
 CANVAS_W = 1300.0
-CANVAS_H = 1500.0
+# Grown with ai.AssistantQuery, which gained SqlParametersJson and Explanation (FR-13/FR-14).
+CANVAS_H = 1580.0
 
 # The legend sits under the subtitle rather than beside the title: at this width the
 # title would run into it.
@@ -240,7 +241,9 @@ TABLES: list[Table] = [
         Column("UserId", "INT", ("FK",)),
         Column("QuestionText", "NVARCHAR(2000)"),
         Column("GeneratedSql", "NVARCHAR(MAX)"),
-        Column("ValidationOutcome", "VARCHAR(20)"),
+        Column("SqlParametersJson", "NVARCHAR(MAX)"),
+        Column("Explanation", "NVARCHAR(2000)"),
+        Column("ValidationOutcome", "VARCHAR(30)"),
         Column("WasExecuted", "BIT"),
         Column("AnswerText", "NVARCHAR(MAX)"),
         Column("AskedAtUtc", "DATETIME2(3)"),

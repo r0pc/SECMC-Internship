@@ -617,10 +617,16 @@ CREATE TABLE ai.AssistantQuery
     AskedAtUtc          DATETIME2(3)    NOT NULL CONSTRAINT DF_Query_Asked DEFAULT SYSUTCDATETIME(),
     QuestionText        NVARCHAR(2000)  NOT NULL,   -- FR-13
 
-    -- FR-14 / auditability: the statement exactly as the model produced it.
+    -- FR-14 / auditability: the statement exactly as the model produced it, with the literals
+    -- it lifted out kept separate, so what is reviewed is what was bound and executed.
     GeneratedSql        NVARCHAR(MAX)   NULL,
     SqlParametersJson   NVARCHAR(MAX)   NULL,
-    ValidationOutcome   VARCHAR(20)     NOT NULL CONSTRAINT DF_Query_Validation DEFAULT 'Pending',
+    -- FR-13: the model's own account of what it wrote. Recorded because a reviewer needs to know
+    -- what it believed it was writing, not only what it wrote -- the two disagreeing is the finding.
+    Explanation         NVARCHAR(2000)  NULL,
+    -- 30, not 20: 'RejectedForbiddenObject' is 23 characters. At 20 the CHECK below would permit
+    -- a value the column cannot hold, and the insert would fail on truncation instead.
+    ValidationOutcome   VARCHAR(30)     NOT NULL CONSTRAINT DF_Query_Validation DEFAULT 'Pending',
     ValidationDetail    NVARCHAR(1000)  NULL,
 
     -- FR-15
@@ -646,7 +652,7 @@ CREATE TABLE ai.AssistantQuery
         REFERENCES sec.AppUser (UserId),
     CONSTRAINT CK_AssistantQuery_Validation CHECK (ValidationOutcome IN
         ('Pending','Approved','RejectedNotSelect','RejectedForbiddenObject',
-         'RejectedSyntax','RejectedComplexity','RejectedNoSql')),
+         'RejectedSyntax','RejectedComplexity','RejectedNoSql','NotADataQuestion')),
     CONSTRAINT CK_AssistantQuery_Execution CHECK (ExecutionStatus IS NULL OR ExecutionStatus IN
         ('Succeeded','Failed','Timeout','Cancelled')),
     -- Nothing executes unless validation approved it (SOW 9: unsafe AI SQL).
@@ -657,10 +663,16 @@ GO
 
 CREATE INDEX IX_AssistantQuery_AskedAtUtc ON ai.AssistantQuery (AskedAtUtc DESC);
 CREATE INDEX IX_AssistantQuery_User       ON ai.AssistantQuery (UserId, AskedAtUtc DESC);
--- Review queue: everything the validator turned away.
+-- Review queue: everything the validator turned away that is worth a human's attention.
+-- NotADataQuestion is excluded deliberately. Both it and RejectedNoSql produce no SQL, but only
+-- one is interesting: "show me the password hashes" is a probe, and "hi" is not. Filed together,
+-- the volume of the second buries the first, which is exactly what this index exists to prevent.
+-- Chained <> rather than NOT IN: a filtered index predicate does not accept NOT IN.
 CREATE INDEX IX_AssistantQuery_Rejected   ON ai.AssistantQuery (AskedAtUtc DESC)
     INCLUDE (QuestionText, ValidationOutcome, ValidationDetail)
-    WHERE ValidationOutcome <> 'Approved';
+    WHERE ValidationOutcome <> 'Approved'
+      AND ValidationOutcome <> 'Pending'
+      AND ValidationOutcome <> 'NotADataQuestion';
 GO
 
 CREATE TABLE ai.AssistantFeedback
@@ -942,6 +954,34 @@ GRANT SELECT ON analytics.vw_SofrRevision       TO di_ai_readonly;
 GRANT SELECT ON analytics.vw_CollectionHealth   TO di_ai_readonly;
 DENY  SELECT ON SCHEMA::sec TO di_ai_readonly;
 DENY  SELECT ON SCHEMA::ai  TO di_ai_readonly;
+GO
+
+/*------------------------------------------------------------------------------
+  A principal the API can actually reach the role through.
+
+  di_ai_readonly is a role, and a role cannot be connected as. Where the server
+  runs mixed-mode authentication, create a login, add it to the role, and point
+  ConnectionStrings:DataIntelligenceDbReadOnly at it -- that is the stronger
+  arrangement, because the restricted rights are carried by the connection.
+
+  On a Windows-authentication-only instance there is no login to add, so the
+  API keeps its own connection and switches session context for the duration of
+  each generated statement (Assistant:ExecuteAsUser). A user WITHOUT LOGIN is
+  exactly the principal for that: it cannot be logged into, and can only be
+  reached by EXECUTE AS from a session that is already authenticated.
+
+  Either way the statement ends up running as a principal that holds SELECT on
+  analytics.* and DENY on sec and ai.
+------------------------------------------------------------------------------*/
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'di_ai_user')
+BEGIN
+    CREATE USER di_ai_user WITHOUT LOGIN;
+    ALTER ROLE di_ai_readonly ADD MEMBER di_ai_user;
+END
+GO
+
+-- The app's own login must be allowed to become it, or EXECUTE AS is refused.
+GRANT IMPERSONATE ON USER::di_ai_user TO di_app;
 GO
 
 /*==============================================================================

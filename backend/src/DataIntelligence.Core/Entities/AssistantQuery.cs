@@ -19,7 +19,19 @@ public class AssistantQuery
     public string QuestionText { get; set; } = string.Empty;
 
     public string? GeneratedSql { get; set; }
+
+    /// <summary>Values bound to the statement's placeholders, as a JSON object (FR-14).</summary>
     public string? SqlParametersJson { get; set; }
+
+    /// <summary>
+    /// The model's own account of what the statement does, in plain language (FR-13).
+    /// </summary>
+    /// <remarks>
+    /// Recorded because a reviewer reading a rejected or surprising query needs to know what the
+    /// model believed it was writing, not only what it wrote. The two disagreeing is itself the
+    /// finding.
+    /// </remarks>
+    public string? Explanation { get; set; }
     public AssistantValidationOutcome ValidationOutcome { get; set; } = AssistantValidationOutcome.Pending;
     public string? ValidationDetail { get; set; }
 

@@ -166,12 +166,27 @@ clamped rather than rejected — 500 per page for catalogue lists, 2000 for obse
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/assistant/ask` | A question in, a natural-language answer out, with the SQL that produced it and the rows it returned |
+| `POST /api/assistant/ask` | A question in, a natural-language answer out, with the SQL that produced it, its parameters, the model's explanation, and the rows it returned |
 | `POST /api/assistant/queries/{id}/feedback` | Thumbs up/down on one answer |
+| `GET /api/assistant/queries` | The audit log, newest first. `rejectedOnly`, `outcome`, `userId`, `fromUtc`, `toUtc`, paged |
+| `GET /api/assistant/queries/{id}` | One audit record in full |
 
 The round trip is question → SQL → **validate** → execute read-only → results back to the model →
 answer. It is natural-language-to-SQL, not retrieval over documents: the data is numeric time
 series, so the model writes a query rather than reading passages.
+
+The model is shown the schema it may query, and that description is **read from the database** —
+the views and their columns come from `INFORMATION_SCHEMA`, filtered to the allow-list, so it
+cannot drift from what is actually there. Only the parts metadata cannot supply are hand-written:
+that `M13` is an annual average rather than a thirteenth month, that volume is in billions, that
+the dialect is T-SQL. Every one of those lines exists because the model got something wrong
+without it.
+
+The model returns a **parameterised** statement, its parameter values, and its own explanation of
+what it wrote. The values never enter the SQL text — they are bound to `SqlCommand`, so a value
+containing SQL is data and is never parsed. All three are stored, because a reviewer reading a
+surprising query needs to know what the model believed it was writing; the statement and the
+explanation disagreeing is itself the finding.
 
 Two independent controls stand between the model and the database, and neither is sufficient alone:
 
@@ -180,10 +195,19 @@ Two independent controls stand between the model and the database, and neither i
   hidden in a comment cannot dodge the scan and a literal containing the word `delete` cannot
   trigger a false rejection. `CROSS APPLY` is checked alongside `FROM` and `JOIN` — it introduces
   a table expression the same way — and an unqualified name is rejected rather than unmatched.
-- **A separate read-only connection** — `ConnectionStrings:DataIntelligenceDbReadOnly`,
-  authenticating as a login in the `di_ai_readonly` role, which holds `SELECT` on `analytics.*`
-  and `DENY SELECT` on `sec` and `ai`. A statement that somehow passed validation still cannot
-  write, and cannot read the audit log or the identity tables.
+  Placeholders and supplied values must be the same set: a placeholder with no value would fail at
+  the database, and a value with no placeholder means the statement is not the one described.
+- **Execution as a restricted principal.** Whichever of these is configured:
+
+  | | How | When |
+  | --- | --- | --- |
+  | Dedicated connection | `ConnectionStrings:DataIntelligenceDbReadOnly`, a login in the `di_ai_readonly` role | Strongest. Needs mixed-mode authentication, since a role has no login of its own |
+  | `EXECUTE AS USER` | `Assistant:ExecuteAsUser`, a database user in that role | Works under Windows authentication, no server reconfiguration. The default |
+
+  Both end at a principal holding `SELECT` on `analytics.*` and `DENY SELECT` on `sec` and `ai`.
+  Configure neither and the assistant **refuses to execute** rather than falling back to the
+  application's own connection — a fallback there would run model-written SQL with `INSERT` and
+  `UPDATE` rights and say nothing about it.
 
 Results are capped twice: the validator injects `TOP (2000)` when the model set no limit, and the
 executor stops reading at the same ceiling — an injected `TOP` binds to one `SELECT`, so a `UNION`
@@ -193,6 +217,12 @@ Every question is written to `ai.AssistantQuery` **before** its SQL is generated
 each step, so a rejected query is on the record with the reason it was refused (NFR Auditability).
 `CK_AssistantQuery_NoUnvalidatedRun` is the database's own backstop: a row cannot claim it executed
 unless validation approved it.
+
+`GET /api/assistant/queries?rejectedOnly=true` is the review queue, and it deliberately excludes
+`NotADataQuestion`. A greeting and an attempt to read the password hashes both produce no SQL, but
+only one of them is a finding — filed together, the volume of the first buries the second, which is
+exactly what the queue exists to prevent. `IX_AssistantQuery_Rejected` carries the same predicate,
+so the default view is an index seek rather than a scan of every question ever asked.
 
 The assistant needs `Assistant:ApiKey`. Without it the API still starts and the dashboards still
 work — `/api/assistant/ask` answers `503` naming the missing setting. A missing LLM key is not a
@@ -224,7 +254,8 @@ Use environment variables in deployed environments.
 | `Collection:Bls:ApiKey` | Api, Worker | BLS registration key. **Never committed** — user secrets or environment only. Optional: unregistered v2 calls still work under a much smaller daily quota, so an absent key degrades rather than stops collection. |
 | `Collection:IntervalMinutes` | Worker | 60 (hourly, FR-1). Cycles align to the wall clock unless `AlignToClock` is false. |
 | `Collection:Bls:YearsOfHistory` | Worker | 2 — current and previous calendar year per request. |
-| `ConnectionStrings:DataIntelligenceDbReadOnly` | Api | The connection the assistant executes generated SQL on. Must authenticate as a login in the `di_ai_readonly` role. **Never the app's read-write login** — that would remove the second of the two controls. |
+| `ConnectionStrings:DataIntelligenceDbReadOnly` | Api | Optional. A login in the `di_ai_readonly` role. Leave empty on a Windows-authentication-only instance, where that role has no login to authenticate as. **Never the app's read-write login** — that removes the second of the two controls without changing anything visible. |
+| `Assistant:ExecuteAsUser` | Api | Database user switched to before generated SQL runs, used when the above is empty. Defaults to `di_ai_user`, created by section 6 of `docs/database-schema.sql`. Set both to empty and the assistant refuses to execute at all. |
 | `Assistant:ApiKey` | Api | DeepSeek platform key. **Never committed.** Absent or rejected, the assistant returns 503 naming the problem and the rest of the API is unaffected. |
 | `Assistant:BaseUrl` · `Assistant:Model` | Api | `https://api.deepseek.com/` and `deepseek-v4-flash`. Any gateway speaking OpenAI's `/chat/completions` shape is a settings change; one that does not means a new `INlToSqlClient`. Model ids are **not** portable between gateways — DeepSeek's own API uses the bare `deepseek-v4-flash`, while a reseller such as OpenRouter spells the same model `deepseek/deepseek-v4-flash`. `GET https://api.deepseek.com/models` lists what a key can reach. |
 | `Assistant:RequestTimeoutSeconds` · `SqlExecutionTimeoutSeconds` · `MaxOutputTokens` | Api | 30 / 10 / 1024. The response-time budget FR-15 asks for. |
@@ -375,16 +406,10 @@ API path.
 ## Not yet implemented
 
 Authentication (FR-9) is the remaining backend work for Phase 4. The AI assistant
-(FR-13 – FR-16) is in place but depends on it in two ways: every question is attributed to a
-hard-coded user id, and the audit log's foreign key to `sec.AppUser` cannot be created until that
-table exists.
+(FR-13 – FR-16) is complete but depends on it in three ways:
 
-Two pieces of the AI scope are also still open:
-
-- **Parameterised SQL.** Issue #6 asks the model for a parameterised statement plus its own
-  explanation of what it wrote. The current client returns a literal statement and no explanation;
-  `ai.AssistantQuery.SqlParametersJson` is created but never populated. The safety validator does
-  not depend on parameterisation — it allows only `SELECT` over nine views — so this is a fidelity
-  gap against the issue rather than an open security hole.
-- **The admin review endpoint** for the audit log (issue #9). The rows are written and indexed
-  (`IX_AssistantQuery_Rejected` covers the rejected-query review queue); nothing serves them yet.
+- Every question is attributed to a hard-coded user id.
+- The audit log's foreign key to `sec.AppUser` cannot be created until that table exists.
+- `GET /api/assistant/queries` is anonymous like the rest of the API, and should not stay that
+  way: it exposes the questions users asked and the SQL those produced. Restricting it to an
+  administrator is the first thing to do once roles exist.

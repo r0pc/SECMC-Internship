@@ -21,11 +21,54 @@ public interface INlToSqlClient
         string question, string generatedSql, string resultsJson, CancellationToken cancellationToken);
 }
 
+/// <param name="Sql">
+/// The statement, with literals lifted out into <paramref name="Parameters"/>. Null when the model
+/// reported it cannot answer from the schema it was given.
+/// </param>
+/// <param name="Parameters">
+/// Values for the placeholders in <paramref name="Sql"/>, keyed by name. Empty when the query needs
+/// none. Kept separate from the statement all the way to <c>SqlCommand</c>, so a value that happens
+/// to contain SQL is bound as data and never parsed (FR-14).
+/// </param>
+/// <param name="Explanation">
+/// The model's own account of what it wrote, in plain language. Stored beside the SQL so the audit
+/// trail records the intent as well as the statement (NFR Auditability).
+/// </param>
+/// <param name="Refusal">
+/// Why there is no SQL. <see cref="NlRefusalKind.None"/> whenever <paramref name="Sql"/> is present.
+/// </param>
 public sealed record NlToSqlResult(
     string? Sql,
+    IReadOnlyDictionary<string, object?> Parameters,
+    string? Explanation,
     string ModelName,
     int? PromptTokens,
     int? CompletionTokens,
-    int LatencyMs);
+    int LatencyMs,
+    NlRefusalKind Refusal = NlRefusalKind.None)
+{
+    /// <summary>The model declined to answer — a legitimate outcome, not a failed call.</summary>
+    public static NlToSqlResult NoSql(
+        NlRefusalKind refusal, string modelName, int? promptTokens, int? completionTokens, int latencyMs) =>
+        new(null, new Dictionary<string, object?>(), null,
+            modelName, promptTokens, completionTokens, latencyMs, refusal);
+}
+
+/// <summary>Why a question produced no statement.</summary>
+/// <remarks>
+/// The distinction exists for the audit trail rather than for the caller, who gets much the same
+/// message either way: a probe at data it may not have is worth a reviewer's time, and a greeting
+/// is not. See <c>AssistantValidationOutcome.NotADataQuestion</c>.
+/// </remarks>
+public enum NlRefusalKind
+{
+    None,
+
+    /// <summary>Not a question about data at all — a greeting, thanks, or chatter.</summary>
+    NotADataQuestion,
+
+    /// <summary>A data question the published views cannot answer.</summary>
+    Unanswerable
+}
 
 public sealed record NlSummaryResult(string AnswerText, int? CompletionTokens, int LatencyMs);

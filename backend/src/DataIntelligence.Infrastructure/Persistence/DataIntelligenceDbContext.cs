@@ -479,7 +479,8 @@ public class DataIntelligenceDbContext : DbContext
         {
             t.HasCheckConstraint("CK_AssistantQuery_Validation",
                 "[ValidationOutcome] IN ('Pending','Approved','RejectedNotSelect',"
-                + "'RejectedForbiddenObject','RejectedSyntax','RejectedComplexity','RejectedNoSql')");
+                + "'RejectedForbiddenObject','RejectedSyntax','RejectedComplexity','RejectedNoSql',"
+                + "'NotADataQuestion')");
             t.HasCheckConstraint("CK_AssistantQuery_Execution",
                 "[ExecutionStatus] IS NULL OR [ExecutionStatus] IN "
                 + "('Succeeded','Failed','Timeout','Cancelled')");
@@ -494,6 +495,7 @@ public class DataIntelligenceDbContext : DbContext
         entity.Property(e => e.AskedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
         entity.Property(e => e.QuestionText).HasMaxLength(2000).IsRequired();
         entity.Property(e => e.ValidationDetail).HasMaxLength(1000);
+        entity.Property(e => e.Explanation).HasMaxLength(2000);
         entity.Property(e => e.ExecutionError).HasMaxLength(1000);
         entity.Property(e => e.ModelName).HasMaxLength(100);
         entity.Property(e => e.ClientIpHash).HasColumnType("binary(32)");
@@ -501,8 +503,12 @@ public class DataIntelligenceDbContext : DbContext
 
         // Stored as strings so the CHECK constraints above stay readable, matching how the
         // collection enums are persisted.
+        // 30, not 20. 'RejectedForbiddenObject' is 23 characters, so at 20 the CHECK constraint
+        // permitted a value the column could not physically hold: the first time the model wrote a
+        // query against sec.* the audit insert would fail on truncation and take the request with
+        // it — the one rejection the log most needs to record.
         entity.Property(e => e.ValidationOutcome)
-            .HasConversion<string>().HasMaxLength(20).IsUnicode(false)
+            .HasConversion<string>().HasMaxLength(30).IsUnicode(false)
             .HasDefaultValue(AssistantValidationOutcome.Pending);
         entity.Property(e => e.ExecutionStatus)
             .HasConversion<string>().HasMaxLength(20).IsUnicode(false);
@@ -522,11 +528,18 @@ public class DataIntelligenceDbContext : DbContext
         entity.HasIndex(e => new { e.UserId, e.AskedAtUtc }, "IX_AssistantQuery_User")
             .IsDescending(false, true);
 
-        // The review queue (NFR Auditability): everything the validator turned away.
+        // The review queue (NFR Auditability): everything the validator turned away that is worth
+        // a human's attention. NotADataQuestion is excluded deliberately — greetings would
+        // otherwise dominate the queue by volume and bury the probes it exists to surface.
+        //
+        // Spelled as chained <> rather than NOT IN because a filtered index predicate does not
+        // accept NOT IN — SQL Server rejects it at CREATE INDEX with a syntax error.
         entity.HasIndex(e => e.AskedAtUtc, "IX_AssistantQuery_Rejected")
             .IsDescending(true)
             .IncludeProperties(e => new { e.QuestionText, e.ValidationOutcome, e.ValidationDetail })
-            .HasFilter("[ValidationOutcome] <> 'Approved'");
+            .HasFilter(
+                "[ValidationOutcome] <> 'Approved' AND [ValidationOutcome] <> 'Pending' "
+                + "AND [ValidationOutcome] <> 'NotADataQuestion'");
     }
 
     private static void ConfigureAssistantFeedback(EntityTypeBuilder<AssistantFeedback> entity)

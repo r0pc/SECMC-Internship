@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="1500" viewBox="0 0 1300 1500" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="1580" viewBox="0 0 1300 1580" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
 <defs><filter id="card" x="-4%" y="-4%" width="108%" height="112%"><feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-color="#0F172A" flood-opacity="0.10"/></filter></defs>
 <rect width="100%" height="100%" fill="#FFFFFF"/>
 <text x="60" y="62" font-size="26" font-weight="700" fill="#0F172A">Data Intelligence Platform - Entity Relationship Diagram</text>
@@ -39,14 +39,14 @@
 <line x1="853.0" y1="1015.5" x2="853.0" y2="1004.5" stroke="#94A3B8" stroke-width="2"/>
 <circle cx="800.0" cy="1010.0" r="3.6" fill="#94A3B8"/>
 <text x="830.0" y="1003.0" font-size="10.5" fill="#475569" text-anchor="middle">1 : N</text>
-<polyline points="460.0,1300.3 400.0,1256.2" fill="none" stroke="#94A3B8" stroke-width="1.6" stroke-linejoin="round"/>
-<line x1="408.9" y1="1256.0" x2="402.4" y2="1264.8" stroke="#94A3B8" stroke-width="2"/>
-<circle cx="460.0" cy="1300.3" r="3.6" fill="#94A3B8"/>
-<text x="430.0" y="1271.3" font-size="10.5" fill="#475569" text-anchor="middle">N : 1</text>
-<polyline points="860.0,1260.0 800.0,1310.4" fill="none" stroke="#94A3B8" stroke-width="1.6" stroke-linejoin="round"/>
-<line x1="801.8" y1="1301.7" x2="808.9" y2="1310.1" stroke="#94A3B8" stroke-width="2"/>
+<polyline points="460.0,1315.0 400.0,1256.2" fill="none" stroke="#94A3B8" stroke-width="1.6" stroke-linejoin="round"/>
+<line x1="408.8" y1="1257.2" x2="401.1" y2="1265.1" stroke="#94A3B8" stroke-width="2"/>
+<circle cx="460.0" cy="1315.0" r="3.6" fill="#94A3B8"/>
+<text x="430.0" y="1278.7" font-size="10.5" fill="#475569" text-anchor="middle">N : 1</text>
+<polyline points="860.0,1260.0 800.0,1327.2" fill="none" stroke="#94A3B8" stroke-width="1.6" stroke-linejoin="round"/>
+<line x1="800.6" y1="1318.3" x2="808.8" y2="1325.6" stroke="#94A3B8" stroke-width="2"/>
 <circle cx="860.0" cy="1260.0" r="3.6" fill="#94A3B8"/>
-<text x="830.0" y="1278.2" font-size="10.5" fill="#475569" text-anchor="middle">1 : 1</text>
+<text x="830.0" y="1286.6" font-size="10.5" fill="#475569" text-anchor="middle">1 : 1</text>
 <polyline points="128.0,1097.0 128.0,1190.0" fill="none" stroke="#94A3B8" stroke-width="1.6" stroke-linejoin="round"/>
 <line x1="133.5" y1="1104.0" x2="122.5" y2="1104.0" stroke="#94A3B8" stroke-width="2"/>
 <circle cx="128.0" cy="1190.0" r="3.6" fill="#94A3B8"/>
@@ -326,7 +326,7 @@
 <text x="386.0" y="1265.5" font-size="10" fill="#64748B" text-anchor="end">INT</text>
 <text x="74.0" y="1286.5" font-size="11.5" fill="#0F172A">StartedAtUtc</text>
 <text x="386.0" y="1286.5" font-size="10" fill="#64748B" text-anchor="end">DATETIME2(3)</text>
-<g filter="url(#card)"><rect x="460.0" y="1190.0" width="340.0" height="241.0" rx="10" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1"/></g>
+<g filter="url(#card)"><rect x="460.0" y="1190.0" width="340.0" height="283.0" rx="10" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1"/></g>
 <path d="M460.0,1200.0 a10,10 0 0 1 10,-10 h320.0 a10,10 0 0 1 10,10 v30.0 h-340.0 z" fill="#7C3AED"/>
 <text x="474.0" y="1215.0" font-size="14.5" font-weight="700" fill="#FFFFFF">AssistantQuery</text>
 <text x="786.0" y="1215.0" font-size="10.5" fill="#FFFFFF" fill-opacity="0.8" text-anchor="end">ai</text>
@@ -346,16 +346,21 @@
 <text x="474.0" y="1328.5" font-size="11.5" fill="#0F172A">GeneratedSql</text>
 <text x="786.0" y="1328.5" font-size="10" fill="#64748B" text-anchor="end">NVARCHAR(MAX)</text>
 <rect x="461.0" y="1335.0" width="338.0" height="21.0" fill="#F5F3FF"/>
-<text x="474.0" y="1349.5" font-size="11.5" fill="#0F172A">ValidationOutcome</text>
-<text x="786.0" y="1349.5" font-size="10" fill="#64748B" text-anchor="end">VARCHAR(20)</text>
-<text x="474.0" y="1370.5" font-size="11.5" fill="#0F172A">WasExecuted</text>
-<text x="786.0" y="1370.5" font-size="10" fill="#64748B" text-anchor="end">BIT</text>
+<text x="474.0" y="1349.5" font-size="11.5" fill="#0F172A">SqlParametersJson</text>
+<text x="786.0" y="1349.5" font-size="10" fill="#64748B" text-anchor="end">NVARCHAR(MAX)</text>
+<text x="474.0" y="1370.5" font-size="11.5" fill="#0F172A">Explanation</text>
+<text x="786.0" y="1370.5" font-size="10" fill="#64748B" text-anchor="end">NVARCHAR(2000)</text>
 <rect x="461.0" y="1377.0" width="338.0" height="21.0" fill="#F5F3FF"/>
-<text x="474.0" y="1391.5" font-size="11.5" fill="#0F172A">AnswerText</text>
-<text x="786.0" y="1391.5" font-size="10" fill="#64748B" text-anchor="end">NVARCHAR(MAX)</text>
-<text x="474.0" y="1412.5" font-size="11.5" fill="#0F172A">AskedAtUtc</text>
-<text x="786.0" y="1412.5" font-size="10" fill="#64748B" text-anchor="end">DATETIME2(3)</text>
-<text x="474.0" y="1428.0" font-size="9.5" font-style="italic" fill="#64748B">every generated statement logged (auditability)</text>
+<text x="474.0" y="1391.5" font-size="11.5" fill="#0F172A">ValidationOutcome</text>
+<text x="786.0" y="1391.5" font-size="10" fill="#64748B" text-anchor="end">VARCHAR(30)</text>
+<text x="474.0" y="1412.5" font-size="11.5" fill="#0F172A">WasExecuted</text>
+<text x="786.0" y="1412.5" font-size="10" fill="#64748B" text-anchor="end">BIT</text>
+<rect x="461.0" y="1419.0" width="338.0" height="21.0" fill="#F5F3FF"/>
+<text x="474.0" y="1433.5" font-size="11.5" fill="#0F172A">AnswerText</text>
+<text x="786.0" y="1433.5" font-size="10" fill="#64748B" text-anchor="end">NVARCHAR(MAX)</text>
+<text x="474.0" y="1454.5" font-size="11.5" fill="#0F172A">AskedAtUtc</text>
+<text x="786.0" y="1454.5" font-size="10" fill="#64748B" text-anchor="end">DATETIME2(3)</text>
+<text x="474.0" y="1470.0" font-size="9.5" font-style="italic" fill="#64748B">every generated statement logged (auditability)</text>
 <g filter="url(#card)"><rect x="860.0" y="1190.0" width="340.0" height="115.0" rx="10" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1"/></g>
 <path d="M860.0,1200.0 a10,10 0 0 1 10,-10 h320.0 a10,10 0 0 1 10,10 v30.0 h-340.0 z" fill="#7C3AED"/>
 <text x="874.0" y="1215.0" font-size="14.5" font-weight="700" fill="#FFFFFF">AssistantFeedback</text>
@@ -369,5 +374,5 @@
 <text x="1186.0" y="1265.5" font-size="10" fill="#64748B" text-anchor="end">BIT</text>
 <text x="874.0" y="1286.5" font-size="11.5" fill="#0F172A">Comment</text>
 <text x="1186.0" y="1286.5" font-size="10" fill="#64748B" text-anchor="end">NVARCHAR(1000)</text>
-<text x="60" y="1466.0" font-size="11" fill="#64748B">Generated from docs/erd/generate_erd.py - regenerate after any schema change.  Mirrors docs/database-schema.sql.  SofrDailyRate's four percentile and three average columns are shown collapsed.  analytics.* is views over core.*, not shown.</text>
+<text x="60" y="1546.0" font-size="11" fill="#64748B">Generated from docs/erd/generate_erd.py - regenerate after any schema change.  Mirrors docs/database-schema.sql.  SofrDailyRate's four percentile and three average columns are shown collapsed.  analytics.* is views over core.*, not shown.</text>
 </svg>

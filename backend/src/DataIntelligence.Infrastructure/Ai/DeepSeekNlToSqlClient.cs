@@ -40,8 +40,25 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
         string question, string schemaContext, CancellationToken cancellationToken)
     {
         var system = schemaContext
-            + "\n\nRespond with JSON only, no prose, in this exact shape: "
-            + "{\"sql\": \"<statement or null>\"}";
+            + """
+
+
+            Respond with JSON only, no prose, in this exact shape:
+            {"sql": "<statement or null>", "parameters": {"@name": <value>}, "explanation": "<one or two sentences>", "refusal": null}
+
+            When "sql" is null, set "refusal" to "not_a_data_question" if the input was a greeting,
+            thanks, or anything not asking about data, and to "unanswerable" if it was a genuine
+            data question these views cannot answer. Leave "refusal" null whenever you return SQL.
+
+            Put every literal the question supplies into "parameters" and reference it from the
+            statement by name — write `WHERE ReferenceDate = @month`, not `WHERE ReferenceDate =
+            '2025-06-01'`. Column and table names are part of the statement and are never
+            parameters. Use an empty object when the query needs none.
+
+            "explanation" says in plain language what the statement does and which view it reads.
+            It is shown to the person who asked and stored for review, so describe the query rather
+            than restating the question.
+            """;
 
         var stopwatch = Stopwatch.StartNew();
 
@@ -49,22 +66,60 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
         var json = ExtractJson(response.Text);
 
         string? sql = null;
+        string? explanation = null;
+        var refusal = NlRefusalKind.Unanswerable;
+        var parameters = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
         try
         {
             using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("sql", out var sqlElement)
-                && sqlElement.ValueKind == JsonValueKind.String)
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("sql", out var sqlElement) && sqlElement.ValueKind == JsonValueKind.String)
             {
                 sql = sqlElement.GetString();
+            }
+
+            if (root.TryGetProperty("refusal", out var why2) && why2.ValueKind == JsonValueKind.String)
+            {
+                // Anything unrecognised stays Unanswerable: a rejected query in the review queue
+                // that turns out to be chatter costs a reviewer a glance, where chatter filed as
+                // nothing at all costs them the probe hiding behind it.
+                refusal = why2.GetString() switch
+                {
+                    "not_a_data_question" => NlRefusalKind.NotADataQuestion,
+                    _ => NlRefusalKind.Unanswerable
+                };
+            }
+
+            if (root.TryGetProperty("explanation", out var why) && why.ValueKind == JsonValueKind.String)
+            {
+                explanation = why.GetString();
+            }
+
+            if (root.TryGetProperty("parameters", out var bag) && bag.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in bag.EnumerateObject())
+                {
+                    var name = property.Name.StartsWith('@') ? property.Name : "@" + property.Name;
+                    parameters[name] = ReadScalar(property.Value);
+                }
             }
         }
         catch (JsonException)
         {
-            sql = null; // Malformed model output becomes RejectedNoSql downstream, not a crash.
+            sql = null; // Malformed model output becomes a refusal downstream, not a crash.
+        }
+
+        if (string.IsNullOrWhiteSpace(sql) || sql == "null")
+        {
+            return NlToSqlResult.NoSql(
+                refusal, _options.Model, response.PromptTokens, response.CompletionTokens,
+                (int)stopwatch.ElapsedMilliseconds);
         }
 
         return new NlToSqlResult(
-            string.IsNullOrWhiteSpace(sql) || sql == "null" ? null : sql,
+            sql, parameters, explanation,
             _options.Model, response.PromptTokens, response.CompletionTokens,
             (int)stopwatch.ElapsedMilliseconds);
     }
@@ -141,6 +196,26 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
 
         return (text, parsed.Usage?.PromptTokens, parsed.Usage?.CompletionTokens);
     }
+
+    /// <summary>
+    /// Converts one JSON value into something <c>SqlCommand</c> can bind.
+    /// </summary>
+    /// <remarks>
+    /// Arrays and nested objects are refused — mapped to null — rather than serialised back to
+    /// text. A parameter is a single value by definition, and quietly turning a structure into a
+    /// string would bind something the model did not mean and the reviewer would not expect.
+    /// </remarks>
+    private static object? ReadScalar(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.String => value.GetString(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        // Boxed to object on both arms deliberately. Left as `whole : value.GetDouble()` the
+        // ternary takes double as its common type, and every whole number binds as a float —
+        // which SQL Server then has to convert on every row of a comparison against an int column.
+        JsonValueKind.Number => value.TryGetInt64(out var whole) ? (object)whole : value.GetDouble(),
+        _ => null
+    };
 
     /// <summary>
     /// Even in JSON mode the model occasionally wraps the object in a fenced code block; this

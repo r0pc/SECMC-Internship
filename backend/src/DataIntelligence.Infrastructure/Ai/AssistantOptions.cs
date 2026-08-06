@@ -34,6 +34,19 @@ public sealed class AssistantOptions
     [Range(1, 60)]
     public int SqlExecutionTimeoutSeconds { get; set; } = 10;
 
+    /// <summary>
+    /// Database user to <c>EXECUTE AS</c> before running generated SQL, when no dedicated
+    /// read-only connection string is configured. Must belong to the <c>di_ai_readonly</c> role.
+    /// </summary>
+    /// <remarks>
+    /// This exists because a Windows-authentication-only instance has no login to put in that
+    /// role, so <c>ConnectionStrings:DataIntelligenceDbReadOnly</c> cannot be pointed anywhere
+    /// meaningful. Impersonation reaches the same restricted principal over the app's own
+    /// connection. Set neither and the assistant refuses to execute rather than falling back to
+    /// the application's read-write rights.
+    /// </remarks>
+    public string? ExecuteAsUser { get; set; } = "di_ai_user";
+
     [Range(1, 4000)]
     public int MaxOutputTokens { get; set; } = 1024;
 }

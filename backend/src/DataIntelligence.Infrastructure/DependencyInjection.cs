@@ -139,6 +139,10 @@ public static class DependencyInjection
         });
 
         services.AddSingleton<ISqlSafetyValidator, SqlSafetyValidator>();
+
+        // Singleton so the schema is read once rather than per question — it cannot change under
+        // a running process.
+        services.AddSingleton<ISchemaContextProvider, SchemaContextProvider>();
         services.AddScoped<ReadOnlySqlExecutor>();
         services.AddScoped<IAssistantService, AssistantService>();
 

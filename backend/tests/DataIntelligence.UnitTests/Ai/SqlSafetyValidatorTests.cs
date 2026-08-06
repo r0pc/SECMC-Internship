@@ -210,6 +210,75 @@ public class SqlSafetyValidatorTests
         Assert.DoesNotContain("--", result.NormalizedSql);
     }
 
+    // -------------------------------------------------------------- parameters
+
+    [Fact]
+    public void ApprovesAParameterisedQueryWhoseValuesAreAllSupplied()
+    {
+        var result = Validator.Validate(
+            "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+            new Dictionary<string, object?> { ["@month"] = "2025-06-01" });
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+    }
+
+    [Fact]
+    public void AcceptsParameterNamesWithOrWithoutTheLeadingAt()
+    {
+        // The model is asked for "@name" and does not always comply; both spellings name the
+        // same parameter, and rejecting one of them would be rejecting a correct query.
+        var result = Validator.Validate(
+            "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+            new Dictionary<string, object?> { ["month"] = "2025-06-01" });
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+    }
+
+    [Fact]
+    public void RejectsAPlaceholderWithNoValue()
+    {
+        // Left to the database this is "must declare the scalar variable @month" — recorded as an
+        // execution failure, which reads as a platform fault rather than an incoherent pair.
+        var result = Validator.Validate(
+            "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+            new Dictionary<string, object?>());
+
+        Assert.Equal(AssistantValidationOutcome.RejectedSyntax, result.Outcome);
+        Assert.Contains("@month", result.Detail);
+    }
+
+    [Fact]
+    public void RejectsAValueTheStatementNeverUses()
+    {
+        // The model described one query and wrote another: whatever @year was meant to constrain
+        // is not being constrained.
+        var result = Validator.Validate(
+            "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+            new Dictionary<string, object?> { ["@month"] = "2025-06-01", ["@year"] = 2025 });
+
+        Assert.Equal(AssistantValidationOutcome.RejectedSyntax, result.Outcome);
+        Assert.Contains("@year", result.Detail);
+    }
+
+    [Fact]
+    public void DoesNotMistakeAParameterInsideALiteralForAPlaceholder()
+    {
+        var result = Validator.Validate(
+            "SELECT SeriesTitle FROM analytics.vw_Cpi WHERE SeriesTitle = 'costs @month'");
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+    }
+
+    [Theory]
+    // Configuration functions, not data — and not parameters either, which is why the placeholder
+    // pattern has to exclude them rather than read '@@VERSION' as a parameter named VERSION.
+    [InlineData("SELECT @@VERSION FROM analytics.vw_Cpi")]
+    [InlineData("SELECT IndexValue, @@SERVERNAME FROM analytics.vw_Cpi")]
+    public void RejectsServerConfigurationFunctions(string sql)
+    {
+        Assert.Equal(AssistantValidationOutcome.RejectedSyntax, Validator.Validate(sql).Outcome);
+    }
+
     // ------------------------------------------------------------- degenerate
 
     [Theory]
