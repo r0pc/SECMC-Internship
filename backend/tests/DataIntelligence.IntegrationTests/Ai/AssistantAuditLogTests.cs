@@ -249,15 +249,18 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
             new UnusedSchemaContext(),
             new SqlSafetyValidator(),
             new ReadOnlySqlExecutor(configuration, options),
-            TimeProvider.System);
+            TimeProvider.System,
+            options);
     }
 
     private sealed class UnusedNlClient : INlToSqlClient
     {
-        public Task<NlToSqlResult> GenerateSqlAsync(string q, string s, CancellationToken c) =>
+        public Task<NlToSqlResult> GenerateSqlAsync(
+            string q, string s, IReadOnlyList<ConversationTurn> h, CancellationToken c) =>
             throw new InvalidOperationException("Reading the audit log must not call the model.");
 
-        public Task<NlSummaryResult> SummariseResultsAsync(string q, string s, string r, CancellationToken c) =>
+        public Task<NlSummaryResult> SummariseResultsAsync(
+            string q, string s, IReadOnlyDictionary<string, object?> p, string r, CancellationToken c) =>
             throw new InvalidOperationException("Reading the audit log must not call the model.");
     }
 

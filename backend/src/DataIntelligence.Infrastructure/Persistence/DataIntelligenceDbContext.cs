@@ -528,6 +528,21 @@ public class DataIntelligenceDbContext : DbContext
         entity.HasIndex(e => new { e.UserId, e.AskedAtUtc }, "IX_AssistantQuery_User")
             .IsDescending(false, true);
 
+        // Conversation memory: the last few turns of one session, newest first.
+        //
+        // This replaces the index EF creates by convention for the SessionId foreign key. That one
+        // covers the column but not the order, so finding the most recent turns still meant sorting
+        // every row of the session; the composite makes it a backwards seek that stops after N rows
+        // however long the conversation has run, and covers the FK exactly as well by leading on
+        // the same column. Note that docs/database-schema.sql has to declare it explicitly — raw
+        // SQL Server, unlike EF, indexes no foreign key on its own.
+        //
+        // GeneratedSql is deliberately not included: it is nvarchar(max) and would drag the leaf
+        // pages up to the size of the statements themselves, so the lookup keys off the index and
+        // pays for the handful of rows it actually keeps.
+        entity.HasIndex(e => new { e.SessionId, e.AskedAtUtc }, "IX_AssistantQuery_Session")
+            .IsDescending(false, true);
+
         // The review queue (NFR Auditability): everything the validator turned away that is worth
         // a human's attention. NotADataQuestion is excluded deliberately — greetings would
         // otherwise dominate the queue by volume and bury the probes it exists to surface.

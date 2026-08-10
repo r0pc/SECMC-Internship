@@ -345,6 +345,24 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         - Group a date column by month with DATEFROMPARTS(YEAR(c), MONTH(c), 1), not by a string.
         - String concatenation is + or CONCAT(), not ||.
 
+        Earlier turns of this conversation, if any, appear above as user/assistant pairs, each
+        assistant turn being the JSON you produced for it. A follow-up is often unreadable on its
+        own — "and the year before that?", "what about SOFR?", "same thing for 2023" — and is
+        resolved against those turns. Read the referent out of the previous statement and its
+        parameters: after a query with @year = 2022, "the year before that" is 2021.
+
+        Two things follow from that, and they pull in opposite directions:
+        - Always write a fresh statement. The conversation is there to tell you what was meant, not
+          what the answer was. You are never shown the figures those earlier queries returned, and
+          you must not carry a number forward from one — every answer comes from a query run now.
+        - Only carry the reference forward, not the whole question. If a follow-up names its own
+          subject and period completely, treat it as a new question and ignore what came before.
+        - When a question refers to something the conversation does not contain — "the year before
+          that one" asked with no earlier turn to resolve it against — you cannot answer it. Return
+          "sql": null with "refusal": "unanswerable". Do not guess a period, and do not reply with a
+          question of your own: the shape above is the only reply that can be read, so a request for
+          clarification is received as a malfunction rather than as the reasonable question it is.
+
         Rules:
         - Write exactly one SELECT statement. No comments, no semicolons, no other statement type.
         - Never reference any table or view not listed above.

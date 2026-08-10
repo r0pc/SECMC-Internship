@@ -13,12 +13,30 @@ public interface INlToSqlClient
     /// model reports the question cannot be answered from the schema it was given — that is a
     /// legitimate outcome, not a failure of the call.
     /// </summary>
+    /// <param name="history">
+    /// Earlier turns of the same conversation, oldest first, so a question that only makes sense
+    /// after the one before it — "and the year before that?" — can be resolved. Empty for the
+    /// first question of a session.
+    /// </param>
     Task<NlToSqlResult> GenerateSqlAsync(
-        string question, string schemaContext, CancellationToken cancellationToken);
+        string question,
+        string schemaContext,
+        IReadOnlyList<ConversationTurn> history,
+        CancellationToken cancellationToken);
 
     /// <summary>Summarises a result set in plain language, in answer to the original question.</summary>
+    /// <param name="parameters">
+    /// The values bound to <paramref name="generatedSql"/>. Needed because the question may not say
+    /// what it is about: a follow-up asking for "the year before that" was resolved during
+    /// generation, and the bound <c>@year</c> is the only place the answer's actual subject is
+    /// written down.
+    /// </param>
     Task<NlSummaryResult> SummariseResultsAsync(
-        string question, string generatedSql, string resultsJson, CancellationToken cancellationToken);
+        string question,
+        string generatedSql,
+        IReadOnlyDictionary<string, object?> parameters,
+        string resultsJson,
+        CancellationToken cancellationToken);
 }
 
 /// <param name="Sql">
@@ -86,3 +104,25 @@ public enum NlRefusalKind
 }
 
 public sealed record NlSummaryResult(string AnswerText, int? CompletionTokens, int LatencyMs);
+
+/// <summary>One earlier exchange in the same session: what was asked, and the query it became.</summary>
+/// <remarks>
+/// Deliberately carries the question and the statement, and <b>not</b> the answer the user was
+/// shown. Replaying figures back into the prompt is the one way this design could start answering
+/// from memory: a model that can see "CPI in 2022 was 292.655" written above has everything it
+/// needs to satisfy a follow-up without querying anything, and a recalled number is
+/// indistinguishable in the UI from a collected one. The prior SQL resolves every reference a
+/// follow-up actually needs — "that year" is right there in the parameters — while leaving the
+/// figures where they belong, in the database.
+/// <para>
+/// Only turns that produced a statement are worth replaying. A refused turn contributes nothing to
+/// resolve against and would teach the model, by example, that refusing is a normal reply.
+/// </para>
+/// </remarks>
+/// <param name="Question">The user's question, verbatim.</param>
+/// <param name="Sql">The statement it became.</param>
+/// <param name="Parameters">The values bound to that statement.</param>
+public sealed record ConversationTurn(
+    string Question,
+    string Sql,
+    IReadOnlyDictionary<string, object?> Parameters);

@@ -9,6 +9,7 @@ using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace DataIntelligence.Infrastructure.Ai;
 
@@ -59,6 +60,7 @@ public sealed class AssistantService : IAssistantService
     private readonly ISqlSafetyValidator _validator;
     private readonly ReadOnlySqlExecutor _executor;
     private readonly TimeProvider _timeProvider;
+    private readonly int _historyTurns;
 
     public AssistantService(
         DataIntelligenceDbContext db,
@@ -66,7 +68,8 @@ public sealed class AssistantService : IAssistantService
         ISchemaContextProvider schemaContext,
         ISqlSafetyValidator validator,
         ReadOnlySqlExecutor executor,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        IOptions<AssistantOptions> options)
     {
         _db = db;
         _llm = llm;
@@ -74,6 +77,7 @@ public sealed class AssistantService : IAssistantService
         _validator = validator;
         _executor = executor;
         _timeProvider = timeProvider;
+        _historyTurns = options.Value.HistoryTurns;
     }
 
     public async Task<AssistantAnswerDto> AskAsync(
@@ -81,6 +85,11 @@ public sealed class AssistantService : IAssistantService
     {
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var session = await GetOrCreateSessionAsync(userId, request.SessionId, now, cancellationToken);
+
+        // Stamped here rather than on the success path at the end, so a session stays current even
+        // when every question in it is refused. It reads as "last used", and a conversation the
+        // user is actively having — badly — is still one they are having.
+        session.LastActivityAtUtc = now;
 
         var log = new AssistantQuery
         {
@@ -98,9 +107,10 @@ public sealed class AssistantService : IAssistantService
         var overallStopwatch = Stopwatch.StartNew();
 
         var schemaContext = await _schemaContext.GetContextAsync(cancellationToken);
+        var history = await LoadHistoryAsync(session.SessionId, log.AssistantQueryId, cancellationToken);
 
         var generation = await _llm.GenerateSqlAsync(
-            request.Question, schemaContext, cancellationToken);
+            request.Question, schemaContext, history, cancellationToken);
 
         log.ModelName = generation.ModelName;
         log.PromptTokens = generation.PromptTokens;
@@ -187,13 +197,12 @@ public sealed class AssistantService : IAssistantService
 
         var resultsJson = JsonSerializer.Serialize(execution.Rows);
         var summary = await _llm.SummariseResultsAsync(
-            request.Question, validation.NormalizedSql!, resultsJson, cancellationToken);
+            request.Question, validation.NormalizedSql!, generation.Parameters, resultsJson,
+            cancellationToken);
 
         log.AnswerText = summary.AnswerText;
         log.CompletionTokens = (log.CompletionTokens ?? 0) + (summary.CompletionTokens ?? 0);
         log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
-
-        session.LastActivityAtUtc = now;
 
         await _db.SaveChangesAsync(cancellationToken);
 
@@ -318,6 +327,55 @@ public sealed class AssistantService : IAssistantService
         FeedbackIsHelpful = feedback?.IsHelpful,
         FeedbackComment = feedback?.Comment
     };
+
+    /// <summary>
+    /// The last few exchanges of this session that actually became a query, oldest first.
+    /// </summary>
+    /// <remarks>
+    /// Restricted to statements that ran and succeeded. A refused turn offers nothing to resolve a
+    /// pronoun against, and one that failed validation or blew up in the database is a statement
+    /// the platform has already judged wrong — replaying either as an example of what to produce
+    /// invites the model to produce more of it.
+    /// <para>
+    /// Taken newest-first with <c>Take</c> and then reversed, rather than ordered ascending and
+    /// trimmed afterwards: the point is the <i>most recent</i> N turns, and ascending order would
+    /// have to read the whole session to find its end. With IX_AssistantQuery_Session this is a
+    /// backwards seek that stops after N rows however long the conversation has run.
+    /// </para>
+    /// The row just inserted for this question is excluded by id. It is still Pending with no SQL,
+    /// so the outcome filters would drop it anyway — but only by accident of when it is written,
+    /// and a question that quietly became context for itself is a strange thing to leave to luck.
+    /// </remarks>
+    private async Task<IReadOnlyList<ConversationTurn>> LoadHistoryAsync(
+        Guid sessionId, long currentQueryId, CancellationToken cancellationToken)
+    {
+        if (_historyTurns <= 0)
+        {
+            return [];
+        }
+
+        var recent = await _db.AssistantQueries
+            .AsNoTracking()
+            .Where(q => q.SessionId == sessionId
+                && q.AssistantQueryId != currentQueryId
+                && q.GeneratedSql != null
+                && q.ValidationOutcome == AssistantValidationOutcome.Approved
+                && q.ExecutionStatus == AssistantExecutionStatus.Succeeded)
+            .OrderByDescending(q => q.AskedAtUtc)
+            .ThenByDescending(q => q.AssistantQueryId)
+            .Take(_historyTurns)
+            .Select(q => new { q.QuestionText, q.GeneratedSql, q.SqlParametersJson })
+            .ToListAsync(cancellationToken);
+
+        recent.Reverse();
+
+        return recent
+            .Select(r => new ConversationTurn(
+                r.QuestionText,
+                r.GeneratedSql!,
+                DeserializeParameters(r.SqlParametersJson) ?? new Dictionary<string, object?>()))
+            .ToList();
+    }
 
     private async Task<AssistantSession> GetOrCreateSessionAsync(
         int userId, Guid? sessionId, DateTime now, CancellationToken cancellationToken)

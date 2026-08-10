@@ -37,7 +37,10 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
     }
 
     public async Task<NlToSqlResult> GenerateSqlAsync(
-        string question, string schemaContext, CancellationToken cancellationToken)
+        string question,
+        string schemaContext,
+        IReadOnlyList<ConversationTurn> history,
+        CancellationToken cancellationToken)
     {
         var system = schemaContext
             + """
@@ -62,7 +65,8 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
 
         var stopwatch = Stopwatch.StartNew();
 
-        var response = await SendAsync(system, question, jsonMode: true, cancellationToken);
+        var response = await SendAsync(
+            system, question, jsonMode: true, ReplayHistory(history), cancellationToken);
         var json = ExtractJson(response.Text);
 
         string? sql = null;
@@ -157,23 +161,83 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
     }
 
     public async Task<NlSummaryResult> SummariseResultsAsync(
-        string question, string generatedSql, string resultsJson, CancellationToken cancellationToken)
+        string question,
+        string generatedSql,
+        IReadOnlyDictionary<string, object?> parameters,
+        string resultsJson,
+        CancellationToken cancellationToken)
     {
+        // The last two sentences are about follow-ups. This step is given one question at a time
+        // and never sees the conversation, so a question like "and the year before that?" arrives
+        // with its referent missing — and a model trying to honour the wording will report the
+        // figures it was handed as the wrong ones, or apologise for not having a year that was
+        // never asked for. The generation step already resolved it; the parameters carry the
+        // resolution, and they are what the answer is actually about.
         const string system =
             "You answer questions about US economic data (CPI, SOFR) from a JSON result set. "
             + "Be concise, cite the actual figures, and never invent a number that is not in the "
-            + "data given to you. If the result set is empty, say so plainly.";
+            + "data given to you. If the result set is empty, say so plainly. "
+            + "The question may be a follow-up whose wording refers to something you cannot see "
+            + "(\"that year\", \"the year before that\", \"the same for SOFR\"); the SQL and its "
+            + "parameters are that reference already resolved. Where the wording and the query "
+            + "disagree about what was asked for, the query is right — answer for what was "
+            + "queried, and never say data is missing merely because the wording implies a period "
+            + "the query did not ask for.";
 
-        var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\nResults (JSON): {resultsJson}";
+        var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\n"
+            + $"Parameters bound to it (JSON): {JsonSerializer.Serialize(parameters)}\n\n"
+            + $"Results (JSON): {resultsJson}";
 
         var stopwatch = Stopwatch.StartNew();
-        var response = await SendAsync(system, user, jsonMode: false, cancellationToken);
+        var response = await SendAsync(system, user, jsonMode: false, [], cancellationToken);
 
         return new NlSummaryResult(response.Text.Trim(), response.CompletionTokens, (int)stopwatch.ElapsedMilliseconds);
     }
 
+    /// <summary>
+    /// Turns earlier exchanges into the alternating user/assistant messages a chat model already
+    /// understands.
+    /// </summary>
+    /// <remarks>
+    /// Replayed as real conversation turns rather than summarised into the system prompt, because
+    /// the assistant half is then literally the JSON the model produced last time. Every prior turn
+    /// therefore doubles as a worked example in exactly the format being demanded — context and
+    /// few-shot in one — where a prose digest ("earlier they asked about 2022") would supply the
+    /// context and quietly drop the demonstration.
+    /// <para>
+    /// The parameters are replayed with the statement, and they carry the weight: "the year before
+    /// that" is answerable only because <c>@year: 2022</c> is sitting in the turn above, and a
+    /// statement shown with its placeholders still unbound would resolve to nothing.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<DeepSeekMessage> ReplayHistory(IReadOnlyList<ConversationTurn> history)
+    {
+        if (history.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = new List<DeepSeekMessage>(history.Count * 2);
+
+        foreach (var turn in history)
+        {
+            messages.Add(new DeepSeekMessage("user", turn.Question));
+            messages.Add(new DeepSeekMessage("assistant", JsonSerializer.Serialize(new
+            {
+                sql = turn.Sql,
+                parameters = turn.Parameters
+            })));
+        }
+
+        return messages;
+    }
+
     private async Task<(string Text, int? PromptTokens, int? CompletionTokens)> SendAsync(
-        string system, string userMessage, bool jsonMode, CancellationToken cancellationToken)
+        string system,
+        string userMessage,
+        bool jsonMode,
+        IReadOnlyList<DeepSeekMessage> priorTurns,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
         {
@@ -190,6 +254,7 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
             _options.Model,
             [
                 new DeepSeekMessage("system", system),
+                .. priorTurns,
                 new DeepSeekMessage("user", userMessage)
             ],
             0,

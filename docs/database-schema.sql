@@ -664,6 +664,11 @@ GO
 
 CREATE INDEX IX_AssistantQuery_AskedAtUtc ON ai.AssistantQuery (AskedAtUtc DESC);
 CREATE INDEX IX_AssistantQuery_User       ON ai.AssistantQuery (UserId, AskedAtUtc DESC);
+-- Conversation memory: the last few turns of one session, so a follow-up like "and the year
+-- before that?" can be resolved against what was asked already. SQL Server does not index a
+-- foreign key on its own, so without this the FK to AssistantSession makes the relationship valid
+-- but not fast, and every question would scan every question ever asked.
+CREATE INDEX IX_AssistantQuery_Session    ON ai.AssistantQuery (SessionId, AskedAtUtc DESC);
 -- Review queue: everything the validator turned away that is worth a human's attention.
 -- NotADataQuestion is excluded deliberately. Both it and RejectedNoSql produce no SQL, but only
 -- one is interesting: "show me the password hashes" is a probe, and "hi" is not. Filed together,

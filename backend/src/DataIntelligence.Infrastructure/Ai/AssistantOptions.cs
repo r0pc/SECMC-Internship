@@ -49,4 +49,18 @@ public sealed class AssistantOptions
 
     [Range(1, 4000)]
     public int MaxOutputTokens { get; set; } = 1024;
+
+    /// <summary>
+    /// How many earlier exchanges of the same session are replayed to the model, so a follow-up
+    /// like "and the year before that?" can be resolved. Zero disables conversation memory.
+    /// </summary>
+    /// <remarks>
+    /// Capped rather than unbounded because the schema context is already the larger part of every
+    /// prompt, and each turn adds a question and a statement on top of it — a long session would
+    /// otherwise grow the prompt until it crowded out the schema the model needs most. Six is two
+    /// or three follow-ups deep, which is as far as a reference like "that year" realistically
+    /// reaches back before the user restates what they mean.
+    /// </remarks>
+    [Range(0, 20)]
+    public int HistoryTurns { get; set; } = 6;
 }

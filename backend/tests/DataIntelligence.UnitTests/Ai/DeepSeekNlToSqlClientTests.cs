@@ -21,6 +21,9 @@ public class DeepSeekNlToSqlClientTests
 {
     private const string SchemaContext = "analytics.vw_Cpi(ReferenceDate, IndexValue)";
 
+    private static readonly IReadOnlyDictionary<string, object?> NoParameters =
+        new Dictionary<string, object?>();
+
     // ------------------------------------------------------------ response parsing
 
     [Fact]
@@ -28,7 +31,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion("{\"sql\": \"SELECT 1 FROM analytics.vw_Cpi\"}"));
 
-        var result = await client.GenerateSqlAsync("How high is CPI?", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("How high is CPI?", SchemaContext, [], default);
 
         Assert.Equal("SELECT 1 FROM analytics.vw_Cpi", result.Sql);
         Assert.Equal("deepseek-chat", result.ModelName);
@@ -42,7 +45,7 @@ public class DeepSeekNlToSqlClientTests
         var client = ClientReturning(Completion(
             "```json\n{\"sql\": \"SELECT 1 FROM analytics.vw_Cpi\"}\n```"));
 
-        var result = await client.GenerateSqlAsync("How high is CPI?", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("How high is CPI?", SchemaContext, [], default);
 
         Assert.Equal("SELECT 1 FROM analytics.vw_Cpi", result.Sql);
     }
@@ -62,7 +65,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion(content));
 
-        var result = await client.GenerateSqlAsync("Unanswerable", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("Unanswerable", SchemaContext, [], default);
 
         Assert.Null(result.Sql);
     }
@@ -78,7 +81,7 @@ public class DeepSeekNlToSqlClientTests
              "explanation": "Reads the monthly CPI index value for one month."}
             """));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Equal("2025-06-01", result.Parameters["@month"]);
         Assert.Equal("Reads the monthly CPI index value for one month.", result.Explanation);
@@ -92,7 +95,7 @@ public class DeepSeekNlToSqlClientTests
              "parameters": {"month": "2025-06-01"}}
             """));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.True(result.Parameters.ContainsKey("@month"));
     }
@@ -135,7 +138,7 @@ public class DeepSeekNlToSqlClientTests
         var client = ClientReturning(Completion(
             $$$"""{"sql": "SELECT 1 FROM analytics.vw_Cpi WHERE X = @v", "parameters": {"@v": {{{json}}} }}"""));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         return result.Parameters["@v"];
     }
@@ -145,7 +148,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion("""{"sql": "SELECT 1 FROM analytics.vw_Cpi"}"""));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Empty(result.Parameters);
     }
@@ -156,7 +159,7 @@ public class DeepSeekNlToSqlClientTests
         var handler = new CapturingHandler(Completion("""{"sql": null}"""));
         var client = ClientOver(handler);
 
-        await client.GenerateSqlAsync("q", SchemaContext, default);
+        await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
         var system = doc.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
@@ -175,7 +178,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion($$"""{"sql": null, "refusal": "{{refusal}}"}"""));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Null(result.Sql);
         Assert.Equal(expected, result.Refusal);
@@ -200,7 +203,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion(content));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Equal(NlRefusalKind.Unanswerable, result.Refusal);
     }
@@ -219,7 +222,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion(content));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Null(result.Sql);
         Assert.Equal(NlRefusalKind.Unreadable, result.Refusal);
@@ -230,7 +233,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion("""{"sql": "SELECT 1 FROM analytics.vw_Cpi"}"""));
 
-        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Equal(NlRefusalKind.None, result.Refusal);
     }
@@ -241,7 +244,7 @@ public class DeepSeekNlToSqlClientTests
         var client = ClientReturning(Completion(
             "{\"sql\": \"SELECT 1 FROM analytics.vw_Cpi\"}", promptTokens: 412, completionTokens: 17));
 
-        var result = await client.GenerateSqlAsync("How high is CPI?", SchemaContext, default);
+        var result = await client.GenerateSqlAsync("How high is CPI?", SchemaContext, [], default);
 
         Assert.Equal(412, result.PromptTokens);
         Assert.Equal(17, result.CompletionTokens);
@@ -255,7 +258,7 @@ public class DeepSeekNlToSqlClientTests
         var handler = new CapturingHandler(Completion("{\"sql\": null}"));
         var client = ClientOver(handler);
 
-        await client.GenerateSqlAsync("What was CPI in June?", SchemaContext, default);
+        await client.GenerateSqlAsync("What was CPI in June?", SchemaContext, [], default);
 
         var body = handler.LastRequestBody!;
         using var doc = JsonDocument.Parse(body);
@@ -268,6 +271,108 @@ public class DeepSeekNlToSqlClientTests
         Assert.Equal("What was CPI in June?", messages[1].GetProperty("content").GetString());
     }
 
+    // ------------------------------------------------------- conversation history
+
+    [Fact]
+    public async Task ReplaysEarlierTurnsBetweenTheSystemMessageAndTheQuestion()
+    {
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler);
+
+        ConversationTurn[] history =
+        [
+            new("what is the average cpi of 2022",
+                "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+                new Dictionary<string, object?> { ["@year"] = 2022L })
+        ];
+
+        await client.GenerateSqlAsync(
+            "and what is the average cpi of the year before that", SchemaContext, history, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var messages = doc.RootElement.GetProperty("messages");
+
+        // system, then the earlier exchange as a real user/assistant pair, then the new question.
+        // Order is the whole point: a follow-up resolved against turns placed after it would be
+        // resolved against nothing.
+        Assert.Equal(4, messages.GetArrayLength());
+        Assert.Equal("system", messages[0].GetProperty("role").GetString());
+
+        Assert.Equal("user", messages[1].GetProperty("role").GetString());
+        Assert.Equal("what is the average cpi of 2022", messages[1].GetProperty("content").GetString());
+
+        Assert.Equal("assistant", messages[2].GetProperty("role").GetString());
+
+        Assert.Equal("user", messages[3].GetProperty("role").GetString());
+        Assert.Equal("and what is the average cpi of the year before that",
+            messages[3].GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task ReplaysTheEarlierStatementWithItsParametersBound()
+    {
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler);
+
+        ConversationTurn[] history =
+        [
+            new("what is the average cpi of 2022",
+                "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+                new Dictionary<string, object?> { ["@year"] = 2022L })
+        ];
+
+        await client.GenerateSqlAsync("and the year before that", SchemaContext, history, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var replayed = doc.RootElement.GetProperty("messages")[2].GetProperty("content").GetString()!;
+
+        using var turn = JsonDocument.Parse(replayed);
+
+        Assert.Equal(
+            "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+            turn.RootElement.GetProperty("sql").GetString());
+
+        // The referent lives in the parameters, not the statement. Replaying the SQL with @year
+        // still unbound would leave "the year before that" pointing at a placeholder.
+        Assert.Equal(2022,
+            turn.RootElement.GetProperty("parameters").GetProperty("@year").GetInt32());
+    }
+
+    [Fact]
+    public async Task SendsNoExtraMessagesWhenThereIsNoHistory()
+    {
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler);
+
+        await client.GenerateSqlAsync("What was CPI in June?", SchemaContext, [], default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+
+        Assert.Equal(2, doc.RootElement.GetProperty("messages").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task NeverReplaysTheAnswersThemselves()
+    {
+        // The one thing history must not carry. A model shown "CPI in 2022 was 292.655" can
+        // satisfy a follow-up without querying anything, and a recalled figure is indistinguishable
+        // in the UI from a collected one. ConversationTurn has no field for it; this pins that the
+        // client never invents one.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler);
+
+        ConversationTurn[] history =
+        [
+            new("what is the average cpi of 2022",
+                "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+                new Dictionary<string, object?> { ["@year"] = 2022L })
+        ];
+
+        await client.GenerateSqlAsync("and the year before that", SchemaContext, history, default);
+
+        Assert.DoesNotContain("292.655", handler.LastRequestBody!);
+    }
+
     [Fact]
     public async Task AsksForDeterministicJsonWhenGeneratingSql()
     {
@@ -275,7 +380,7 @@ public class DeepSeekNlToSqlClientTests
         var handler = new CapturingHandler(Completion("{\"sql\": null}"));
         var client = ClientOver(handler);
 
-        await client.GenerateSqlAsync("What was CPI in June?", SchemaContext, default);
+        await client.GenerateSqlAsync("What was CPI in June?", SchemaContext, [], default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
 
@@ -291,7 +396,7 @@ public class DeepSeekNlToSqlClientTests
         var handler = new CapturingHandler(Completion("CPI stood at 320.3 in June."));
         var client = ClientOver(handler);
 
-        await client.SummariseResultsAsync("q", "SELECT 1", "[]", default);
+        await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
 
@@ -306,7 +411,8 @@ public class DeepSeekNlToSqlClientTests
         var client = ClientOver(handler);
 
         await client.SummariseResultsAsync(
-            "What was CPI in June?", "SELECT IndexValue FROM analytics.vw_Cpi", "[{\"IndexValue\":320.3}]", default);
+            "What was CPI in June?", "SELECT IndexValue FROM analytics.vw_Cpi", NoParameters,
+            "[{\"IndexValue\":320.3}]", default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
         var user = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
@@ -317,11 +423,35 @@ public class DeepSeekNlToSqlClientTests
     }
 
     [Fact]
+    public async Task SendsTheBoundParametersToTheSummariserToo()
+    {
+        // A follow-up's question text does not say what it is about — "the year before that" names
+        // no year. This step never sees the conversation, so the bound parameter is the only place
+        // the subject of the answer is written down. Without it the summariser reads the pronoun
+        // literally and reports the right figures as the wrong ones.
+        var handler = new CapturingHandler(Completion("CPI averaged 270.97 in 2021."));
+        var client = ClientOver(handler);
+
+        await client.SummariseResultsAsync(
+            "and what is the average cpi of the year before that",
+            "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+            new Dictionary<string, object?> { ["@year"] = 2021L },
+            "[{\"AnnualValue\":270.97}]",
+            default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var user = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+
+        Assert.Contains("@year", user);
+        Assert.Contains("2021", user);
+    }
+
+    [Fact]
     public async Task ReturnsTheSummaryTextTrimmed()
     {
         var client = ClientReturning(Completion("  CPI stood at 320.3 in June.\n"));
 
-        var result = await client.SummariseResultsAsync("q", "SELECT 1", "[]", default);
+        var result = await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", default);
 
         Assert.Equal("CPI stood at 320.3 in June.", result.AnswerText);
     }
@@ -332,7 +462,7 @@ public class DeepSeekNlToSqlClientTests
         var handler = new CapturingHandler(Completion("{\"sql\": null}"));
         var client = ClientOver(handler, apiKey: "sk-test-key");
 
-        await client.GenerateSqlAsync("q", SchemaContext, default);
+        await client.GenerateSqlAsync("q", SchemaContext, [], default);
 
         Assert.Equal("Bearer", handler.LastAuthorizationScheme);
         Assert.Equal("sk-test-key", handler.LastAuthorizationParameter);
@@ -346,7 +476,7 @@ public class DeepSeekNlToSqlClientTests
         var client = ClientOver(new CapturingHandler(Completion("{\"sql\": null}")), apiKey: "");
 
         var ex = await Assert.ThrowsAsync<AssistantNotConfiguredException>(
-            () => client.GenerateSqlAsync("q", SchemaContext, default));
+            () => client.GenerateSqlAsync("q", SchemaContext, [], default));
 
         Assert.Contains("Assistant:ApiKey", ex.Message);
     }
@@ -362,7 +492,7 @@ public class DeepSeekNlToSqlClientTests
         var client = ClientOver(new CapturingHandler("{}") { Status = status });
 
         var ex = await Assert.ThrowsAsync<AssistantNotConfiguredException>(
-            () => client.GenerateSqlAsync("q", SchemaContext, default));
+            () => client.GenerateSqlAsync("q", SchemaContext, [], default));
 
         Assert.Contains("Assistant:ApiKey", ex.Message);
     }
