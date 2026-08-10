@@ -48,6 +48,54 @@ public sealed record AssistantFeedbackRequest
     public string? Comment { get; init; }
 }
 
+/// <summary>
+/// One conversation, serialised into <c>ai.AssistantSession.TranscriptJson</c>.
+/// </summary>
+/// <remarks>
+/// This is a stored document rather than a wire response, and the difference matters: once written
+/// it outlives the code that wrote it. Fields may be added, but renaming or removing one silently
+/// changes the meaning of every transcript already in the table, which no migration will fix.
+/// </remarks>
+public sealed record ChatTranscript
+{
+    public required Guid SessionId { get; init; }
+    public required int UserId { get; init; }
+    public required DateTime StartedAtUtc { get; init; }
+    public required DateTime LastActivityAtUtc { get; init; }
+
+    /// <summary>Stored alongside the turns so a reader can detect truncation without parsing them.</summary>
+    public required int TurnCount { get; init; }
+
+    public required IReadOnlyList<ChatTranscriptTurn> Turns { get; init; }
+}
+
+/// <summary>One exchange within a <see cref="ChatTranscript"/>.</summary>
+/// <remarks>
+/// Every turn is recorded, including the refused ones. A transcript that kept only the answered
+/// questions would not be the conversation that happened — and a user rereading it would find
+/// their own questions missing with no indication that they had ever been asked.
+/// </remarks>
+public sealed record ChatTranscriptTurn
+{
+    /// <summary>Points back at the <c>ai.AssistantQuery</c> row this turn was projected from.</summary>
+    public required long AssistantQueryId { get; init; }
+
+    public required DateTime AskedAtUtc { get; init; }
+    public required string Question { get; init; }
+
+    /// <summary>The reply as it was shown, including the text of a refusal.</summary>
+    public string? Answer { get; init; }
+
+    public required AssistantValidationOutcome Outcome { get; init; }
+
+    public string? Sql { get; init; }
+    public IReadOnlyDictionary<string, object?>? Parameters { get; init; }
+    public string? Explanation { get; init; }
+
+    /// <summary>How many rows the answer was drawn from. The rows themselves are not stored.</summary>
+    public int? ResultRowCount { get; init; }
+}
+
 /// <summary>Filters over the assistant's audit log (NFR Auditability).</summary>
 public sealed record AssistantQueryLogQuery
 {

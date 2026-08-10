@@ -1,4 +1,4 @@
-// backend/src/DataIntelligence.Infrastructure/Ai/AssistantService.cs
+﻿// backend/src/DataIntelligence.Infrastructure/Ai/AssistantService.cs
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -149,8 +149,7 @@ public sealed class AssistantService : IAssistantService
             log.AnswerText = answer;
             log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-            await _db.SaveChangesAsync(cancellationToken);
-            return ToDto(log, null);
+            return await FinishAsync(session, log, null, cancellationToken);
         }
 
         var validation = _validator.Validate(generation.Sql, generation.Parameters);
@@ -163,8 +162,7 @@ public sealed class AssistantService : IAssistantService
                 + $"({validation.Detail}). Try rephrasing it.";
             log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-            await _db.SaveChangesAsync(cancellationToken);
-            return ToDto(log, null);
+            return await FinishAsync(session, log, null, cancellationToken);
         }
 
         // Nothing runs without CK_AssistantQuery_NoUnvalidatedRun's own agreement, but this is the
@@ -188,8 +186,7 @@ public sealed class AssistantService : IAssistantService
                 : "The query didn't run successfully against the database.";
             log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-            await _db.SaveChangesAsync(cancellationToken);
-            return ToDto(log, null);
+            return await FinishAsync(session, log, null, cancellationToken);
         }
 
         log.ExecutionStatus = AssistantExecutionStatus.Succeeded;
@@ -204,9 +201,7 @@ public sealed class AssistantService : IAssistantService
         log.CompletionTokens = (log.CompletionTokens ?? 0) + (summary.CompletionTokens ?? 0);
         log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return ToDto(log, execution.Rows);
+        return await FinishAsync(session, log, execution.Rows, cancellationToken);
     }
 
     public async Task RecordFeedbackAsync(
@@ -327,6 +322,42 @@ public sealed class AssistantService : IAssistantService
         FeedbackIsHelpful = feedback?.IsHelpful,
         FeedbackComment = feedback?.Comment
     };
+
+    /// <summary>
+    /// Closes a turn: persists it, refreshes the session's JSON transcript, and shapes the reply.
+    /// </summary>
+    /// <remarks>
+    /// Every exit from <see cref="AskAsync"/> comes through here, refusals included. A transcript
+    /// updated only on the paths that produced an answer would be missing exactly the turns a
+    /// reader is most likely to be looking for, and the user's own question would vanish from the
+    /// conversation they just had.
+    /// <para>
+    /// The two saves are ordered, not redundant. The turn's row is made durable first and the
+    /// transcript is derived from what is then committed — so a failure between them costs the
+    /// projection and never the audit record, and the next turn rebuilds the transcript whole and
+    /// repairs it. Reversing the order would let a session advertise a turn the log had not kept.
+    /// </para>
+    /// </remarks>
+    private async Task<AssistantAnswerDto> FinishAsync(
+        AssistantSession session,
+        AssistantQuery log,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>>? rows,
+        CancellationToken cancellationToken)
+    {
+        await _db.SaveChangesAsync(cancellationToken);
+
+        var turns = await _db.AssistantQueries
+            .AsNoTracking()
+            .Where(q => q.SessionId == session.SessionId)
+            .OrderBy(q => q.AskedAtUtc)
+            .ThenBy(q => q.AssistantQueryId)
+            .ToListAsync(cancellationToken);
+
+        session.TranscriptJson = ChatTranscriptWriter.Serialize(session, turns);
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return ToDto(log, rows);
+    }
 
     /// <summary>
     /// The last few exchanges of this session that actually became a query, oldest first.

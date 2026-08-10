@@ -461,7 +461,13 @@ public class DataIntelligenceDbContext : DbContext
 
     private static void ConfigureAssistantSession(EntityTypeBuilder<AssistantSession> entity)
     {
-        entity.ToTable("AssistantSession", "ai");
+        // Enforced in the database rather than trusted from the application, because this column
+        // is a document: anything that writes a malformed string here is discovered by whoever
+        // tries to read the transcript back, which may be long after the write that broke it.
+        // ISJSON is the cheapest possible check and rejects it at the point of damage instead.
+        entity.ToTable("AssistantSession", "ai", t =>
+            t.HasCheckConstraint("CK_AssistantSession_TranscriptJson",
+                "[TranscriptJson] IS NULL OR ISJSON([TranscriptJson]) = 1"));
 
         entity.HasKey(e => e.SessionId);
         entity.Property(e => e.SessionId).ValueGeneratedNever();
