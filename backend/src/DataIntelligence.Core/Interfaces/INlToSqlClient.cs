@@ -68,7 +68,21 @@ public enum NlRefusalKind
     NotADataQuestion,
 
     /// <summary>A data question the published views cannot answer.</summary>
-    Unanswerable
+    Unanswerable,
+
+    /// <summary>
+    /// The model's response could not be read — not JSON, or JSON without a usable <c>sql</c>
+    /// field.
+    /// </summary>
+    /// <remarks>
+    /// Kept apart from <see cref="Unanswerable"/> because the two say opposite things about where
+    /// the fault lies. Unanswerable is the model exercising judgement about the schema; this is the
+    /// model failing to answer in the shape it was asked to. Folded together, a provider that
+    /// starts wrapping its output differently after a version bump shows up in the review queue as
+    /// a sudden run of questions the platform supposedly cannot answer, and the reviewer goes
+    /// looking for missing views instead of a broken response format.
+    /// </remarks>
+    Unreadable
 }
 
 public sealed record NlSummaryResult(string AnswerText, int? CompletionTokens, int LatencyMs);

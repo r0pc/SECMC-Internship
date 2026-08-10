@@ -67,7 +67,13 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
 
         string? sql = null;
         string? explanation = null;
-        var refusal = NlRefusalKind.Unanswerable;
+
+        // Starts Unreadable and is only moved off it once the response proves to be the shape that
+        // was asked for. Prose where JSON was requested, or an object with no "sql" key at all, is
+        // then reported as what it is rather than being filed as the model's considered judgement
+        // that the schema cannot answer the question — two facts that send a reviewer to opposite
+        // ends of the system.
+        var refusal = NlRefusalKind.Unreadable;
         var parameters = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
 
         try
@@ -75,9 +81,30 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            if (root.TryGetProperty("sql", out var sqlElement) && sqlElement.ValueKind == JsonValueKind.String)
+            // ExtractJson only ever hands back a slice starting at '{', so in practice this holds
+            // and nothing below is reached with an array or a bare scalar. It is asserted here
+            // anyway because the cost of being wrong is not a refusal: TryGetProperty throws
+            // InvalidOperationException on a non-object, which is not the JsonException caught
+            // below, so it would escape as a 500 rather than as an answer.
+            if (root.ValueKind != JsonValueKind.Object)
             {
-                sql = sqlElement.GetString();
+                return NlToSqlResult.NoSql(
+                    NlRefusalKind.Unreadable, _options.Model, response.PromptTokens,
+                    response.CompletionTokens, (int)stopwatch.ElapsedMilliseconds);
+            }
+
+            if (root.TryGetProperty("sql", out var sqlElement))
+            {
+                // The key being present is what says the model answered in the requested shape;
+                // whether it holds a statement or null is the model's answer *within* that shape.
+                // So a deliberate {"sql": null} that forgot to classify itself is a refusal with a
+                // missing reason — not an unreadable response — and defaults as it always did.
+                refusal = NlRefusalKind.Unanswerable;
+
+                if (sqlElement.ValueKind == JsonValueKind.String)
+                {
+                    sql = sqlElement.GetString();
+                }
             }
 
             if (root.TryGetProperty("refusal", out var why2) && why2.ValueKind == JsonValueKind.String)
@@ -108,7 +135,12 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
         }
         catch (JsonException)
         {
-            sql = null; // Malformed model output becomes a refusal downstream, not a crash.
+            // Malformed model output becomes a refusal downstream, not a crash. Both fields are
+            // reset rather than left as the partial parse found them: a document that threw
+            // halfway may have yielded a refusal string before it failed, and reporting that as
+            // the model's answer would describe a broken response as a deliberate one.
+            sql = null;
+            refusal = NlRefusalKind.Unreadable;
         }
 
         if (string.IsNullOrWhiteSpace(sql) || sql == "null")

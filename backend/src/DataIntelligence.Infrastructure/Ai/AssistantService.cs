@@ -38,6 +38,21 @@ public sealed class AssistantService : IAssistantService
         + "over them. Try, for example: \"What was CPI in June 2025?\", \"What is the average SOFR "
         + "rate in 2025?\", or \"Which sources failed to collect this week?\"";
 
+    /// <summary>
+    /// What the assistant says when the model's reply could not be read at all.
+    /// </summary>
+    /// <remarks>
+    /// Separate text from <see cref="CannotAnswer"/>, because that message makes a claim this case
+    /// cannot support: it tells the user their question was outside what the platform holds, and
+    /// invites them to rephrase. A user who asks a perfectly ordinary question about CPI and is
+    /// told the platform does not cover it will believe the platform, and stop asking. Saying the
+    /// request failed keeps the fault where it belongs and makes retrying the obvious next move.
+    /// </remarks>
+    internal const string ResponseUnreadable =
+        "Something went wrong turning that into a query — the answer came back in a form I "
+        + "couldn't read. This is a fault on our side, not a problem with your question. Please "
+        + "try asking it again.";
+
     private readonly DataIntelligenceDbContext _db;
     private readonly INlToSqlClient _llm;
     private readonly ISchemaContextProvider _schemaContext;
@@ -101,15 +116,27 @@ public sealed class AssistantService : IAssistantService
 
         if (generation.Sql is null)
         {
-            var chatter = generation.Refusal == NlRefusalKind.NotADataQuestion;
+            var (outcome, detail, answer) = generation.Refusal switch
+            {
+                NlRefusalKind.NotADataQuestion => (
+                    AssistantValidationOutcome.NotADataQuestion,
+                    "Not a question about data.",
+                    CannotAnswer),
 
-            log.ValidationOutcome = chatter
-                ? AssistantValidationOutcome.NotADataQuestion
-                : AssistantValidationOutcome.RejectedNoSql;
-            log.ValidationDetail = chatter
-                ? "Not a question about data."
-                : "The model could not express this question against the published views.";
-            log.AnswerText = CannotAnswer;
+                NlRefusalKind.Unreadable => (
+                    AssistantValidationOutcome.RejectedUnreadableResponse,
+                    "The model's response could not be read as the JSON it was asked for.",
+                    ResponseUnreadable),
+
+                _ => (
+                    AssistantValidationOutcome.RejectedNoSql,
+                    "The model could not express this question against the published views.",
+                    CannotAnswer)
+            };
+
+            log.ValidationOutcome = outcome;
+            log.ValidationDetail = detail;
+            log.AnswerText = answer;
             log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
             await _db.SaveChangesAsync(cancellationToken);

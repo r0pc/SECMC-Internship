@@ -185,10 +185,17 @@ public class DeepSeekNlToSqlClientTests
     // Anything unrecognised stays Unanswerable. A rejected query in the review queue that turns
     // out to be chatter costs a reviewer a glance; chatter filed as nothing costs them the probe
     // hiding behind it.
+    //
+    // Every case here still carries an "sql" key, which is what makes it a refusal at all: the
+    // model answered in the shape it was asked for and declined within it. Only the reason is
+    // missing or unrecognised, and that is what defaults.
     [InlineData("""{"sql": null}""")]
     [InlineData("""{"sql": null, "refusal": "something else"}""")]
     [InlineData("""{"sql": null, "refusal": null}""")]
-    [InlineData("not json at all")]
+    // No "sql" key at all, but a reason given for its absence. A stated refusal is a stated
+    // refusal — the model reached a judgement and said so, and holding the shape against it would
+    // file a real answer as a malfunction.
+    [InlineData("""{"refusal": "unanswerable"}""")]
     public async Task DefaultsToUnanswerableWhenTheRefusalIsNotOneItKnows(string content)
     {
         var client = ClientReturning(Completion(content));
@@ -196,6 +203,26 @@ public class DeepSeekNlToSqlClientTests
         var result = await client.GenerateSqlAsync("q", SchemaContext, default);
 
         Assert.Equal(NlRefusalKind.Unanswerable, result.Refusal);
+    }
+
+    [Theory]
+    // A reply that never got as far as the requested shape. Kept apart from Unanswerable because
+    // the two point at different faults: Unanswerable says the views cannot serve the question,
+    // and a reviewer seeing a run of them goes looking for a missing view. These say the model did
+    // not answer in the shape it was asked for — nothing is wrong with the schema, and looking
+    // there is looking in the one place the answer is not.
+    [InlineData("not json at all")]
+    [InlineData("")]
+    [InlineData("{\"explanation\": \"I had a think about it\"}")]  // neither an "sql" key nor a reason
+    [InlineData("{\"sql\": \"SELECT 1 FROM analytics.vw_Cpi")]     // cut off mid-statement
+    public async Task ReportsAResponseItCouldNotReadAsUnreadable(string content)
+    {
+        var client = ClientReturning(Completion(content));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, default);
+
+        Assert.Null(result.Sql);
+        Assert.Equal(NlRefusalKind.Unreadable, result.Refusal);
     }
 
     [Fact]

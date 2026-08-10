@@ -282,7 +282,9 @@ function OutcomeNote({ outcome }: { outcome: AssistantValidationOutcome }) {
   const reason =
     outcome === "RejectedNoSql"
       ? "No query could be written against the published views."
-      : "The query that was written is not one the assistant is permitted to run.";
+      : outcome === "RejectedUnreadableResponse"
+        ? "The model's reply could not be read, so no query was attempted."
+        : "The query that was written is not one the assistant is permitted to run.";
 
   return (
     <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">

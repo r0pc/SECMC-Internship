@@ -652,7 +652,8 @@ CREATE TABLE ai.AssistantQuery
         REFERENCES sec.AppUser (UserId),
     CONSTRAINT CK_AssistantQuery_Validation CHECK (ValidationOutcome IN
         ('Pending','Approved','RejectedNotSelect','RejectedForbiddenObject',
-         'RejectedSyntax','RejectedComplexity','RejectedNoSql','NotADataQuestion')),
+         'RejectedSyntax','RejectedComplexity','RejectedNoSql','NotADataQuestion',
+         'RejectedUnreadableResponse')),
     CONSTRAINT CK_AssistantQuery_Execution CHECK (ExecutionStatus IS NULL OR ExecutionStatus IN
         ('Succeeded','Failed','Timeout','Cancelled')),
     -- Nothing executes unless validation approved it (SOW 9: unsafe AI SQL).

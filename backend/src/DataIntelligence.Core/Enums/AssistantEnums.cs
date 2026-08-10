@@ -34,7 +34,19 @@ public enum AssistantValidationOutcome
     /// hashes" is a probe worth a human's attention, and "hi" is not. Filed together, the volume of
     /// the second buries the first, which defeats the point of keeping the queue.
     /// </remarks>
-    NotADataQuestion
+    NotADataQuestion,
+
+    /// <summary>The model's response could not be read as the JSON it was asked for.</summary>
+    /// <remarks>
+    /// Also split from <see cref="RejectedNoSql"/>, for the opposite reason to
+    /// <see cref="NotADataQuestion"/>: not because it is less interesting, but because it is a
+    /// different kind of fact. RejectedNoSql records that the model judged the question
+    /// unanswerable from the published views, and a reviewer reading a run of them looks for a
+    /// missing view or a gap in the prompt. A provider that changes how it wraps its output would
+    /// otherwise produce exactly that run while nothing is wrong with the schema at all, and send
+    /// the reviewer looking in the one place the answer is not.
+    /// </remarks>
+    RejectedUnreadableResponse
 }
 
 public enum AssistantExecutionStatus

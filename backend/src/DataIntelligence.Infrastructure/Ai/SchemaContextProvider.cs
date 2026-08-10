@@ -355,5 +355,21 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
          "parameters": {"@month": "2025-06-01"},
          "explanation": "Reads the current monthly CPI index value for the given month from vw_Cpi.",
          "refusal": null}
+
+        Example — "What was the year over year inflation rate for the last 3 months?". The window
+        below was resolved from a today of 2025-09-14; resolve yours from the date you were given
+        above rather than copying these:
+        {"sql": "SELECT ReferenceDate, YearOverYearPct FROM analytics.vw_CpiMonthlyChange WHERE ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate",
+         "parameters": {"@from": "2025-06-01", "@to": "2025-09-01"},
+         "explanation": "Reads the year-over-year CPI change for each month in the requested window from vw_CpiMonthlyChange.",
+         "refusal": null}
+
+        Note what the second example does NOT do. It does not refuse because the range is recent
+        and CPI is published in arrears, it does not shorten the window to one it expects to be
+        populated, and it does not ask which months were meant. A question about inflation,
+        prices, rates or collection health over any window is answerable by definition — the views
+        above cover those subjects, and how many rows come back is a fact about the data, not a
+        reason to decline. Reserve "unanswerable" for a subject these views do not hold at all,
+        such as unemployment, GDP, equity prices or a country other than the US.
         """;
 }

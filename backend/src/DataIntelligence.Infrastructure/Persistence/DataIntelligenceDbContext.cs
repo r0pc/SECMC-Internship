@@ -480,7 +480,7 @@ public class DataIntelligenceDbContext : DbContext
             t.HasCheckConstraint("CK_AssistantQuery_Validation",
                 "[ValidationOutcome] IN ('Pending','Approved','RejectedNotSelect',"
                 + "'RejectedForbiddenObject','RejectedSyntax','RejectedComplexity','RejectedNoSql',"
-                + "'NotADataQuestion')");
+                + "'NotADataQuestion','RejectedUnreadableResponse')");
             t.HasCheckConstraint("CK_AssistantQuery_Execution",
                 "[ExecutionStatus] IS NULL OR [ExecutionStatus] IN "
                 + "('Succeeded','Failed','Timeout','Cancelled')");

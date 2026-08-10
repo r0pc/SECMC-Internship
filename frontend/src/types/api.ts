@@ -268,6 +268,11 @@ export interface DashboardSummaryDto {
  * `NotADataQuestion` is separate from `RejectedNoSql` on purpose: both produce no SQL, but a
  * greeting is not a finding and a question the schema cannot answer might be. Only the second
  * belongs in a reviewer's queue.
+ *
+ * `RejectedUnreadableResponse` is separated from `RejectedNoSql` for the opposite reason — not
+ * because it matters less, but because it points somewhere else. `RejectedNoSql` says the model
+ * judged the question unanswerable from the published views; this one says its reply could not be
+ * read at all, which is a fault in the platform rather than a gap in the schema.
  */
 export type AssistantValidationOutcome =
   | "Pending"
@@ -277,7 +282,8 @@ export type AssistantValidationOutcome =
   | "RejectedSyntax"
   | "RejectedComplexity"
   | "RejectedNoSql"
-  | "NotADataQuestion";
+  | "NotADataQuestion"
+  | "RejectedUnreadableResponse";
 
 export type AssistantExecutionStatus =
   | "Succeeded"
