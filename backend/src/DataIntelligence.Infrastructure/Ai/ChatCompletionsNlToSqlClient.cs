@@ -3,8 +3,10 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Core.Interfaces;
@@ -67,37 +69,45 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
     {
         var provider = Resolve(model);
 
-        var system = schemaContext
-            + """
-
-
+        // Output contract first, then the schema — which puts every stable byte of the prompt at
+        // the front and the only part that moves, today's date and the coverage window, at the very
+        // end of it.
+        //
+        // That ordering is worth more than it looks. Both providers reuse a prompt by its prefix and
+        // stop at the first byte that differs: a hosted gateway bills a cached prefix at a fraction
+        // of the input rate, and a local server can skip re-reading a prefix whose KV cache it still
+        // holds — which on a 2B model on a CPU is most of the wait, since reading the prompt is the
+        // bulk of the work. With the date sitting in the middle, everything after it was re-read on
+        // every question and re-billed every day. The tail after it is now about 200 tokens.
+        //
+        // Nothing here depends on the order for its meaning: the shape block refers to nothing
+        // above it, the views are still stated before the semantics that say "not listed above", and
+        // the worked examples still resolve their dates against a "today" that follows them.
+        var system = """
             Respond with JSON only, no prose, in this exact shape:
             {"sql": "<statement or null>", "parameters": {"@name": <value>}, "explanation": "<one or two sentences>", "refusal": null}
 
+            Every literal the question supplies goes in "parameters" and is referenced from the
+            statement by name — `WHERE ReferenceDate = @month`, never `WHERE ReferenceDate =
+            '2025-06-01'`. Column and table names are part of the statement and are never
+            parameters; use an empty object when none are needed. "explanation" says in plain
+            language what the statement does and which view it reads — it is shown to the person who
+            asked and kept for review, so describe the query rather than restating the question.
+
             When "sql" is null, set "refusal" to one of:
               "not_a_data_question" — a greeting, thanks, or anything not asking about data.
-              "about_cpi"      — asks what CPI *is*, how it is defined, who publishes it, what the
-                                 index base means. Not what it *was*: "what is CPI in June" wants a
-                                 figure and needs SQL.
-              "about_sofr"     — the same, for SOFR: what it is, who publishes it, what it measures.
-              "about_platform" — what this assistant or platform is, what data it holds, what it
-                                 can answer, how often it collects.
+              "about_cpi", "about_sofr" — asks what CPI or SOFR *is*: how it is defined, who
+                                 publishes it, what it measures, what the index base means. Not what
+                                 it *was*: "what was CPI in June" wants a figure and needs SQL.
+              "about_platform" — what this assistant or platform is, what data it holds, what it can
+                                 answer, how often it collects.
               "unanswerable"   — a genuine data question these views cannot answer.
-            Leave "refusal" null whenever you return SQL.
+            Leave "refusal" null whenever you return SQL. The "about_" values are classifications,
+            not requests to write the answer — the reply is fixed text on the other side, so put no
+            definition in "explanation" and state no figure.
 
-            The three "about_" values are classifications, not requests to write the answer: the
-            reply is fixed text on the other side. Do not put a definition in "explanation" and do
-            not state any figure — a question about what a series is never needs one.
 
-            Put every literal the question supplies into "parameters" and reference it from the
-            statement by name — write `WHERE ReferenceDate = @month`, not `WHERE ReferenceDate =
-            '2025-06-01'`. Column and table names are part of the statement and are never
-            parameters. Use an empty object when the query needs none.
-
-            "explanation" says in plain language what the statement does and which view it reads.
-            It is shown to the person who asked and stored for review, so describe the query rather
-            than restating the question.
-            """;
+            """ + schemaContext;
 
         var stopwatch = Stopwatch.StartNew();
 
@@ -245,33 +255,37 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         AssistantModelChoice model,
         CancellationToken cancellationToken)
     {
-        // The last two sentences are about follow-ups. This step is given one question at a time
-        // and never sees the conversation, so a question like "and the year before that?" arrives
-        // with its referent missing — and a model trying to honour the wording will report the
-        // figures it was handed as the wrong ones, or apologise for not having a year that was
-        // never asked for. The generation step already resolved it; the parameters carry the
-        // resolution, and they are what the answer is actually about.
+        // The middle sentences are about follow-ups. This step is given one question at a time and
+        // never sees the conversation, so a question like "and the year before that?" arrives with
+        // its referent missing — and a model trying to honour the wording will report the figures it
+        // was handed as the wrong ones, or apologise for not having a year that was never asked for.
+        // The generation step already resolved it; the parameters carry the resolution, and they are
+        // what the answer is actually about.
+        //
+        // The line about "columns" and "rows" is what makes the compact result shape readable — see
+        // ResultSetFormatter. Without it a columnar payload is a puzzle rather than a saving.
         const string system =
-            "You answer questions about US economic data (CPI, SOFR) from a JSON result set. "
+            "You answer questions about US economic data (CPI, SOFR) from a query result. "
             + "Be concise, cite the actual figures, and never invent a number that is not in the "
-            + "data given to you. If the result set is empty, say so plainly. "
+            + "data given to you. The result is columnar: \"columns\" names the fields in order, "
+            + "and each entry of \"rows\" holds one record's values in that same order. A result "
+            + "too long to list arrives summarised instead, and carries its own note saying how to "
+            + "read it. "
             + "The question may be a follow-up whose wording refers to something you cannot see "
             + "(\"that year\", \"the year before that\", \"the same for SOFR\"); the SQL and its "
             + "parameters are that reference already resolved. Where the wording and the query "
-            + "disagree about what was asked for, the query is right — answer for what was "
-            + "queried, and never say data is missing merely because the wording implies a period "
-            + "the query did not ask for. "
-            + "When the result set is empty, say why rather than only that it is. Compare the "
-            + "period asked for against the coverage below: if it falls outside what the platform "
-            + "holds, say so and give the range that is held — a reader cannot otherwise tell "
-            + "'we never collected this' from 'this period is before the series existed'. If the "
-            + "period IS covered and the result is still empty, say that plainly instead; do not "
-            + "invent a coverage explanation for it.";
+            + "disagree, the query is right — answer for what was queried, and never say data is "
+            + "missing merely because the wording implies a period the query did not ask for. "
+            + "When there are no rows, say why and not only that there are none: if the period "
+            + "queried falls outside the coverage below, say so and give the range that is held — "
+            + "a reader cannot otherwise tell 'we never collected this' from 'this period is "
+            + "before the series existed'. If the period IS covered and the result is still empty, "
+            + "say that plainly instead; do not invent a coverage explanation for it.";
 
         var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\n"
             + $"Parameters bound to it (JSON): {JsonSerializer.Serialize(parameters)}\n\n"
             + $"{coverage}\n"
-            + $"Results (JSON): {resultsJson}";
+            + $"Results: {resultsJson}";
 
         var stopwatch = Stopwatch.StartNew();
         var response = await SendAsync(
@@ -281,19 +295,25 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
     }
 
     /// <summary>
-    /// Turns earlier exchanges into the alternating user/assistant messages a chat model already
-    /// understands.
+    /// Turns earlier exchanges into messages: the most recent few as the alternating user/assistant
+    /// pairs a chat model already understands, and anything older as one summary line each.
     /// </summary>
     /// <remarks>
-    /// Replayed as real conversation turns rather than summarised into the system prompt, because
-    /// the assistant half is then literally the JSON the model produced last time. Every prior turn
-    /// therefore doubles as a worked example in exactly the format being demanded — context and
-    /// few-shot in one — where a prose digest ("earlier they asked about 2022") would supply the
-    /// context and quietly drop the demonstration.
+    /// The recent turns are replayed whole rather than described, because the assistant half is then
+    /// literally the JSON the model produced last time. Each one doubles as a worked example in
+    /// exactly the format being demanded — context and few-shot in one — where a prose digest
+    /// ("earlier they asked about 2022") would supply the context and quietly drop the
+    /// demonstration. The parameters are replayed with the statement, and they carry the weight:
+    /// "the year before that" is answerable only because <c>@year: 2022</c> is sitting in the turn
+    /// above, and a statement shown with its placeholders still unbound would resolve to nothing.
     /// <para>
-    /// The parameters are replayed with the statement, and they carry the weight: "the year before
-    /// that" is answerable only because <c>@year: 2022</c> is sitting in the turn above, and a
-    /// statement shown with its placeholders still unbound would resolve to nothing.
+    /// Older turns are summarised instead, because the demonstration stops paying for itself long
+    /// before the reference does. What a follow-up ever reaches back for is the subject and the
+    /// period — which view, which year — and those are a few tokens each, where the statements they
+    /// came from are hundreds: a nested LAG query costs as much to replay as a third of the schema.
+    /// Two turns of few-shot is already more than any model needs to learn a JSON shape it was also
+    /// handed a specification for, and the sixth-oldest statement teaches it nothing the newest one
+    /// does not. See <see cref="AssistantOptions.VerbatimHistoryTurns"/>.
     /// </para>
     /// <para>
     /// Note that history is replayed to whichever model is answering now, including one that did
@@ -302,27 +322,109 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
     /// worked example a strong model left behind is, if anything, worth more to a weaker one.
     /// </para>
     /// </remarks>
-    private static IReadOnlyList<ChatMessage> ReplayHistory(IReadOnlyList<ConversationTurn> history)
+    private IReadOnlyList<ChatMessage> ReplayHistory(IReadOnlyList<ConversationTurn> history)
     {
         if (history.Count == 0)
         {
             return [];
         }
 
-        var messages = new List<ChatMessage>(history.Count * 2);
+        var verbatim = Math.Clamp(_options.VerbatimHistoryTurns, 0, history.Count);
+        var summarised = history.Count - verbatim;
 
-        foreach (var turn in history)
+        var messages = new List<ChatMessage>(verbatim * 2 + 1);
+
+        if (summarised > 0)
         {
+            messages.Add(new ChatMessage("system", Digest(history, summarised)));
+        }
+
+        for (var i = summarised; i < history.Count; i++)
+        {
+            var turn = history[i];
+
             messages.Add(new ChatMessage("user", turn.Question));
             messages.Add(new ChatMessage("assistant", JsonSerializer.Serialize(new
             {
-                sql = turn.Sql,
+                sql = Collapse(turn.Sql),
                 parameters = turn.Parameters
             })));
         }
 
         return messages;
     }
+
+    /// <summary>
+    /// The oldest <paramref name="count"/> turns as one line each: what was asked, which views
+    /// answered it, and what the statement was bound to.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not the statement. A reference like "that year" or "the same for SOFR" resolves
+    /// against the subject and the period, and both survive here — the view names say which series,
+    /// the bound values say which period. What is dropped is the SELECT list, the joins and the
+    /// window functions, which are the expensive part of a statement and the part no follow-up ever
+    /// points at.
+    /// <para>
+    /// It stays subject to the same rule as the verbatim replay, and for the same reason: no figure
+    /// from any result set appears here, only what was asked and what was bound. A model that can
+    /// see last turn's answer can satisfy this turn's follow-up without querying anything.
+    /// </para>
+    /// </remarks>
+    private static string Digest(IReadOnlyList<ConversationTurn> history, int count)
+    {
+        var builder = new StringBuilder(
+            "Earlier turns of this conversation, oldest first, summarised — the question, the "
+            + "view(s) that answered it, and the values it was bound to. Use them to resolve a "
+            + "reference; the statements themselves are not repeated.\n");
+
+        for (var i = 0; i < count; i++)
+        {
+            var turn = history[i];
+
+            builder.Append("- \"").Append(turn.Question).Append('"');
+
+            var views = ViewsIn(turn.Sql);
+
+            if (views.Length > 0)
+            {
+                builder.Append(" → ").Append(string.Join(", ", views));
+            }
+
+            if (turn.Parameters.Count > 0)
+            {
+                builder.Append(" [")
+                    .Append(string.Join(", ", turn.Parameters.Select(p => $"{p.Key}={p.Value}")))
+                    .Append(']');
+            }
+
+            builder.AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>Every distinct <c>analytics.*</c> object a statement names, in the order it names them.</summary>
+    private static string[] ViewsIn(string sql) =>
+        AnalyticsObject.Matches(sql)
+            .Select(m => m.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private static readonly Regex AnalyticsObject =
+        new(@"analytics\.\w+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// A statement with its formatting whitespace collapsed to single spaces.
+    /// </summary>
+    /// <remarks>
+    /// Only for the replayed copy — the stored statement keeps whatever the model wrote, because
+    /// that is what the audit record is for. A model that indents its SQL over eight lines pays for
+    /// that indentation again on every subsequent question of the session, and the line breaks
+    /// carry nothing the model needs to resolve a reference against.
+    /// </remarks>
+    private static string Collapse(string sql) => Whitespace.Replace(sql, " ").Trim();
+
+    private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled);
 
     private async Task<(string Text, int? PromptTokens, int? CompletionTokens, bool Truncated)> SendAsync(
         Provider provider,
@@ -545,9 +647,13 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
             RequiresApiKey: true,
             ApiKeySetting: $"{AssistantOptions.SectionName}:ApiKey",
 
-            // Never sent to the hosted gateway. It is not a reasoning model, and an OpenAI-shaped
-            // API may reject a parameter it does not know rather than ignore it.
-            ReasoningEffort: null)
+            // Empty by default, which omits the field: the configured model is not a reasoning one,
+            // and an OpenAI-shaped API may reject a parameter it does not know rather than ignore
+            // it. Point BaseUrl at a gateway whose model does think and this is the setting that
+            // stops it — see AssistantOptions.ReasoningEffort.
+            ReasoningEffort: string.IsNullOrWhiteSpace(_options.ReasoningEffort)
+                ? null
+                : _options.ReasoningEffort)
     };
 
     /// <summary>

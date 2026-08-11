@@ -294,6 +294,27 @@ public class ChatCompletionsNlToSqlClientTests
         Assert.Equal("What was CPI in June?", messages[1].GetProperty("content").GetString());
     }
 
+    [Fact]
+    public async Task PutsEverythingStableAtTheFrontOfTheSystemPromptAndTheSchemaLast()
+    {
+        // Both providers reuse a prompt by its prefix and stop at the first byte that differs: a
+        // hosted gateway bills a cached prefix at a fraction of the input rate, and a local server
+        // can skip re-reading a prefix whose KV cache it still holds — which on a 2B model on a CPU
+        // is most of the wait. The schema context ends with today's date and the coverage window,
+        // the only part of the prompt that moves, so it goes last and everything fixed goes ahead of
+        // it. With the date in the middle, everything after it was re-read on every question.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler);
+
+        await client.GenerateSqlAsync("What was CPI in June?", SchemaContext, [], Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var system = doc.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
+
+        Assert.StartsWith("Respond with JSON only", system);
+        Assert.EndsWith(SchemaContext, system);
+    }
+
     // ------------------------------------------------------- conversation history
 
     [Fact]
@@ -395,6 +416,131 @@ public class ChatCompletionsNlToSqlClientTests
 
         Assert.DoesNotContain("292.655", handler.LastRequestBody!);
     }
+
+    [Fact]
+    public async Task SummarisesTurnsOlderThanTheVerbatimWindowInsteadOfReplayingThem()
+    {
+        // The prompt cost of a conversation is almost all statement. A nested LAG query runs to
+        // several hundred tokens, and every later question of the session used to pay for every
+        // earlier one again — so what a follow-up actually reaches back for is separated out and
+        // kept, and the statements it does not reach for are dropped.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler, verbatimHistoryTurns: 2);
+
+        await client.GenerateSqlAsync("and the year before that", SchemaContext, FourTurns, Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var messages = doc.RootElement.GetProperty("messages");
+
+        // schema, digest, then two full exchanges, then the question.
+        Assert.Equal(7, messages.GetArrayLength());
+
+        var digest = messages[1];
+        Assert.Equal("system", digest.GetProperty("role").GetString());
+
+        var text = digest.GetProperty("content").GetString()!;
+
+        // What survives compression is the referent: which question, which series, which period.
+        Assert.Contains("what is the average cpi of 2019", text);
+        Assert.Contains("analytics.vw_CpiAnnual", text);
+        Assert.Contains("@year=2019", text);
+
+        // What does not is the statement it came from.
+        Assert.DoesNotContain("SELECT", text);
+    }
+
+    [Fact]
+    public async Task StillReplaysTheMostRecentTurnsInFull()
+    {
+        // The recent ones do a second job the digest cannot: being literally the JSON the model
+        // produced last time, they demonstrate the output format as well as supplying the referent.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler, verbatimHistoryTurns: 2);
+
+        await client.GenerateSqlAsync("and the year before that", SchemaContext, FourTurns, Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var messages = doc.RootElement.GetProperty("messages");
+
+        Assert.Equal("what is the average cpi of 2021", messages[2].GetProperty("content").GetString());
+
+        using var replayed = JsonDocument.Parse(messages[3].GetProperty("content").GetString()!);
+
+        Assert.Contains("vw_CpiAnnual", replayed.RootElement.GetProperty("sql").GetString());
+        Assert.Equal(2021, replayed.RootElement.GetProperty("parameters").GetProperty("@year").GetInt32());
+    }
+
+    [Fact]
+    public async Task NeverSummarisesAConversationShorterThanTheVerbatimWindow()
+    {
+        // Two turns and a window of two is every turn replayed whole, and no digest message at all
+        // — an empty preamble saying nothing was omitted is pure cost.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler, verbatimHistoryTurns: 2);
+
+        await client.GenerateSqlAsync(
+            "and the year before that", SchemaContext, FourTurns[2..], Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var messages = doc.RootElement.GetProperty("messages");
+
+        // schema, two full exchanges, the question — and nothing between the schema and the first
+        // of them.
+        Assert.Equal(6, messages.GetArrayLength());
+        Assert.Equal("user", messages[1].GetProperty("role").GetString());
+    }
+
+    [Fact]
+    public async Task ReplaysEveryTurnWholeWhenConfiguredTo()
+    {
+        // The setting turned off, which is the behaviour this replaced. Kept reachable because the
+        // trade is a judgement about how far back a demonstration is worth paying for, not a fact.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler, verbatimHistoryTurns: 20);
+
+        await client.GenerateSqlAsync("and the year before that", SchemaContext, FourTurns, Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+
+        Assert.Equal(10, doc.RootElement.GetProperty("messages").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task CollapsesTheFormattingWhitespaceOutOfAReplayedStatement()
+    {
+        // A model that indents its SQL over eight lines otherwise charges for that indentation
+        // again on every later question of the session, and the line breaks resolve nothing.
+        var handler = new CapturingHandler(Completion("{\"sql\": null}"));
+        var client = ClientOver(handler);
+
+        ConversationTurn[] history =
+        [
+            new("what is the average cpi of 2022",
+                "SELECT AnnualValue\n    FROM analytics.vw_CpiAnnual\n    WHERE ReferenceYear = @year",
+                new Dictionary<string, object?> { ["@year"] = 2022L })
+        ];
+
+        await client.GenerateSqlAsync("and the year before that", SchemaContext, history, Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        using var replayed = JsonDocument.Parse(
+            doc.RootElement.GetProperty("messages")[2].GetProperty("content").GetString()!);
+
+        Assert.Equal(
+            "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+            replayed.RootElement.GetProperty("sql").GetString());
+    }
+
+    /// <summary>Four turns of one conversation, oldest first, each naming its own year.</summary>
+    private static readonly ConversationTurn[] FourTurns =
+    [
+        Turn(2019), Turn(2020), Turn(2021), Turn(2022)
+    ];
+
+    private static ConversationTurn Turn(int year) =>
+        new($"what is the average cpi of {year}",
+            "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+            new Dictionary<string, object?> { ["@year"] = (long)year });
 
     [Fact]
     public async Task AsksForDeterministicJsonWhenGeneratingSql()
@@ -836,6 +982,23 @@ public class ChatCompletionsNlToSqlClientTests
     }
 
     [Fact]
+    public async Task SendsReasoningEffortToTheHostedGatewayWhenOneIsConfigured()
+    {
+        // For the deployment that points BaseUrl at a gateway whose model does think. Thinking
+        // tokens are billed like any other and nothing in this pipeline benefits from them: the
+        // question arrives with the schema, the rules and four worked examples in front of it, and
+        // the reply is one statement in a fixed shape.
+        var handler = new CapturingHandler(Completion("""{"sql": null}"""));
+        var client = ClientOver(handler, cloudReasoningEffort: "none");
+
+        await client.GenerateSqlAsync("q", SchemaContext, [], Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+
+        Assert.Equal("none", doc.RootElement.GetProperty("reasoning_effort").GetString());
+    }
+
+    [Fact]
     public async Task OmitsReasoningEffortWhenTheLocalServerIsConfiguredWithout()
     {
         // A local server whose model does not reason has no use for it, and emptying the setting
@@ -1076,7 +1239,9 @@ public class ChatCompletionsNlToSqlClientTests
         string localReasoningEffort = "none",
         int cloudTimeoutSeconds = 30,
         string localApi = "Ollama",
-        int? localContextTokens = 16384)
+        int? localContextTokens = 16384,
+        int verbatimHistoryTurns = 2,
+        string cloudReasoningEffort = "")
     {
         var options = Options.Create(new AssistantOptions
         {
@@ -1084,6 +1249,8 @@ public class ChatCompletionsNlToSqlClientTests
             Model = "deepseek-chat",
             BaseUrl = "https://api.deepseek.test/",
             RequestTimeoutSeconds = cloudTimeoutSeconds,
+            VerbatimHistoryTurns = verbatimHistoryTurns,
+            ReasoningEffort = cloudReasoningEffort,
             Local = new LocalModelOptions
             {
                 ApiKey = localApiKey,

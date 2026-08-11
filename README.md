@@ -92,12 +92,16 @@ ollama serve
 No server-side configuration. The API talks to Ollama's native `/api/chat` specifically so
 it can set the context window per request (`Assistant:Local:ContextTokens`, default 16384).
 That is not a tuning detail — Ollama loads a model at **4096 tokens** by default and the
-schema prompt alone is roughly 3,900, leaving about 200 for the answer, so any longer query
-used to be cut off mid-JSON and recorded as `RejectedUnreadableResponse` after a wait of
-minutes. Measured on one question and one model, changing only this: at 4096 the reply
-stopped on `length` with the token total pinned at exactly 4096 and would not parse; at
-16384 it finished and parsed. Ollama's *OpenAI-compatible* endpoint accepts the same
+schema prompt alone was roughly 3,900 at the time, leaving about 200 for the answer, so any
+longer query used to be cut off mid-JSON and recorded as `RejectedUnreadableResponse` after
+a wait of minutes. Measured on one question and one model, changing only this: at 4096 the
+reply stopped on `length` with the token total pinned at exactly 4096 and would not parse;
+at 16384 it finished and parsed. Ollama's *OpenAI-compatible* endpoint accepts the same
 `options.num_ctx` and silently ignores it, which is why the native API is used instead.
+
+The prompt has since been trimmed to roughly 3,300 tokens and the conversation replayed
+with it compressed (see [Prompt size](#prompt-size)), which widens the same margin rather
+than replacing it: a long answer on a long conversation still needs the larger window.
 
 Point `Assistant:Local` at another OpenAI-compatible server (llama.cpp, LM Studio, vLLM) by
 setting `Api` to `OpenAi`; its context then has to be raised on the server, since that
@@ -107,6 +111,36 @@ Expect it to be slow — minutes per question on a CPU, mostly spent reading the
 to write worse SQL than the hosted model. Nothing leaves the machine and nothing is billed,
 which is the trade. Leave Ollama off entirely and the cloud model, which is the default, is
 unaffected.
+
+### Prompt size
+
+Every question costs two model calls — one to write the SQL, one to describe the result —
+and each carries the schema, the conversation so far and, for the second, the rows that came
+back. That total is billed at the hosted gateway and competes for the context window at the
+local one, where running out of room is not an expense but a failed answer. Four things keep
+it down, none of which changes what the assistant can answer:
+
+| | What it does | Setting |
+| --- | --- | --- |
+| **Schema prompt** | States the rules and worked examples the model needs without the prose explaining *why* each exists — that reasoning lives in the source comments and git history, where a reader can reach it and the model does not have to pay for it. Every fact, exact value and example survives. | — |
+| **Conversation** | The two most recent turns are replayed whole; older ones are compressed to a line each — the question, the views that answered it, the values it was bound to. That is everything a follow-up like *"and the year before that?"* resolves against; what is dropped is the statement, which is the expensive part and the part nothing points back at. | `Assistant:VerbatimHistoryTurns` |
+| **Result set** | Sent columnar — names once, then a positional array per row — instead of repeating every column name on every row. A result over 60 rows is *described* rather than listed: min, max and mean per column computed across every row, plus the five at each end. That one is accuracy before economy — a model shown the first 60 days of a year of SOFR and asked how far the rate moved answers for 60 days, confidently and wrongly, where a statistic over the whole result is exact however long the series is. The browser still receives every row, keyed as before. | `Assistant:MaxSummaryRows` |
+| **Reasoning** | Off. The local model would otherwise spend its entire budget deliberating and return nothing; the hosted one has the setting available for a gateway whose model thinks, since thinking tokens are billed and nothing here benefits from them. | `Assistant:ReasoningEffort`, `Assistant:Local:ReasoningEffort` |
+| **Prompt order** | Everything fixed — the output contract, the views, the rules and examples — sits at the front, and the only part that moves, today's date and the coverage window, at the very end. Both providers reuse a prompt by its prefix and stop at the first byte that differs, so this leaves about 2,700 tokens reusable and roughly 200 that are not. A hosted gateway bills a cached prefix at a fraction of the input rate; a local server can skip re-reading one whose KV cache it still holds, which on a CPU is most of the wait. | — |
+| **Coverage window** | Sent to the answer step only when the result is empty, which is the only case it explains. Saves a database round trip as well as the tokens. | — |
+
+Measured against the audit log's own token counts — a greeting costs one model call and
+nothing else, so it reads the schema prompt directly — this text runs at about 3.3 characters
+per token rather than the 4 a prose estimate assumes. On that basis a greeting or other short
+turn went from about 4,320 tokens to 3,600, and a follow-up several turns into a conversation
+over a result of a few hundred rows from about 13,200 to 3,900.
+
+Below roughly 3,600 tokens a question there is little left to take: the views, the rules and
+the worked examples are ~3,300 of it, they are re-sent by definition, and every line of them
+was added because the model got something wrong without it. The one remaining idea is not to
+send them at all when the question plainly is not a data question — a greeting currently pays
+the full schema prompt to be classified as a greeting — which trades a cheap pre-filter
+against the risk of misreading a real question as chatter.
 
 ## Deviations from the SOW
 

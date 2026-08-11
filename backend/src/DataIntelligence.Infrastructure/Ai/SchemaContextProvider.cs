@@ -34,6 +34,24 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
     private readonly SemaphoreSlim _gate = new(1, 1);
     private string? _structure;
 
+    /// <summary>How long a coverage reading is reused before it is read again.</summary>
+    /// <remarks>
+    /// Short, because this is not really a cache of anything slow — it is there so that one question
+    /// costs one reading. The coverage window goes into the prompt on every question, and again into
+    /// the summary prompt when a result comes back empty, and those two used to be separate round
+    /// trips for an answer that cannot have changed between them.
+    /// <para>
+    /// A minute is chosen to be shorter than anything that could matter. Coverage moves when the
+    /// collector writes a new period, which is a daily event at most, so a reading a few seconds old
+    /// is the same reading — while a longer window would start to mean the assistant describing
+    /// yesterday's holdings after this morning's collection, for no gain over a minute.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan CoverageFreshness = TimeSpan.FromMinutes(1);
+
+    private IReadOnlyList<(string Label, DateOnly Earliest, DateOnly Latest)>? _coverage;
+    private DateTimeOffset _coverageReadAt;
+
     public SchemaContextProvider(IConfiguration configuration, TimeProvider timeProvider)
     {
         _connectionString = configuration.GetConnectionString(DependencyInjection.ConnectionStringName)
@@ -138,24 +156,17 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
 
         var builder = new StringBuilder();
         builder.AppendLine();
-        builder.AppendLine();
         builder.Append("Today's date is ").Append(today.ToString("yyyy-MM-dd")).AppendLine(" (Pakistan Standard Time, UTC+05:00).");
         builder.AppendLine(
             "Resolve every relative date against it — \"last month\", \"this year\", \"the last 6 "
-            + "months\", \"year to date\" — and write the resulting dates into the query as "
-            + "parameters. Never ask the user which dates they meant.");
-        builder.AppendLine();
-        builder.AppendLine(
-            "Weeks have no agreed start, so use these definitions rather than deliberating: "
-            + "\"this week\" and \"the past week\" mean the 7 days ending today, inclusive; "
-            + "\"last week\" means the 7 days before those. A rolling window is what someone "
-            + "asking \"did anything fail this week\" wants, and it avoids a Monday-or-Sunday "
-            + "judgement the data cannot settle. Apply the same rule to \"this fortnight\" and "
-            + "\"the last N weeks\": N*7 days ending today.");
-        builder.AppendLine();
+            + "months\", \"year to date\" — and write the resulting dates in as parameters; never "
+            + "ask which dates were meant. Weeks are rolling, not calendar: \"this week\"/\"the "
+            + "past week\" = the 7 days ending today inclusive, \"last week\" = the 7 before "
+            + "those, \"the last N weeks\" = N*7 days ending today.");
 
         if (coverage.Count > 0)
         {
+            builder.AppendLine();
             builder.AppendLine("What the database currently holds:");
 
             foreach (var (label, earliest, latest) in coverage)
@@ -165,12 +176,10 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
                     .Append(latest.ToString("yyyy-MM-dd")).AppendLine();
             }
 
-            builder.AppendLine();
             builder.AppendLine(
-                "A publisher releases in arrears, so the newest figure is normally older than "
-                + "today. If a relative range falls partly or wholly outside what is held, still "
-                + "write the query for the range asked for — an empty or short result is the "
-                + "honest answer, and inventing a different range to fill it is not.");
+                "Publishers release in arrears, so the newest figure is normally older than today. "
+                + "If a range falls partly or wholly outside what is held, still query the range "
+                + "asked for — a short or empty result is the honest answer.");
         }
 
         return builder.ToString();
@@ -183,15 +192,31 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         ("SOFR (analytics.vw_Sofr, EffectiveDate)", "analytics.vw_Sofr", "EffectiveDate"),
     ];
 
-    /// <summary>The first and last date held per dataset.</summary>
+    /// <summary>
+    /// The first and last date held per dataset, from the last reading if it is still fresh.
+    /// </summary>
     /// <remarks>
     /// One query per dataset rather than a single UNION, so a view that is missing costs its own
     /// line and not the whole block. A partially deployed database should still be able to tell
     /// the model what it does have.
+    /// <para>
+    /// Unsynchronised, unlike the structure cache above. Two questions arriving together may both
+    /// read, and the loser's reading is discarded — which costs one round trip and cannot produce a
+    /// wrong answer, since both read the same rows. A lock here would serialise every question
+    /// behind a query that takes milliseconds to save a duplicate of itself. The reference is
+    /// published after the timestamp is read and swapped whole, so a reader sees either the previous
+    /// list or the new one, never a half-built one.
+    /// </para>
     /// </remarks>
     private async Task<IReadOnlyList<(string Label, DateOnly Earliest, DateOnly Latest)>>
         ReadCoverageAsync(CancellationToken cancellationToken)
     {
+        if (_coverage is { } cached
+            && _timeProvider.GetUtcNow() - _coverageReadAt < CoverageFreshness)
+        {
+            return cached;
+        }
+
         var coverage = new List<(string, DateOnly, DateOnly)>();
 
         await using var connection = new SqlConnection(_connectionString);
@@ -226,6 +251,9 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
             }
         }
 
+        _coverageReadAt = _timeProvider.GetUtcNow();
+        _coverage = coverage;
+
         return coverage;
     }
 
@@ -254,10 +282,9 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
             {
                 builder.Append("    -- ").AppendLine(note);
             }
-
-            builder.AppendLine();
         }
 
+        builder.AppendLine();
         builder.Append(Semantics);
 
         return builder.ToString();
@@ -325,147 +352,120 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
     /// Everything column metadata cannot say. Every line here was added because the model got
     /// something wrong without it.
     /// </summary>
+    /// <remarks>
+    /// Written tersely on purpose. This block is the largest part of every prompt and is re-sent on
+    /// every question, so its length is a per-question cost paid by both providers — tokens at the
+    /// hosted gateway, and context window at the local model, where it is the difference between a
+    /// reply that fits and one that stops mid-JSON. What was cut in getting it here was the prose
+    /// explaining *why* each rule exists, which is a reader's need and not the model's; every fact,
+    /// every exact value and every worked example survived, because those are what changed the
+    /// output. The reasoning behind each line is preserved in git history rather than in the prompt.
+    /// </remarks>
     private const string Semantics = """
-        What the words in a question map to. These are the terms people actually ask in, and none
-        of them appear as a column name — without the mapping the question looks unanswerable and
-        gets refused:
-
+        What the words in a question map to. None of these appear as a column name, and without the
+        mapping the question looks unanswerable and gets refused:
         - "inflation", "inflation rate", "how much have prices risen" → YearOverYearPct in
-          analytics.vw_CpiMonthlyChange. Month-over-month inflation is MonthOverMonthPct.
+          analytics.vw_CpiMonthlyChange; month-over-month inflation is MonthOverMonthPct.
         - "cost of living", "price level", "CPI" → IndexValue in analytics.vw_Cpi.
         - "interest rate", "overnight rate", "borrowing rate", "repo rate" → RatePercent in
           analytics.vw_Sofr.
         - "trading volume", "how much was borrowed" → VolumeUsdBillions in analytics.vw_Sofr.
-        - "is collection working", "did anything fail", "data freshness" →
-          analytics.vw_CollectionHealth.
-        - "latest", "most recent", "current" for a single headline figure →
-          analytics.vw_LatestIndicator.
+        - "is collection working", "did anything fail", "data freshness" → analytics.vw_CollectionHealth.
+        - "latest", "most recent", "current" for one headline figure → analytics.vw_LatestIndicator.
 
-        Column values — use these exactly. Guessing a plausible-looking code returns zero rows,
-        which reads as "no data" when the data is in fact there:
+        Column values — exact. A plausible-looking guess returns zero rows, which reads as "no data"
+        when the data is there:
+        - PeriodCode: 'M01'..'M12' = January..December, 'M13' = the annual average, 'S01'/'S02' =
+          the two half-years. NOT a date: June 2025 is 'M06', never '202506'.
+        - PeriodType: 'Month', 'Annual' or 'Semiannual'. RateType: 'SOFR'. IndicatorCode (in
+          vw_LatestIndicator): 'CPI' or 'SOFR'. SeriesCode: 'CUUR0000SA0' — the only CPI series, so
+          you rarely need to filter on it.
 
-        - PeriodCode is 'M01'..'M12' for January..December, 'M13' for the annual average, and
-          'S01'/'S02' for the two half-years. It is NOT a date: June 2025 is 'M06', never '202506'.
-        - PeriodType is 'Month', 'Annual' or 'Semiannual'.
-        - SeriesCode is 'CUUR0000SA0'. There is only one CPI series; you rarely need to filter on it.
-        - RateType is 'SOFR'.
-        - IndicatorCode in vw_LatestIndicator is 'CPI' or 'SOFR'.
+        Dates. Prefer ReferenceDate (CPI) and EffectiveDate (SOFR) over period codes; each period is
+        stored on its first day, so June 2025 CPI is ReferenceDate = '2025-06-01'. For a range use a
+        half-open window, >= the first day and < the first day of the next period — CPI stores one
+        row a month and SOFR one per business day, so BETWEEN with a guessed month-end silently
+        drops the 31st. "The average SOFR rate last month" is therefore SELECT AVG(RatePercent) FROM
+        analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to. Every view already
+        filters to the current vintage, so do not deduplicate revisions.
 
-        Prefer ReferenceDate (CPI) and EffectiveDate (SOFR) over period codes. Both are dates, and
-        each period is stored on the first day of the period it covers — so June 2025 CPI is
-        ReferenceDate = '2025-06-01'.
-
-        For a range, use a half-open window — >= the first day and < the first day of the next
-        period. It is the one form that is correct for both datasets: CPI stores one row on the
-        first of the month, while SOFR stores a row per business day, so BETWEEN with a guessed
-        month-end silently drops the 31st.
-
-        "The average SOFR rate last month" is therefore:
-        SELECT AVG(RatePercent) FROM analytics.vw_Sofr
-        WHERE EffectiveDate >= @from AND EffectiveDate < @to
-        with @from and @to as the first days of last month and this month.
-
-        Every view already filters to the current vintage, so do not try to deduplicate revisions.
-
-        The dialect is Microsoft SQL Server (T-SQL), which is not interchangeable with MySQL or
-        PostgreSQL:
-        - Row limits are 'SELECT TOP (n) ...'. There is no LIMIT clause; using one is a syntax error.
-        - Date arithmetic is DATEADD/DATEDIFF, not INTERVAL. Prefer resolving relative dates
-          yourself against today's date and passing them as parameters — a literal date in a
-          parameter is easier to review than DATEADD nested around GETDATE().
-        - Group a date column by month with DATEFROMPARTS(YEAR(c), MONTH(c), 1), not by a string.
-        - String concatenation is + or CONCAT(), not ||.
-
-        Earlier turns of this conversation, if any, appear above as user/assistant pairs, each
-        assistant turn being the JSON you produced for it. A follow-up is often unreadable on its
-        own — "and the year before that?", "what about SOFR?", "same thing for 2023" — and is
-        resolved against those turns. Read the referent out of the previous statement and its
-        parameters: after a query with @year = 2022, "the year before that" is 2021.
-
-        Two things follow from that, and they pull in opposite directions:
-        - Always write a fresh statement. The conversation is there to tell you what was meant, not
-          what the answer was. You are never shown the figures those earlier queries returned, and
-          you must not carry a number forward from one — every answer comes from a query run now.
-        - Only carry the reference forward, not the whole question. If a follow-up names its own
-          subject and period completely, treat it as a new question and ignore what came before.
-        - When a question refers to something the conversation does not contain — "the year before
-          that one" asked with no earlier turn to resolve it against — you cannot answer it. Return
-          "sql": null with "refusal": "unanswerable". Do not guess a period, and do not reply with a
-          question of your own: the shape above is the only reply that can be read, so a request for
-          clarification is received as a malfunction rather than as the reasonable question it is.
-
-        Questions about two datasets at once — "how do CPI and SOFR compare", "what is the
-        relation between inflation and interest rates in 2025", "did they move together" — are
-        answerable and must not be refused. Nothing forbids reading more than one view: join them
-        on a shared period. They are on different clocks, so the join needs a common grain, and
-        the month is the one that works — CPI has one row a month, SOFR has one per business day,
-        so SOFR must be averaged up to the month rather than CPI stretched down to the day.
-
-        Example — "What is the relation between CPI and SOFR for the year 2025?":
-        {"sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
-         "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
-         "explanation": "Puts year-over-year CPI change beside the monthly average SOFR rate for each month of 2025, by averaging SOFR to month starts and joining on the CPI reference month.",
-         "refusal": null}
-
-        Return the two series side by side per period and let the answer describe how they move.
-        Do not try to compute a correlation coefficient in SQL, and do not assert that one causes
-        the other — the data shows what they did, not why.
-
-        Questions about how a series CHANGED, rather than what it was, are answerable too — "which
-        month rose the most", "between which months did SOFR move the fastest", "when did CPI peak",
-        "biggest jump", "steepest fall". These need each period compared with the one before it,
-        which is what LAG does:
-
-            LAG(x) OVER (ORDER BY period)
-
-        Build them in layers, innermost first: aggregate to the grain you want, then LAG over that,
-        then order by the change and take the top row. SOFR is daily, so a question about months
-        needs the daily rows averaged to months before anything is compared.
-
-        Example — "Between which months is the rate of change of SOFR the greatest in 2025?":
-        {"sql": "SELECT TOP (1) DATEADD(month, -1, m.MonthStart) AS FromMonth, m.MonthStart AS ToMonth, m.PrevAvgRate, m.AvgRate, m.AvgRate - m.PrevAvgRate AS ChangeInPercentagePoints FROM (SELECT MonthStart, AvgRate, LAG(AvgRate) OVER (ORDER BY MonthStart) AS PrevAvgRate FROM (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRate FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS monthly) AS m WHERE m.PrevAvgRate IS NOT NULL ORDER BY ABS(m.AvgRate - m.PrevAvgRate) DESC",
-         "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
-         "explanation": "Averages SOFR to each month of 2025, compares each month with the one before it, and returns the single largest move together with both months and both rates.",
-         "refusal": null}
-
-        Note three things it does. It returns BOTH months and BOTH rates, not just the size of the
-        change — "between which months" is asking which two. It orders by ABS(...) because the
-        greatest change means the largest move in either direction; use a signed ORDER BY only when
-        the question says rise or fall specifically. And it drops the row where the previous value
-        is NULL, which is the first period in range and has nothing to be compared with.
+        The dialect is Microsoft SQL Server (T-SQL), not MySQL or PostgreSQL: row limits are
+        TOP (n) and there is no LIMIT clause; date arithmetic is DATEADD/DATEDIFF, not INTERVAL;
+        group a date column by month with DATEFROMPARTS(YEAR(c), MONTH(c), 1), never by a string;
+        concatenate with + or CONCAT(), not ||. Resolve relative dates yourself and pass them as
+        parameters rather than nesting DATEADD around GETDATE().
 
         Rules:
-        - Write exactly one SELECT statement. No comments, no semicolons, no other statement type.
-        - Never use a CTE. `WITH x AS (...) SELECT ...` is rejected before it runs: a statement has
-          to begin with SELECT, and the CTE's own name is not one of the views above. Nest the
-          query as a derived table — `FROM (SELECT ...) AS x` — which expresses exactly the same
-          thing and is accepted. Window functions (LAG, LEAD, ROW_NUMBER, SUM OVER) are fine
-          anywhere, including inside a derived table.
-        - Prefer TOP (n) with ORDER BY when the question asks for one period — "which month",
-          "when was it highest" — rather than returning every period and describing the winner.
-        - Never reference any table or view not listed above.
-        - If the question cannot be answered from these views, respond with SQL: null.
+        - Exactly one SELECT statement. No comments, no semicolons, no other statement type.
+        - Never a CTE: `WITH x AS (...) SELECT ...` is rejected before it runs. Nest it as a derived
+          table — `FROM (SELECT ...) AS x` — which says the same thing and is accepted. Window
+          functions (LAG, LEAD, ROW_NUMBER, SUM OVER) are fine anywhere, derived tables included.
+        - Use TOP (n) with ORDER BY when the question asks for one period ("which month", "when was
+          it highest") rather than returning every period and describing the winner.
+        - Never reference a table or view not listed above.
+        - If these views cannot answer the question, return "sql": null.
 
-        Example — "What was CPI in June 2025?":
+        Follow-ups. Earlier turns of this conversation appear above as user/assistant pairs, each
+        assistant turn being the JSON you produced; turns older than those may be compressed into a
+        single summary line each. A follow-up is often unreadable alone — "and the year before
+        that?", "what about SOFR?", "same thing for 2023" — so read its referent out of the earlier
+        statements and their parameters: after a query with @year = 2022, "the year before that" is
+        2021. Then:
+        - Always write a fresh statement. You are never shown the figures those queries returned and
+          must never carry a number forward — every answer comes from a query run now.
+        - Carry the reference only. A follow-up that names its own subject and period completely is
+          a new question; ignore what came before.
+        - If the referent is not in the conversation at all, return "sql": null with "refusal":
+          "unanswerable". Do not guess a period, and do not reply with a question of your own — the
+          JSON shape is the only reply that can be read, so a request for clarification arrives as a
+          malfunction rather than as the reasonable question it is.
+
+        Two datasets at once — "how do CPI and SOFR compare", "did they move together", "the
+        relation between inflation and interest rates in 2025" — is answerable and must not be
+        refused. Join them at month grain, which means averaging SOFR up to the month rather than
+        stretching CPI down to the day. Return both series side by side per period and let the
+        answer describe how they move; do not compute a correlation coefficient in SQL, and do not
+        assert that one causes the other.
+
+        How a series CHANGED — "which month rose the most", "when did CPI peak", "biggest jump",
+        "steepest fall" — needs each period compared with the one before it: LAG(x) OVER (ORDER BY
+        period). Build it in layers, innermost first: aggregate to the grain, LAG over that, order by
+        the change, take the top row. Return BOTH periods and BOTH values, not just the size of the
+        move. Order by ABS(...) for "the greatest change" in either direction, and by a signed
+        expression only when the question says rise or fall specifically. Drop rows where the
+        previous value is NULL — the first period in range has nothing to compare against.
+
+        A question about prices, inflation, rates or collection health over any window is answerable
+        by definition: how many rows come back is a fact about the data, not a reason to decline. Do
+        not refuse because a range is recent and CPI is published in arrears, do not shorten a window
+        to one you expect to be populated, and do not ask which dates were meant. Reserve
+        "unanswerable" for a subject these views do not hold at all — unemployment, GDP, equity
+        prices, or a country other than the US.
+
+        Examples. Resolve your own dates from today's date below rather than copying these.
+
+        "What was CPI in June 2025?"
         {"sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate = @month",
          "parameters": {"@month": "2025-06-01"},
          "explanation": "Reads the current monthly CPI index value for the given month from vw_Cpi.",
          "refusal": null}
 
-        Example — "What was the year over year inflation rate for the last 3 months?". The window
-        below was resolved from a today of 2025-09-14; resolve yours from the date you were given
-        above rather than copying these:
+        "What was the year over year inflation rate for the last 3 months?" (asked on 2025-09-14)
         {"sql": "SELECT ReferenceDate, YearOverYearPct FROM analytics.vw_CpiMonthlyChange WHERE ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate",
          "parameters": {"@from": "2025-06-01", "@to": "2025-09-01"},
          "explanation": "Reads the year-over-year CPI change for each month in the requested window from vw_CpiMonthlyChange.",
          "refusal": null}
 
-        Note what the second example does NOT do. It does not refuse because the range is recent
-        and CPI is published in arrears, it does not shorten the window to one it expects to be
-        populated, and it does not ask which months were meant. A question about inflation,
-        prices, rates or collection health over any window is answerable by definition — the views
-        above cover those subjects, and how many rows come back is a fact about the data, not a
-        reason to decline. Reserve "unanswerable" for a subject these views do not hold at all,
-        such as unemployment, GDP, equity prices or a country other than the US.
+        "What is the relation between CPI and SOFR for the year 2025?"
+        {"sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
+         "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
+         "explanation": "Puts year-over-year CPI change beside the monthly average SOFR rate for each month of 2025, by averaging SOFR to month starts and joining on the CPI reference month.",
+         "refusal": null}
+
+        "Between which months is the rate of change of SOFR the greatest in 2025?"
+        {"sql": "SELECT TOP (1) DATEADD(month, -1, m.MonthStart) AS FromMonth, m.MonthStart AS ToMonth, m.PrevAvgRate, m.AvgRate, m.AvgRate - m.PrevAvgRate AS ChangeInPercentagePoints FROM (SELECT MonthStart, AvgRate, LAG(AvgRate) OVER (ORDER BY MonthStart) AS PrevAvgRate FROM (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRate FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS monthly) AS m WHERE m.PrevAvgRate IS NOT NULL ORDER BY ABS(m.AvgRate - m.PrevAvgRate) DESC",
+         "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
+         "explanation": "Averages SOFR to each month of 2025, compares each month with the one before it, and returns the single largest move together with both months and both rates.",
+         "refusal": null}
         """;
 }

@@ -80,6 +80,69 @@ public sealed class AssistantOptions
     public int HistoryTurns { get; set; } = 6;
 
     /// <summary>
+    /// How many of those exchanges are replayed as their full statements. Anything older is
+    /// summarised to one line — the question, the views it read, and the values it was bound to.
+    /// </summary>
+    /// <remarks>
+    /// A replayed turn does two jobs, and they stop being worth the same after the second one. It
+    /// supplies the referent a follow-up needs — which series, which period — and it demonstrates
+    /// the output format, being literally the JSON the model produced. The referent survives the
+    /// summary; the demonstration does not, and does not need to: a model handed the format
+    /// specification and two worked examples learns nothing further from a sixth.
+    /// <para>
+    /// What it saves is the statements, which are the expensive half. A question answered with a
+    /// nested LAG query runs to several hundred tokens of SQL, and every later question in the
+    /// session used to pay for all of them again; the summary line for the same turn is a dozen or
+    /// so. Set this to <see cref="HistoryTurns"/> to replay everything as before.
+    /// </para>
+    /// </remarks>
+    [Range(0, 20)]
+    public int VerbatimHistoryTurns { get; set; } = 2;
+
+    /// <summary>
+    /// The length at which a result is described to the model rather than listed for it. The user
+    /// still sees every row that came back.
+    /// </summary>
+    /// <remarks>
+    /// At or under this, every row is handed over. Over it, the model gets min, max and mean per
+    /// column computed across <em>all</em> the rows, plus the five at each end — see
+    /// <c>ResultSetFormatter</c>.
+    /// <para>
+    /// The threshold exists for accuracy first. A statement may return up to
+    /// <c>SqlSafetyValidator.MaxRows</c>, and sending the first sixty of them is not a smaller
+    /// version of the truth: asked how far SOFR moved over a year, a model shown sixty days answers
+    /// for sixty days, and the real high is somewhere in the months it was not shown. The
+    /// statistics are exact however long the series is. The tokens saved are the smaller half of
+    /// the argument.
+    /// </para>
+    /// <para>
+    /// Sixty is chosen against what these questions actually want. Anything asking for a figure, an
+    /// average or an extreme is aggregated by the query itself and comes back as a handful of rows,
+    /// which are listed as they always were; what returns hundreds is a series, and a few sentences
+    /// about a series describe its shape rather than enumerate it. The cost of the choice is a
+    /// question that genuinely wants a long list read out — "every day SOFR was above 5%" — which
+    /// now gets a count, a range and both ends. Raise this where that is the common question.
+    /// </para>
+    /// </remarks>
+    [Range(1, 2000)]
+    public int MaxSummaryRows { get; set; } = 60;
+
+    /// <summary>
+    /// Sent to the hosted gateway as <c>reasoning_effort</c>. Empty — the default — omits the field.
+    /// </summary>
+    /// <remarks>
+    /// Empty rather than <c>"none"</c> because the configured model does not reason and an
+    /// OpenAI-shaped API is within its rights to reject a parameter it does not know. It exists for
+    /// the deployment that points <see cref="BaseUrl"/> at a gateway whose model does: thinking
+    /// tokens are billed like any other, and nothing in this pipeline benefits from them — the
+    /// question arrives with the schema, the rules and worked examples in front of it, and the reply
+    /// is a single statement in a fixed shape. The local model's equivalent is
+    /// <see cref="LocalModelOptions.ReasoningEffort"/>, where the same setting is not an economy but
+    /// the difference between answering and not.
+    /// </remarks>
+    public string ReasoningEffort { get; set; } = string.Empty;
+
+    /// <summary>
     /// The alternative to the hosted gateway: a model served on the machine the API runs on,
     /// selected per question with <c>AssistantModelChoice.Local</c>.
     /// </summary>

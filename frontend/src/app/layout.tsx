@@ -56,9 +56,9 @@ export default function RootLayout({
               <span className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
                 Data Intelligence
               </span>
-              <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+              {/* <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
                 Phase 4
-              </span>
+              </span> */}
             </Link>
             <div className="flex items-center gap-2">
               <SiteNav />

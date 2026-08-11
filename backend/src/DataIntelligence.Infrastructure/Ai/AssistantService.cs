@@ -147,6 +147,7 @@ public sealed class AssistantService : IAssistantService
     private readonly ReadOnlySqlExecutor _executor;
     private readonly TimeProvider _timeProvider;
     private readonly int _historyTurns;
+    private readonly int _maxSummaryRows;
 
     public AssistantService(
         DataIntelligenceDbContext db,
@@ -164,6 +165,7 @@ public sealed class AssistantService : IAssistantService
         _executor = executor;
         _timeProvider = timeProvider;
         _historyTurns = options.Value.HistoryTurns;
+        _maxSummaryRows = options.Value.MaxSummaryRows;
     }
 
     public async Task<AssistantAnswerDto> AskAsync(
@@ -328,8 +330,19 @@ public sealed class AssistantService : IAssistantService
         draft.ExecutionStatus = AssistantExecutionStatus.Succeeded;
         draft.ResultRowCount = execution.Rows!.Count;
 
-        var resultsJson = JsonSerializer.Serialize(execution.Rows);
-        var coverage = await _schemaContext.GetCoverageAsync(cancellationToken);
+        // Columnar, and capped — see ResultSetFormatter. The rows handed back to the browser below
+        // are the full set, unchanged: this shape exists for the model that has to describe them,
+        // and only for it.
+        var resultsJson = ResultSetFormatter.ToCompactJson(execution.Rows, _maxSummaryRows);
+
+        // Only when there is nothing to describe. Coverage exists to tell one empty result from
+        // another — "we never collected this" against "this period is before the series existed" —
+        // and against rows that did come back it answers a question nobody asked, in a prompt that
+        // is charged for every line. Fetching it costs a database round trip as well as the tokens,
+        // so the common case now pays neither.
+        var coverage = execution.Rows.Count == 0
+            ? await _schemaContext.GetCoverageAsync(cancellationToken)
+            : string.Empty;
 
         // The same model that wrote the statement summarises its results. Splitting the two would
         // make the recorded model name true of half the turn.
