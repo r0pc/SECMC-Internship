@@ -80,6 +80,23 @@ public sealed class AssistantService : IAssistantService
         + "try asking it again.";
 
     /// <summary>
+    /// What the assistant says when the model was cut off before it finished writing.
+    /// </summary>
+    /// <remarks>
+    /// Split from <see cref="ResponseUnreadable"/>, whose advice is wrong here in the way that
+    /// costs the most time: it says to try again, and trying again reproduces this exactly. The
+    /// model did nothing wrong and the question is fine — there was no room left to answer in, and
+    /// nothing the person asking can do will make room. So this one says what actually changes it,
+    /// and points at the other model as the thing to do meanwhile.
+    /// </remarks>
+    internal const string ResponseTruncated =
+        "That answer was cut off before it finished — the model ran out of room partway through "
+        + "writing the query. Asking again will hit the same limit, so this needs its context "
+        + "window raised (for a local model served by Ollama, start the server with "
+        + "OLLAMA_CONTEXT_LENGTH set well above the size of the schema prompt). In the meantime, "
+        + "the cloud model can answer this.";
+
+    /// <summary>
     /// What CPI, SOFR and this platform are — the answers to "what is X", as opposed to "what was
     /// X".
     /// </summary>
@@ -172,7 +189,12 @@ public sealed class AssistantService : IAssistantService
             AskedAtPkt = now,
             Question = request.Question,
             Outcome = AssistantValidationOutcome.Pending,
-            ClientIpHash = HashIp(clientIp)
+            ClientIpHash = HashIp(clientIp),
+
+            // Recorded with the question rather than with the answer, so a turn that crashes
+            // between the two still says which model was being asked when it did. That is the
+            // first thing anyone reading a run of failures wants to know.
+            ModelChoice = request.Model
         };
 
         // Logged before anything else can fail (FR-14). The turn is written as Pending and then
@@ -187,7 +209,7 @@ public sealed class AssistantService : IAssistantService
         var history = BuildHistory(turns, draft.AssistantQueryId);
 
         var generation = await _llm.GenerateSqlAsync(
-            request.Question, schemaContext, history, cancellationToken);
+            request.Question, schemaContext, history, request.Model, cancellationToken);
 
         draft.ModelName = generation.ModelName;
         draft.PromptTokens = generation.PromptTokens;
@@ -228,6 +250,16 @@ public sealed class AssistantService : IAssistantService
                     "The model's response could not be read as the JSON it was asked for.",
                     ResponseUnreadable),
 
+                // The same outcome as Unreadable, because in SQL terms it is the same thing: no
+                // statement came back. The detail is what differs, and it is the whole value —
+                // "could not be read" sends a reviewer looking for a model that ignores its output
+                // format, which is the one thing that is not wrong here.
+                NlRefusalKind.Truncated => (
+                    AssistantValidationOutcome.RejectedUnreadableResponse,
+                    "The model ran out of room and its reply stopped mid-sentence, so there was no "
+                    + "complete statement to read. Raise the context window for this model.",
+                    ResponseTruncated),
+
                 _ => (
                     AssistantValidationOutcome.RejectedNoSql,
                     "The model could not express this question against the published views.",
@@ -245,6 +277,13 @@ public sealed class AssistantService : IAssistantService
         var validation = _validator.Validate(generation.Sql, generation.Parameters);
         draft.Outcome = validation.Outcome;
         draft.ValidationDetail = validation.Detail;
+
+        // What the statement actually binds, which is not always what the model offered: a value
+        // supplied for a placeholder it then did not write is dropped rather than refused. Recorded
+        // in place of the model's list so the parameters shown beside an answer are the ones that
+        // produced it — see SqlValidationResult.BoundParameters.
+        var bound = validation.BoundParameters ?? generation.Parameters;
+        draft.Parameters = bound;
 
         if (!validation.IsApproved)
         {
@@ -269,7 +308,7 @@ public sealed class AssistantService : IAssistantService
 
         var executionStopwatch = Stopwatch.StartNew();
         var execution = await _executor.ExecuteAsync(
-            validation.NormalizedSql!, generation.Parameters, cancellationToken);
+            validation.NormalizedSql!, bound, cancellationToken);
         draft.ExecutionMs = (int)executionStopwatch.ElapsedMilliseconds;
 
         if (!execution.Succeeded)
@@ -292,9 +331,11 @@ public sealed class AssistantService : IAssistantService
         var resultsJson = JsonSerializer.Serialize(execution.Rows);
         var coverage = await _schemaContext.GetCoverageAsync(cancellationToken);
 
+        // The same model that wrote the statement summarises its results. Splitting the two would
+        // make the recorded model name true of half the turn.
         var summary = await _llm.SummariseResultsAsync(
-            request.Question, validation.NormalizedSql!, generation.Parameters, resultsJson,
-            coverage, cancellationToken);
+            request.Question, validation.NormalizedSql!, bound, resultsJson,
+            coverage, request.Model, cancellationToken);
 
         draft.Answer = summary.AnswerText;
 
@@ -492,7 +533,9 @@ public sealed class AssistantService : IAssistantService
 
         Explanation = t.Explanation,
         WasExecuted = t.WasExecuted,
-        ResultRowCount = t.ResultRowCount
+        ResultRowCount = t.ResultRowCount,
+        ModelChoice = t.ModelChoice,
+        ModelName = t.ModelName
     };
 
     /// <summary>
@@ -546,6 +589,7 @@ public sealed class AssistantService : IAssistantService
         ResultRowCount = t.ResultRowCount,
         ExecutionMs = t.ExecutionMs,
         AnswerText = t.AnswerText,
+        ModelChoice = t.ModelChoice,
         ModelName = t.ModelName,
         PromptTokens = t.PromptTokens,
         CompletionTokens = t.CompletionTokens,
@@ -758,7 +802,13 @@ public sealed class AssistantService : IAssistantService
         ExecutionStatus = draft.ExecutionStatus,
         AnswerText = draft.Answer ?? string.Empty,
         Rows = rows,
-        ResultRowCount = draft.ResultRowCount
+        ResultRowCount = draft.ResultRowCount,
+
+        // The choice is always known; the name only once the model has been reached. A turn that
+        // never got that far reports which model was asked and nothing about which one served it,
+        // because none did.
+        ModelChoice = draft.ModelChoice,
+        ModelName = draft.ModelName
     };
 
     /// <summary>
@@ -792,6 +842,7 @@ public sealed class AssistantService : IAssistantService
         public int? ExecutionMs { get; set; }
         public int? ResultRowCount { get; set; }
 
+        public required AssistantModelChoice ModelChoice { get; init; }
         public string? ModelName { get; set; }
         public int? PromptTokens { get; set; }
         public int? CompletionTokens { get; set; }
@@ -813,6 +864,7 @@ public sealed class AssistantService : IAssistantService
             ExecutionError = ExecutionError,
             ExecutionMs = ExecutionMs,
             ResultRowCount = ResultRowCount,
+            ModelChoice = ModelChoice,
             ModelName = ModelName,
             PromptTokens = PromptTokens,
             CompletionTokens = CompletionTokens,

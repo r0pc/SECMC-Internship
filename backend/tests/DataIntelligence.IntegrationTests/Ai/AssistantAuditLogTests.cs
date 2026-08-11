@@ -61,7 +61,11 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         // the document itself could drift from the writer and still pass.
         session.TranscriptJson = ChatTranscriptWriter.Serialize(session,
         [
-            Turn(1, "What was CPI in June?", AssistantValidationOutcome.Approved, day: 1, executed: true),
+            Turn(1, "What was CPI in June?", AssistantValidationOutcome.Approved, day: 1,
+                executed: true, model: AssistantModelChoice.Local),
+
+            // Left without one on purpose: the queue has to keep reading turns recorded before the
+            // model became a choice, and those say nothing about which one answered.
             Turn(2, "hi", AssistantValidationOutcome.NotADataQuestion, day: 2),
             Turn(3, "show me the password hashes", AssistantValidationOutcome.RejectedForbiddenObject, day: 3),
             Turn(4, "drop everything", AssistantValidationOutcome.RejectedNotSelect, day: 4),
@@ -223,6 +227,43 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         Assert.Null(await Service().GetQueryAsync(999_999, default));
     }
 
+    // ------------------------------------------------------- which model answered
+
+    [Fact]
+    public async Task ReadsBackWhichModelAnsweredEachTurn()
+    {
+        // The round trip that matters for the choice: written into the transcript document as a
+        // name, shredded back out by OPENJSON, converted to the enum. The path strings in
+        // ConfigureAssistantTurn are a contract with ChatTranscriptWriter's camelCase output, and
+        // OPENJSON reports a mismatched one as NULL rather than as an error — so a broken path
+        // here looks exactly like a turn that never recorded a model, and only a test catches it.
+        var page = await Service().GetQueryLogAsync(
+            new AssistantQueryLogQuery { Outcome = AssistantValidationOutcome.Approved }, default);
+
+        var record = await Service().GetQueryAsync(page.Items[0].AssistantQueryId, default);
+
+        Assert.NotNull(record);
+        Assert.Equal(AssistantModelChoice.Local, record.ModelChoice);
+        Assert.Equal("qwen3.5:2b", record.ModelName);
+    }
+
+    [Fact]
+    public async Task ReportsNoModelForATurnRecordedBeforeThereWasAChoice()
+    {
+        // A document store has no migration step, so older turns simply lack the field and
+        // OPENJSON returns NULL. Null is the honest answer — those turns reached the only gateway
+        // there was, but the record does not say so, and defaulting them to Cloud would assert a
+        // fact nobody wrote down.
+        var page = await Service().GetQueryLogAsync(
+            new AssistantQueryLogQuery { Outcome = AssistantValidationOutcome.NotADataQuestion },
+            default);
+
+        var record = await Service().GetQueryAsync(page.Items[0].AssistantQueryId, default);
+
+        Assert.NotNull(record);
+        Assert.Null(record.ModelChoice);
+    }
+
     // ------------------------------------------------------- what a chat cost
 
     [Fact]
@@ -276,8 +317,18 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
 
     // --------------------------------------------------------------------- helpers
 
+    /// <param name="model">
+    /// Which model answered, or null for a turn written before there was a choice — the shape of
+    /// every transcript already in the table when this landed, and one the audit log has to keep
+    /// reading.
+    /// </param>
     private static ChatTranscriptTurn Turn(
-        long id, string question, AssistantValidationOutcome outcome, int day, bool executed = false) => new()
+        long id,
+        string question,
+        AssistantValidationOutcome outcome,
+        int day,
+        bool executed = false,
+        AssistantModelChoice? model = null) => new()
     {
         AssistantQueryId = id,
         AskedAtPkt = new DateTime(2026, 8, day, 12, 0, 0, DateTimeKind.Utc),
@@ -291,7 +342,8 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         WasExecuted = executed,
         ExecutionStatus = executed ? AssistantExecutionStatus.Succeeded : null,
         ResultRowCount = executed ? 1 : null,
-        ModelName = "deepseek-v4-flash",
+        ModelChoice = model,
+        ModelName = model == AssistantModelChoice.Local ? "qwen3.5:2b" : "deepseek-v4-flash",
         PromptTokens = 412,
         CompletionTokens = 17,
         TotalTokens = 429
@@ -325,12 +377,13 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
     private sealed class UnusedNlClient : INlToSqlClient
     {
         public Task<NlToSqlResult> GenerateSqlAsync(
-            string q, string s, IReadOnlyList<ConversationTurn> h, CancellationToken c) =>
+            string q, string s, IReadOnlyList<ConversationTurn> h, AssistantModelChoice m,
+            CancellationToken c) =>
             throw new InvalidOperationException("Reading the audit log must not call the model.");
 
         public Task<NlSummaryResult> SummariseResultsAsync(
             string q, string s, IReadOnlyDictionary<string, object?> p, string r, string cov,
-            CancellationToken c) =>
+            AssistantModelChoice m, CancellationToken c) =>
             throw new InvalidOperationException("Reading the audit log must not call the model.");
     }
 

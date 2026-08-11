@@ -7,6 +7,17 @@ public sealed record AskQuestionRequest
 {
     public Guid? SessionId { get; init; }
     public required string Question { get; init; }
+
+    /// <summary>
+    /// Which model should answer. Defaults to <see cref="AssistantModelChoice.Cloud"/>, so a caller
+    /// that omits it gets what every caller got before the choice existed.
+    /// </summary>
+    /// <remarks>
+    /// Not nullable. An absent field and an explicit "Cloud" mean the same thing to the assistant,
+    /// and a nullable field would invite code that treats the difference as meaningful somewhere
+    /// downstream. What was actually used is recorded on the turn either way.
+    /// </remarks>
+    public AssistantModelChoice Model { get; init; } = AssistantModelChoice.Cloud;
 }
 
 /// <summary>What the assistant returns for one question (FR-16, FR-17).</summary>
@@ -40,6 +51,17 @@ public sealed record AssistantAnswerDto
     public IReadOnlyList<IReadOnlyDictionary<string, object?>>? Rows { get; init; }
 
     public int? ResultRowCount { get; init; }
+
+    /// <summary>Which model answered, and what it is called there.</summary>
+    /// <remarks>
+    /// Returned with the answer for the same reason the SQL is: an answer whose author cannot be
+    /// identified is one the reader has to take on trust. It also makes the choice legible after
+    /// the fact — a chat that switched models halfway shows which turns came from where, rather
+    /// than leaving the difference in quality to be explained by the reader.
+    /// </remarks>
+    public required AssistantModelChoice ModelChoice { get; init; }
+
+    public string? ModelName { get; init; }
 }
 
 public sealed record AssistantFeedbackRequest
@@ -121,6 +143,28 @@ public sealed record ChatTranscriptTurn
     /// <summary>How many rows the answer was drawn from. The rows themselves are not stored.</summary>
     public int? ResultRowCount { get; init; }
 
+    /// <summary>
+    /// Which model was asked — the hosted one or the one on this machine.
+    /// </summary>
+    /// <remarks>
+    /// Recorded per turn rather than per session, because it is chosen per question: a
+    /// conversation can start on the local model, hit a question it writes bad SQL for, and finish
+    /// on the hosted one. A session-level field would describe none of those turns correctly.
+    /// <para>
+    /// Kept alongside <see cref="ModelName"/> rather than instead of it, and the two answer
+    /// different questions. The name says which model served the turn, which is what a reviewer
+    /// comparing two answers needs; this says which of the two options the user picked, which is
+    /// what survives a config change. Point <c>Assistant:Local:Model</c> at something else and
+    /// every turn recorded before it keeps its own name and still reads as Local — where the name
+    /// alone would leave "was this the local one?" to be answered by remembering what the setting
+    /// used to be.
+    /// </para>
+    /// Null on turns written before this was recorded. That is the standing cost of a document
+    /// store: there is no migration to backfill it, and an older turn genuinely does not say.
+    /// </remarks>
+    public AssistantModelChoice? ModelChoice { get; init; }
+
+    /// <summary>The model id as its gateway spells it — <c>deepseek-v4-flash</c>, <c>qwen3.5:2b</c>.</summary>
     public string? ModelName { get; init; }
 
     /// <summary>Tokens the model was sent for this turn — the schema context dominates it.</summary>
@@ -215,6 +259,18 @@ public sealed record AssistantTranscriptTurnDto
     public string? Explanation { get; init; }
     public bool WasExecuted { get; init; }
     public int? ResultRowCount { get; init; }
+
+    /// <summary>
+    /// Which model answered this turn, null on turns recorded before the choice existed.
+    /// </summary>
+    /// <remarks>
+    /// Unlike the live answer's, this is nullable — a replayed conversation reports what was
+    /// stored, and an older transcript does not say. Defaulting it to Cloud here would invent a
+    /// fact about a turn rather than admit the record is silent.
+    /// </remarks>
+    public AssistantModelChoice? ModelChoice { get; init; }
+
+    public string? ModelName { get; init; }
 }
 
 /// <summary>Filters over the assistant's audit log (NFR Auditability).</summary>
@@ -264,6 +320,10 @@ public sealed record AssistantQueryLogDto
     public int? ExecutionMs { get; init; }
 
     public string? AnswerText { get; init; }
+
+    /// <summary>Which model was asked. Null on turns recorded before the choice existed.</summary>
+    public AssistantModelChoice? ModelChoice { get; init; }
+
     public string? ModelName { get; init; }
     public int? PromptTokens { get; init; }
     public int? CompletionTokens { get; init; }

@@ -20,8 +20,14 @@ import {
   getAssistantTranscript,
   submitAssistantFeedback,
 } from "@/lib/api";
+import {
+  MAX_QUESTION_LENGTH,
+  MAX_QUESTION_WORDS,
+  countWords,
+} from "@/lib/question";
 import type {
   AssistantAnswerDto,
+  AssistantModelChoice,
   AssistantSessionSummaryDto,
   AssistantTranscriptDto,
 } from "@/types/api";
@@ -30,12 +36,10 @@ export type AskResult =
   | { readonly ok: true; readonly answer: AssistantAnswerDto }
   | { readonly ok: false; readonly title: string; readonly detail: string };
 
-/** Length ceiling the API enforces; checked here too so a typo costs no round trip. */
-const MAX_QUESTION_LENGTH = 2000;
-
 export async function ask(
   question: string,
   sessionId: string | null,
+  model: AssistantModelChoice,
 ): Promise<AskResult> {
   const trimmed = question.trim();
 
@@ -55,10 +59,23 @@ export async function ask(
     };
   }
 
+  const words = countWords(trimmed);
+
+  if (words > MAX_QUESTION_WORDS) {
+    return {
+      ok: false,
+      title: "Question too long",
+      detail:
+        `Questions are limited to ${MAX_QUESTION_WORDS} words; that one is ${words}. ` +
+        "Ask one thing at a time.",
+    };
+  }
+
   try {
     const answer = await askAssistant({
       question: trimmed,
       sessionId: sessionId ?? undefined,
+      model,
     });
 
     return { ok: true, answer };

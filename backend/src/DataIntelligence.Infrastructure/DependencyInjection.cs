@@ -130,12 +130,19 @@ public static class DependencyInjection
 
         services.TryAddSingleton(TimeProvider.System);
 
-        services.AddHttpClient<INlToSqlClient, DeepSeekNlToSqlClient>((provider, client) =>
+        services.AddHttpClient<INlToSqlClient, ChatCompletionsNlToSqlClient>(client =>
         {
-            var options = provider.GetRequiredService<IOptions<AssistantOptions>>().Value;
-            // Outlives the per-request timeout the client applies itself, so the cancellation
-            // that fires is the one carrying a useful message.
-            client.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds * 2);
+            // Deadlines are per call, not per client. One pooled client serves both providers, and
+            // they want opposite things: the hosted gateway is bounded at 30 seconds, while the
+            // local model is deliberately unbounded because no ceiling was the right one. A single
+            // timeout here can only be wrong for one of them — sized for the gateway it kills every
+            // slow local answer, and sized for the local model it stops bounding the gateway.
+            //
+            // So this one is removed and the client applies its own, built from the provider the
+            // question chose. Nothing is left unbounded that was not meant to be: the hosted path
+            // still cancels on its own token, and both paths still cancel with the HTTP request
+            // that started them.
+            client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
         });
 
         services.AddSingleton<ISqlSafetyValidator, SqlSafetyValidator>();

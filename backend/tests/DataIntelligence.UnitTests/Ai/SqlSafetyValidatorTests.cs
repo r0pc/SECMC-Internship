@@ -248,16 +248,67 @@ public class SqlSafetyValidatorTests
     }
 
     [Fact]
-    public void RejectsAValueTheStatementNeverUses()
+    public void DropsAValueTheStatementNeverUsesRatherThanRefusingTheStatement()
     {
-        // The model described one query and wrote another: whatever @year was meant to constrain
-        // is not being constrained.
+        // This was a rejection, on the reasoning that the model had described one query and written
+        // another. It is not a safety property: an unused value is never placed in the statement,
+        // never parsed, and cannot affect what is read. Meanwhile a small model leaves them behind
+        // routinely — settling on a single date after considering a range leaves @from and @to
+        // supplied and unused — and the statement it wrote is correct. Refusing it spent the whole
+        // wait to reject a right answer.
         var result = Validator.Validate(
             "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
-            new Dictionary<string, object?> { ["@month"] = "2025-06-01", ["@year"] = 2025 });
+            new Dictionary<string, object?>
+            {
+                ["@month"] = "2025-03-01",
+                ["@from"] = "2025-01-01",
+                ["@to"] = "2026-01-01"
+            });
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+
+        // Dropped, not merely tolerated. What is shown beside an answer has to be what ran, or the
+        // reader is left working out how @from constrained a result it never touched.
+        Assert.NotNull(result.BoundParameters);
+        Assert.Equal(["@month"], result.BoundParameters.Keys);
+        Assert.Equal("2025-03-01", result.BoundParameters["@month"]);
+    }
+
+    [Fact]
+    public void KeepsEveryValueTheStatementDoesUse()
+    {
+        var result = Validator.Validate(
+            "SELECT AVG(RatePercent) FROM analytics.vw_Sofr "
+            + "WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+            new Dictionary<string, object?> { ["@from"] = "2025-01-01", ["@to"] = "2026-01-01" });
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+        Assert.NotNull(result.BoundParameters);
+        Assert.Equal(2, result.BoundParameters.Count);
+    }
+
+    [Fact]
+    public void ReportsNoBoundParametersForAStatementThatNeedsNone()
+    {
+        var result = Validator.Validate("SELECT IndexValue FROM analytics.vw_Cpi");
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+        Assert.NotNull(result.BoundParameters);
+        Assert.Empty(result.BoundParameters);
+    }
+
+    [Fact]
+    public void StillRejectsAPlaceholderWithNoValueEvenAlongsideAnUnusedOne()
+    {
+        // The two directions are not symmetrical. A value with no placeholder is harmless; a
+        // placeholder with no value fails at the database, and relaxing one must not relax the
+        // other.
+        var result = Validator.Validate(
+            "SELECT IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
+            new Dictionary<string, object?> { ["@year"] = 2025 });
 
         Assert.Equal(AssistantValidationOutcome.RejectedSyntax, result.Outcome);
-        Assert.Contains("@year", result.Detail);
+        Assert.Contains("@month", result.Detail);
     }
 
     [Fact]

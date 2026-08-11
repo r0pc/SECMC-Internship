@@ -54,7 +54,7 @@ developed, built, and deployed separately and communicate only over HTTP.
 | Database | Microsoft SQL Server |
 | ORM | Entity Framework Core 10 |
 | Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS |
-| AI | DeepSeek (`deepseek-v4-flash`) for NL-to-SQL translation and NL answers |
+| AI | DeepSeek (`deepseek-v4-flash`) or a local Ollama model (`qwen3.5:2b`), chosen per question, for NL-to-SQL translation and NL answers |
 | CI/CD | GitHub Actions or equivalent |
 
 ## Getting Started
@@ -77,6 +77,36 @@ npm run dev
 
 Per-side detail lives in [backend/README.md](backend/README.md) and
 [frontend/README.md](frontend/README.md).
+
+### Optional: the local assistant model
+
+The assistant can answer from a model running on your own machine instead of the hosted
+one, chosen per question in the chat. All it needs is [Ollama](https://ollama.com) running
+with the model pulled:
+
+```powershell
+ollama pull qwen3.5:2b
+ollama serve
+```
+
+No server-side configuration. The API talks to Ollama's native `/api/chat` specifically so
+it can set the context window per request (`Assistant:Local:ContextTokens`, default 16384).
+That is not a tuning detail — Ollama loads a model at **4096 tokens** by default and the
+schema prompt alone is roughly 3,900, leaving about 200 for the answer, so any longer query
+used to be cut off mid-JSON and recorded as `RejectedUnreadableResponse` after a wait of
+minutes. Measured on one question and one model, changing only this: at 4096 the reply
+stopped on `length` with the token total pinned at exactly 4096 and would not parse; at
+16384 it finished and parsed. Ollama's *OpenAI-compatible* endpoint accepts the same
+`options.num_ctx` and silently ignores it, which is why the native API is used instead.
+
+Point `Assistant:Local` at another OpenAI-compatible server (llama.cpp, LM Studio, vLLM) by
+setting `Api` to `OpenAi`; its context then has to be raised on the server, since that
+endpoint gives no way to ask.
+
+Expect it to be slow — minutes per question on a CPU, mostly spent reading the prompt — and
+to write worse SQL than the hosted model. Nothing leaves the machine and nothing is billed,
+which is the trade. Leave Ollama off entirely and the cloud model, which is the default, is
+unaffected.
 
 ## Deviations from the SOW
 

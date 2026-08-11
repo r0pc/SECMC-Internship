@@ -5,8 +5,10 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { ask, listChats, rate, resumeChat } from "@/app/assistant/actions";
 import { Table, Td, Th, Tr } from "@/components/table";
 import { formatCount, formatTimestamp } from "@/lib/format";
+import { MAX_QUESTION_WORDS, countWords } from "@/lib/question";
 import type {
   AssistantAnswerDto,
+  AssistantModelChoice,
   AssistantSessionSummaryDto,
   AssistantTranscriptTurnDto,
   AssistantValidationOutcome,
@@ -25,11 +27,24 @@ import type {
  * browser storage where nobody agreed they should be.
  */
 
+/**
+ * An answer as this view renders it: a live one, or one replayed out of a stored transcript.
+ *
+ * The two differ in one field. A live answer always knows which model produced it — the choice is
+ * made before the question is sent — while a turn recorded before the choice existed does not say,
+ * and the transcript is a document with no migration step that could make it say. Widening the
+ * field here rather than defaulting it in `replay` is what keeps that gap visible: filling it with
+ * "Cloud" would be inventing a fact about somebody's old conversation.
+ */
+type Answer = Omit<AssistantAnswerDto, "modelChoice"> & {
+  modelChoice: AssistantModelChoice | null;
+};
+
 interface Turn {
   /** Local id — the API's id only exists once an answer comes back, and errors never get one. */
   key: number;
   question: string;
-  answer?: AssistantAnswerDto;
+  answer?: Answer;
   error?: { title: string; detail: string };
 }
 
@@ -47,6 +62,12 @@ export function AssistantChat() {
   const [chats, setChats] = useState<AssistantSessionSummaryDto[]>([]);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+
+  // Per question, not per conversation, and deliberately not reset by starting or resuming a chat:
+  // someone who has switched to the local model has said something about how they want to work,
+  // not about the conversation they happened to be in. Which model actually answered is recorded
+  // on every turn, so a chat that changed models halfway still reads correctly afterwards.
+  const [model, setModel] = useState<AssistantModelChoice>("Cloud");
 
   const nextKey = useRef(0);
   const transcriptEnd = useRef<HTMLDivElement>(null);
@@ -115,7 +136,14 @@ export function AssistantChat() {
   function submit(question: string) {
     const trimmed = question.trim();
 
-    if (trimmed.length === 0 || pending) {
+    // Over-length questions are refused rather than truncated or sent anyway. The counter beside
+    // the button is already saying so, which is why this can be a silent no-op: Enter doing
+    // nothing while a red "112 / 100" sits under the cursor is not a mystery.
+    if (
+      trimmed.length === 0 ||
+      pending ||
+      countWords(trimmed) > MAX_QUESTION_WORDS
+    ) {
       return;
     }
 
@@ -125,7 +153,7 @@ export function AssistantChat() {
     setDraft("");
 
     startTransition(async () => {
-      const result = await ask(trimmed, sessionId);
+      const result = await ask(trimmed, sessionId, model);
 
       setTurns((current) =>
         current.map((turn) =>
@@ -150,6 +178,9 @@ export function AssistantChat() {
       }
     });
   }
+
+  const words = countWords(draft);
+  const tooLong = words > MAX_QUESTION_WORDS;
 
   return (
     <div className="flex flex-col gap-4">
@@ -180,7 +211,7 @@ export function AssistantChat() {
           ))
         )}
 
-        {pending ? <Thinking /> : null}
+        {pending ? <Thinking model={model} /> : null}
 
         <div ref={transcriptEnd} />
       </div>
@@ -193,7 +224,8 @@ export function AssistantChat() {
         }}
       >
         <label className="sr-only" htmlFor="assistant-question">
-          Ask a question about the collected data
+          Ask a question about the collected data, in {MAX_QUESTION_WORDS} words
+          or fewer
         </label>
         <textarea
           id="assistant-question"
@@ -201,7 +233,11 @@ export function AssistantChat() {
           rows={2}
           value={draft}
           disabled={pending}
+          // The character cap is a hard stop because it is a storage bound — past it the audit log
+          // would keep a truncated question. The word limit is not: an over-long draft is left
+          // intact and refused, so the sentence being cut is chosen by the person who wrote it.
           maxLength={2000}
+          aria-invalid={tooLong || undefined}
           placeholder="Ask about CPI, SOFR, or collection health…"
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
@@ -214,17 +250,23 @@ export function AssistantChat() {
           }}
           className="w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 dark:text-zinc-100 dark:placeholder:text-zinc-600"
         />
-        <div className="flex items-center justify-between gap-3 px-3 pb-1">
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Answers come from collected data only. Every question is logged.
-          </p>
-          <button
-            type="submit"
-            disabled={pending || draft.trim().length === 0}
-            className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-          >
-            {pending ? "Asking…" : "Ask"}
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-3 px-3 pb-1">
+          <div className="flex items-center gap-3">
+            <ModelPicker value={model} onChange={setModel} disabled={pending} />
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Answers come from collected data only. Every question is logged.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <WordCount words={words} />
+            <button
+              type="submit"
+              disabled={pending || draft.trim().length === 0 || tooLong}
+              className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            >
+              {pending ? "Asking…" : "Ask"}
+            </button>
+          </div>
         </div>
       </form>
     </div>
@@ -247,6 +289,11 @@ function replay(turn: AssistantTranscriptTurnDto, key: number): Turn {
     key,
     question: turn.question,
     answer: {
+      // Carried through unchanged, null included. See the `Answer` type for why an older turn is
+      // left saying nothing rather than defaulted to the model that was the only one at the time.
+      modelChoice: turn.modelChoice,
+      modelName: turn.modelName,
+
       assistantQueryId: turn.assistantQueryId,
       sessionId: "",
       questionText: turn.question,
@@ -382,7 +429,116 @@ function Welcome({
   );
 }
 
-function Thinking() {
+/**
+ * Which model answers the next question.
+ *
+ * A plain `<select>`. Two options do not need a custom control, and the browser's own comes with
+ * keyboard handling, screen-reader support and a touch UI that a pair of styled buttons would have
+ * to reimplement worse.
+ *
+ * It sits in the composer rather than in the bar above, because the choice belongs to the question
+ * being written and not to the conversation: it can change between one turn and the next, and each
+ * turn records which model actually served it.
+ */
+function ModelPicker({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: AssistantModelChoice;
+  onChange: (model: AssistantModelChoice) => void;
+  disabled: boolean;
+}) {
+  return (
+    <>
+      <label className="sr-only" htmlFor="assistant-model">
+        Which model answers the question
+      </label>
+      <select
+        id="assistant-model"
+        value={value}
+        disabled={disabled}
+        // The cast is safe because the only values are the two options below, and narrowing it
+        // any other way would mean validating a string this component itself wrote.
+        onChange={(event) => onChange(event.target.value as AssistantModelChoice)}
+        className="rounded-md border border-zinc-300 bg-transparent px-2 py-1 text-xs text-zinc-700 outline-none transition-colors hover:border-zinc-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600"
+      >
+        <option value="Cloud">Cloud model</option>
+        <option value="Local">Local model</option>
+      </select>
+    </>
+  );
+}
+
+/**
+ * Which model produced an answer, under it.
+ *
+ * Shown rather than folded into the query details, because it is the one thing that explains a
+ * difference between two answers to the same question — and the local model's answers are visibly
+ * worse often enough that a reader without this would conclude the platform is unreliable rather
+ * than that they picked the small model.
+ *
+ * Nothing is rendered for a turn that does not say. That is every turn recorded before the choice
+ * existed, and "Cloud" would be a guess dressed as a record.
+ */
+function ModelNote({
+  choice,
+  name,
+}: {
+  choice: AssistantModelChoice | null;
+  name: string | null;
+}) {
+  if (choice === null) {
+    return null;
+  }
+
+  return (
+    <p className="text-[11px] text-zinc-400 dark:text-zinc-600">
+      {choice === "Local" ? "Local model" : "Cloud model"}
+      {name ? <> · {name}</> : null}
+    </p>
+  );
+}
+
+/**
+ * How close the draft is to the word limit.
+ *
+ * Silent until the limit is within reach. A counter reading "3 / 100" under every question is
+ * noise about a rule almost nobody meets — the one worth showing is the one that has started to
+ * matter, and it appears in time to shorten a sentence rather than after the Ask button has
+ * already gone dead.
+ *
+ * The visible count is not a live region: it changes on every keystroke, and announcing "98, 99,
+ * 100" is worse than not announcing it. The screen-reader message beside it is the boundary
+ * instead, whose text does not change while it is being crossed.
+ */
+function WordCount({ words }: { words: number }) {
+  const over = words > MAX_QUESTION_WORDS;
+  const near = words >= MAX_QUESTION_WORDS * 0.75;
+
+  return (
+    <>
+      <span className="sr-only" aria-live="polite">
+        {over ? `Over the ${MAX_QUESTION_WORDS} word limit. Shorten it to ask.` : ""}
+      </span>
+
+      {over || near ? (
+        <p
+          id="assistant-question-count"
+          className={
+            over
+              ? "text-xs font-medium text-red-600 dark:text-red-400"
+              : "text-xs text-zinc-500 dark:text-zinc-400"
+          }
+        >
+          {words} / {MAX_QUESTION_WORDS} words
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+function Thinking({ model }: { model: AssistantModelChoice }) {
   return (
     <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
       <span className="flex gap-1" aria-hidden>
@@ -395,8 +551,11 @@ function Thinking() {
         ))}
       </span>
       {/* Named rather than a bare spinner: this takes seconds, and saying which step it is on is
-          the difference between "working" and "stuck". */}
+          the difference between "working" and "stuck". The local model turns that from seconds
+          into up to a couple of minutes, so it says which model it is waiting on — otherwise the
+          only difference the user sees between the two options is that one of them looks broken. */}
       Writing a query and running it…
+      {model === "Local" ? " The local model is slower." : null}
     </div>
   );
 }
@@ -439,7 +598,7 @@ function AnswerView({
   answer,
   onRate,
 }: {
-  answer: AssistantAnswerDto;
+  answer: Answer;
   onRate: (id: number, helpful: boolean) => Promise<boolean>;
 }) {
   return (
@@ -462,7 +621,10 @@ function AnswerView({
         />
       ) : null}
 
-      <Rating assistantQueryId={answer.assistantQueryId} onRate={onRate} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Rating assistantQueryId={answer.assistantQueryId} onRate={onRate} />
+        <ModelNote choice={answer.modelChoice} name={answer.modelName} />
+      </div>
     </div>
   );
 }

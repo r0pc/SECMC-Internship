@@ -1,4 +1,6 @@
 ﻿// backend/src/DataIntelligence.Core/Interfaces/INlToSqlClient.cs
+using DataIntelligence.Core.Enums;
+
 namespace DataIntelligence.Core.Interfaces;
 
 /// <summary>
@@ -18,10 +20,16 @@ public interface INlToSqlClient
     /// after the one before it — "and the year before that?" — can be resolved. Empty for the
     /// first question of a session.
     /// </param>
+    /// <param name="model">
+    /// Which model to ask. The two are not interchangeable in quality — a small local model writes
+    /// worse SQL and refuses more often — so this is the caller's choice per question, not a
+    /// deployment-wide setting.
+    /// </param>
     Task<NlToSqlResult> GenerateSqlAsync(
         string question,
         string schemaContext,
         IReadOnlyList<ConversationTurn> history,
+        AssistantModelChoice model,
         CancellationToken cancellationToken);
 
     /// <summary>Summarises a result set in plain language, in answer to the original question.</summary>
@@ -36,12 +44,18 @@ public interface INlToSqlClient
     /// explanation: "no rows" and "that period is before the series begins" are the same JSON, and
     /// only this tells them apart.
     /// </param>
+    /// <param name="model">
+    /// The same model that wrote the statement. Both halves of a turn go to one model so the
+    /// recorded model name describes the whole answer — a statement from one and prose from
+    /// another would make the audit record true of neither.
+    /// </param>
     Task<NlSummaryResult> SummariseResultsAsync(
         string question,
         string generatedSql,
         IReadOnlyDictionary<string, object?> parameters,
         string resultsJson,
         string coverage,
+        AssistantModelChoice model,
         CancellationToken cancellationToken);
 }
 
@@ -107,6 +121,25 @@ public enum NlRefusalKind
     /// looking for missing views instead of a broken response format.
     /// </remarks>
     Unreadable,
+
+    /// <summary>
+    /// The model ran out of room and its reply stops mid-sentence, so there is no complete JSON to
+    /// read.
+    /// </summary>
+    /// <remarks>
+    /// A subspecies of <see cref="Unreadable"/> — nothing usable came back either way — kept apart
+    /// because it is the only one of these whose cause is a number in a config file rather than
+    /// anything about the question or the model's judgement. The provider says so directly by
+    /// reporting a finish reason of <c>length</c>, so this is detected rather than inferred.
+    /// <para>
+    /// It is the expected failure of a small local model behind a modest context window: the schema
+    /// prompt is several thousand tokens before the question is even added, and what is left over is
+    /// what the answer has to fit in. Told only that the reply "could not be read", a reader goes
+    /// looking for a model that cannot follow instructions — which is the one thing that is not
+    /// wrong here, and is a long way from the setting that is.
+    /// </para>
+    /// </remarks>
+    Truncated,
 
     /// <summary>Asks what CPI is, rather than what it was.</summary>
     /// <remarks>

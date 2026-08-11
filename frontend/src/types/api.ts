@@ -291,10 +291,23 @@ export type AssistantExecutionStatus =
   | "Timeout"
   | "Cancelled";
 
+/**
+ * Which model answers a question.
+ *
+ * Named for where the model runs rather than for who made it — the gateway behind `Cloud` is a
+ * server-side setting precisely so it can change without a code change, and a name taken from
+ * today's provider would be wrong the first time it did. What does not change is whether the
+ * question leaves the machine.
+ */
+export type AssistantModelChoice = "Cloud" | "Local";
+
 export interface AskQuestionRequest {
   /** Continues an existing conversation. Omit to start one. */
   sessionId?: string;
   question: string;
+
+  /** Defaults to `Cloud` server-side when omitted. */
+  model?: AssistantModelChoice;
 }
 
 /**
@@ -330,6 +343,12 @@ export interface AssistantAnswerDto {
   rows: Record<string, unknown>[] | null;
 
   resultRowCount: number | null;
+
+  /** Which model answered — always known, since it is chosen before the question is sent. */
+  modelChoice: AssistantModelChoice;
+
+  /** The model id as its gateway spells it. Null if the turn never reached a model. */
+  modelName: string | null;
 }
 
 export interface AssistantFeedbackRequest {
@@ -379,6 +398,14 @@ export interface AssistantTranscriptTurnDto {
   explanation: string | null;
   wasExecuted: boolean;
   resultRowCount: number | null;
+
+  /**
+   * Which model answered this turn. Null on turns recorded before the choice existed — the
+   * transcript is a document with no migration step, so an older turn genuinely does not say.
+   */
+  modelChoice: AssistantModelChoice | null;
+
+  modelName: string | null;
 }
 
 /** A past conversation, in full. */

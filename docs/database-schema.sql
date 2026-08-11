@@ -647,8 +647,18 @@ CREATE TABLE ai.AssistantSession
     -- The whole conversation as one JSON document: every turn, in order, as the chat was had.
     -- THIS IS THE RECORD. ai.AssistantQuery is no longer written; what is not in here was not
     -- kept. Each turn carries the question, the SQL it became, the bound parameters, the outcome,
-    -- the answer, token usage and timings -- see ChatTranscriptTurn, which defines the shape, and
-    -- section 5's note on the audit-log view that reads it back with OPENJSON.
+    -- the answer, which model produced it, token usage and timings -- see ChatTranscriptTurn, which
+    -- defines the shape, and section 5's note on the audit-log view that reads it back with
+    -- OPENJSON.
+    --
+    -- The model is recorded twice per turn, as modelChoice ('Cloud' or 'Local') and modelName (the
+    -- id its gateway spells, 'deepseek-v4-flash' or 'qwen3.5:2b'), because the two answer different
+    -- questions: which model served the turn, and which of the two options the user picked. Point
+    -- Assistant:Local:Model at something else and every turn written before it keeps its own name
+    -- and still reads as Local. Both are NULL on turns written before the model became a choice --
+    -- a document store has no migration step, so an older turn simply lacks the field and OPENJSON
+    -- returns NULL. That is the honest reading and is not backfilled: those turns reached the only
+    -- gateway there was, but nothing here says so.
     --
     -- Result rows are excluded: a turn may return up to 2,000 of them, and a document rewritten on
     -- every turn would grow by megabytes to hold what re-running the stored statement reproduces.

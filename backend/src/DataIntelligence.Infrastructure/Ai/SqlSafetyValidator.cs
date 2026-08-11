@@ -180,14 +180,17 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
                 $"'{systemVariable.Value}' is a server configuration function, not data.", null);
         }
 
-        if (CheckParameters(inspected, parameters) is { } parameterFault)
+        if (CheckParameters(inspected, parameters, out var bound) is { } parameterFault)
         {
             return parameterFault;
         }
 
         var normalized = InjectRowCap(trimmed);
 
-        return new SqlValidationResult(AssistantValidationOutcome.Approved, null, normalized);
+        return new SqlValidationResult(AssistantValidationOutcome.Approved, null, normalized)
+        {
+            BoundParameters = bound
+        };
     }
 
     /// <summary>
@@ -207,19 +210,33 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
     }
 
     /// <summary>
-    /// Requires the placeholders in the statement and the values supplied for them to be the same
-    /// set, and returns the rejection if they are not.
+    /// Checks the placeholders in the statement against the values supplied for them, and hands
+    /// back the values the statement actually uses.
     /// </summary>
     /// <remarks>
-    /// Both directions matter, for different reasons. A placeholder with no value fails at the
-    /// database with a message about a missing scalar variable — recorded as an execution failure,
-    /// which reads like a platform fault rather than a model that produced an incoherent pair. A
-    /// value with no placeholder is the more interesting case: the model described one query and
-    /// wrote another, and whatever the extra value was meant to constrain is not being constrained.
+    /// The two directions are not symmetrical, and used to be treated as though they were.
+    /// <para>
+    /// A placeholder with no value is a rejection. It would fail at the database with a message
+    /// about a missing scalar variable, recorded as an execution failure — which reads like a
+    /// platform fault rather than what it is, a model that produced an incoherent pair.
+    /// </para>
+    /// <para>
+    /// A value with no placeholder is dropped. It was a rejection too, on the reasoning that the
+    /// model had described one query and written another — but that is a judgement about tidiness,
+    /// not a safety property. An unused value is never placed in the statement and cannot affect
+    /// what it reads, while a small model leaves them behind routinely: settling on
+    /// <c>WHERE ReferenceDate = @month</c> after considering a range leaves <c>@from</c> and
+    /// <c>@to</c> supplied and unused, and the statement is correct. Refusing it spent the whole
+    /// wait to reject a right answer.
+    /// </para>
     /// </remarks>
     private static SqlValidationResult? CheckParameters(
-        string inspected, IReadOnlyDictionary<string, object?>? parameters)
+        string inspected,
+        IReadOnlyDictionary<string, object?>? parameters,
+        out IReadOnlyDictionary<string, object?> bound)
     {
+        bound = new Dictionary<string, object?>();
+
         var used = ParameterReference.Matches(inspected)
             .Select(m => m.Groups[1].Value)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -238,14 +255,11 @@ public sealed class SqlSafetyValidator : ISqlSafetyValidator
                 null);
         }
 
-        var unused = supplied.Except(used, StringComparer.OrdinalIgnoreCase).ToList();
-        if (unused.Count > 0)
-        {
-            return new SqlValidationResult(
-                AssistantValidationOutcome.RejectedSyntax,
-                $"A value was supplied for @{string.Join(", @", unused.Order())}, which the statement never uses.",
-                null);
-        }
+        // Keys keep the spelling they arrived with, so the executor binds the name the caller
+        // supplied rather than one reconstructed from the statement.
+        bound = (parameters ?? new Dictionary<string, object?>())
+            .Where(p => used.Contains(p.Key.TrimStart('@')))
+            .ToDictionary(p => p.Key, p => p.Value, StringComparer.OrdinalIgnoreCase);
 
         return null;
     }

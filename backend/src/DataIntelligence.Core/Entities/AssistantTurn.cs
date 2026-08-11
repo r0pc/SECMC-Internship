@@ -45,6 +45,12 @@ public class AssistantTurn
     public int? ExecutionMs { get; set; }
     public int? ResultRowCount { get; set; }
 
+    /// <summary>
+    /// Which model was asked — Cloud or Local. Null for turns written before the choice existed,
+    /// which OPENJSON reports as a missing path rather than as an error.
+    /// </summary>
+    public AssistantModelChoice? ModelChoice { get; set; }
+
     public string? ModelName { get; set; }
     public int? PromptTokens { get; set; }
     public int? CompletionTokens { get; set; }

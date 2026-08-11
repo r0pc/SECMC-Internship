@@ -56,3 +56,31 @@ public enum AssistantExecutionStatus
     Timeout,
     Cancelled
 }
+
+/// <summary>
+/// Which model answers a question: the hosted one, or one running on this machine.
+/// </summary>
+/// <remarks>
+/// Named for where the model runs rather than for who made it — <c>Cloud</c> rather than
+/// <c>DeepSeek</c>, <c>Local</c> rather than <c>Ollama</c>. The gateway behind <c>Cloud</c> is a
+/// configuration value precisely so it can be changed without code, and a member named after
+/// today's provider would be a lie the first time it was. Where the request goes is the part that
+/// does not change: off this machine, or not.
+/// <para>
+/// That distinction is also the one a user is actually choosing between. Local keeps every
+/// question on the machine and costs nothing per token, and answers with a small model that writes
+/// worse SQL; Cloud is the reverse. The exact model id each resolves to is recorded per turn
+/// alongside this — see <c>ChatTranscriptTurn.ModelName</c> — so the audit trail says both which
+/// kind was asked for and which model actually served it.
+/// </para>
+/// Persisted by name into the transcript document, like every other enum stored there. Renaming a
+/// member silently changes the meaning of every turn already written.
+/// </remarks>
+public enum AssistantModelChoice
+{
+    /// <summary>The hosted gateway configured under <c>Assistant:BaseUrl</c>. The default.</summary>
+    Cloud,
+
+    /// <summary>A model served locally, configured under <c>Assistant:Local</c>.</summary>
+    Local
+}

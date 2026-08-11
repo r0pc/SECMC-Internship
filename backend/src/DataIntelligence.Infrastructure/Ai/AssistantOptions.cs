@@ -78,4 +78,171 @@ public sealed class AssistantOptions
     /// </remarks>
     [Range(0, 20)]
     public int HistoryTurns { get; set; } = 6;
+
+    /// <summary>
+    /// The alternative to the hosted gateway: a model served on the machine the API runs on,
+    /// selected per question with <c>AssistantModelChoice.Local</c>.
+    /// </summary>
+    /// <remarks>
+    /// Nested rather than flattened into more <c>Local*</c> keys beside the ones above, so the two
+    /// providers read as two providers in <c>appsettings.json</c> instead of as one settings block
+    /// with a second BaseUrl loose in it.
+    /// <para>
+    /// Note that <c>ValidateDataAnnotations</c> does not recurse into a nested object, so the
+    /// annotations on <see cref="LocalModelOptions"/> describe its bounds rather than enforcing
+    /// them. What enforces them is the client, which clamps what it reads.
+    /// </para>
+    /// </remarks>
+    public LocalModelOptions Local { get; set; } = new();
+}
+
+/// <summary>
+/// Where the locally-served model is, and what it is called there.
+/// </summary>
+/// <remarks>
+/// Defaults describe Ollama with <c>qwen3.5:2b</c> pulled, which is the setup this was built
+/// against. Ollama exposes OpenAI's <c>/v1/chat/completions</c> shape, so it is reached by the same
+/// client as the hosted gateway — the local option is configuration, not a second implementation.
+/// Any other server speaking that shape (llama.cpp, LM Studio, vLLM) is a <see cref="BaseUrl"/> and
+/// <see cref="Model"/> change.
+/// </remarks>
+public sealed class LocalModelOptions
+{
+    /// <summary>
+    /// Root of the local model server. For Ollama that is its bare root — <c>/v1/</c> is the
+    /// OpenAI-compatible surface, and <see cref="Api"/> decides which of the two is used.
+    /// </summary>
+    /// <remarks>
+    /// A trailing <c>/v1/</c> is stripped when <see cref="Api"/> is <c>Ollama</c>, rather than
+    /// producing <c>/v1/api/chat</c> and a puzzling 404. This setting used to have to end in
+    /// <c>/v1/</c>, so the forgiving reading is worth more than the strict one.
+    /// </remarks>
+    public string BaseUrl { get; set; } = "http://localhost:11434/";
+
+    /// <summary>
+    /// Which wire format the local server speaks: <c>Ollama</c> (the default, its native
+    /// <c>/api/chat</c>) or <c>OpenAi</c> (any server exposing <c>/chat/completions</c>).
+    /// </summary>
+    /// <remarks>
+    /// Ollama's native API is the default for one reason, and it is not preference: it is the only
+    /// one of the two that lets this application set the context window. See
+    /// <see cref="ContextTokens"/> for why that decides whether the local model works at all.
+    /// Anything else — llama.cpp's server, LM Studio, vLLM — should be set to <c>OpenAi</c>, and
+    /// then needs its context configured on the server side instead.
+    /// </remarks>
+    public string Api { get; set; } = "Ollama";
+
+    /// <summary>
+    /// The context window to load the model with, in tokens. Null leaves the server's default.
+    /// </summary>
+    /// <remarks>
+    /// The single setting that decides whether the local model can answer at all, and the default
+    /// of 4096 is too small by roughly a factor of four. The schema prompt alone runs to about
+    /// 3,900 tokens before the question is added, and a context of 4096 leaves some 200 for the
+    /// reply — so anything longer than a trivial statement stops mid-JSON, fails to parse, and is
+    /// recorded as RejectedUnreadableResponse after a wait of minutes.
+    /// <para>
+    /// Measured on one question and one model, changing only this: at 4096 the reply stopped on
+    /// <c>length</c> with the token total pinned at exactly 4096 and would not parse; at 16384 it
+    /// finished and parsed. That is the whole of the difference.
+    /// </para>
+    /// <para>
+    /// Sent as <c>options.num_ctx</c> on Ollama's native API, which is why that API is the default:
+    /// its OpenAI-compatible endpoint accepts the same field and silently ignores it, so a
+    /// deployment on <see cref="Api"/> <c>OpenAi</c> has to set this on the server instead —
+    /// <c>OLLAMA_CONTEXT_LENGTH</c> for Ollama. Verify with <c>ollama ps</c>, whose CONTEXT column
+    /// must not read 4096.
+    /// </para>
+    /// Raising it costs memory, since the KV cache is sized from it. 16384 is comfortable for a 2B
+    /// model and leaves room for several turns of conversation on top of the schema.
+    /// </remarks>
+    public int? ContextTokens { get; set; } = 16384;
+
+    /// <summary>
+    /// The model as the local server names it, tag included. Ollama distinguishes <c>qwen3.5:2b</c>
+    /// from <c>qwen3.5:7b</c> only by that tag, and a name it has not pulled is a 404 rather than a
+    /// fallback. <c>ollama list</c> shows what is actually available.
+    /// </summary>
+    public string Model { get; set; } = "qwen3.5:2b";
+
+    /// <summary>
+    /// Sent as a bearer token, and ignored by Ollama, which authenticates nothing.
+    /// </summary>
+    /// <remarks>
+    /// Non-empty by default rather than blank because the value is irrelevant but its presence is
+    /// not: some OpenAI-compatible servers reject a request with no Authorization header at all,
+    /// and a placeholder costs nothing where a missing header costs a confusing 401. Unlike
+    /// <see cref="AssistantOptions.ApiKey"/> this is not a secret and is safe to commit — nothing
+    /// on the other end of a loopback address is being paid.
+    /// </remarks>
+    public string ApiKey { get; set; } = "ollama";
+
+    /// <summary>
+    /// Sent as <c>reasoning_effort</c>. <c>"none"</c> — the default — turns a reasoning model's
+    /// thinking off. Empty omits the field entirely.
+    /// </summary>
+    /// <remarks>
+    /// This is not a tuning knob; without it the local option does not work at all.
+    /// <c>qwen3.5:2b</c> is a reasoning model, and Ollama returns its thinking in a separate
+    /// <c>reasoning</c> field while <c>content</c> stays empty until the thinking finishes. A 2B
+    /// model on a CPU does not finish: it spends the whole <c>MaxOutputTokens</c> budget deliberating
+    /// over what to answer, stops on length with <c>content</c> still empty, and the turn is filed as
+    /// RejectedUnreadableResponse minutes later. Measured on the machine this was built on, the same
+    /// question took over three minutes and returned nothing with thinking on, and eighteen seconds
+    /// and correctly-shaped JSON with it off.
+    /// <para>
+    /// Sent only to the local provider. The hosted gateway is not a reasoning model and has no use
+    /// for the field, and an OpenAI-shaped API is within its rights to reject a parameter it does
+    /// not know rather than ignore it.
+    /// </para>
+    /// <para>
+    /// Note this is the field that works, not the one the Qwen documentation suggests:
+    /// <c>chat_template_kwargs: {"enable_thinking": false}</c> is accepted by Ollama's
+    /// OpenAI-compatible endpoint and has no effect on it. Both were tried.
+    /// </para>
+    /// </remarks>
+    public string ReasoningEffort { get; set; } = "none";
+
+    /// <summary>
+    /// How long one call to the local model may take. <b>Zero — the default — means no limit.</b>
+    /// </summary>
+    /// <remarks>
+    /// Unlimited rather than merely generous, because no number was the right one. A 2B model
+    /// generating a few hundred tokens of SQL on a CPU is doing arithmetic this machine is not
+    /// built for; the first call after startup also pays to load the weights; and how long any of
+    /// that takes depends on the machine, what else is running on it, and how much schema context
+    /// the prompt carries. Every ceiling tried was one some ordinary question ran past, and a
+    /// question killed at the deadline costs the whole wait and returns nothing — strictly worse
+    /// than waiting longer for an answer.
+    /// <para>
+    /// Waiting forever is only acceptable because it is not actually forever: the request's own
+    /// cancellation token still applies, so a caller who navigates away or gives up takes the model
+    /// call with them. What is removed is the arbitrary deadline, not the ability to stop.
+    /// </para>
+    /// <para>
+    /// Nothing here applies to the hosted gateway, which keeps
+    /// <see cref="AssistantOptions.RequestTimeoutSeconds"/>. A remote call that hangs is a network
+    /// fault worth abandoning; a local one is a slow machine worth waiting for.
+    /// </para>
+    /// </remarks>
+    [Range(0, 3600)]
+    public int RequestTimeoutSeconds { get; set; } = 0;
+
+    /// <summary>
+    /// Ceiling on the local model's reply, in tokens. <b>Null — the default — means no limit</b>,
+    /// leaving it to the local server, and omits <c>max_tokens</c> from the request entirely.
+    /// </summary>
+    /// <remarks>
+    /// Overrides <see cref="AssistantOptions.MaxOutputTokens"/> for this provider only. That
+    /// setting exists to bound what a metered API is asked to produce, and there is nothing to
+    /// meter here: the tokens are free, the hardware is already paid for, and the only thing a cap
+    /// buys is a way to fail. Hitting one does not truncate the SQL into something invalid — it
+    /// truncates the JSON wrapping it, so the reply arrives unparseable and the question is
+    /// recorded as RejectedUnreadableResponse after the full wait.
+    /// <para>
+    /// A small model is exactly the one most likely to need the headroom, since it is the one that
+    /// rambles before it answers.
+    /// </para>
+    /// </remarks>
+    public int? MaxOutputTokens { get; set; }
 }

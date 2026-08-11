@@ -564,6 +564,7 @@ public class DataIntelligenceDbContext : DbContext
                     t.ExecutionError,
                     t.ExecutionMs,
                     t.ResultRowCount,
+                    t.ModelChoice,
                     t.ModelName,
                     t.PromptTokens,
                     t.CompletionTokens,
@@ -587,6 +588,11 @@ public class DataIntelligenceDbContext : DbContext
                     ExecutionError      NVARCHAR(1000)  '$.executionError',
                     ExecutionMs         INT             '$.executionMs',
                     ResultRowCount      INT             '$.resultRowCount',
+
+                    -- NULL on every turn written before the model became a choice, which is the
+                    -- honest reading: those turns reached the only gateway there was, but the
+                    -- document does not say so and backfilling a value here would be asserting it.
+                    ModelChoice         VARCHAR(20)     '$.modelChoice',
                     ModelName           NVARCHAR(100)   '$.modelName',
                     PromptTokens        INT             '$.promptTokens',
                     CompletionTokens    INT             '$.completionTokens',
@@ -597,6 +603,7 @@ public class DataIntelligenceDbContext : DbContext
 
         entity.Property(e => e.ValidationOutcome).HasConversion<string>();
         entity.Property(e => e.ExecutionStatus).HasConversion<string>();
+        entity.Property(e => e.ModelChoice).HasConversion<string>();
     }
 
     /// <summary>

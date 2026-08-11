@@ -13,6 +13,24 @@ namespace DataIntelligence.Api.Endpoints;
 /// </remarks>
 public static class AssistantEndpoints
 {
+    /// <summary>
+    /// Ceiling on one question, in words.
+    /// </summary>
+    /// <remarks>
+    /// The character limit below it is a storage bound — <c>QuestionText</c> is shredded out of the
+    /// transcript as <c>NVARCHAR(2000)</c>, and anything longer would be silently truncated in the
+    /// audit log. This is a different thing: a question is one thing asked in one sentence or two,
+    /// and past about a hundred words it is a paragraph carrying several. Those produce a statement
+    /// answering some part of what was asked, which is worse than a refusal because the answer
+    /// looks complete.
+    /// <para>
+    /// Enforced here rather than only in the browser. The frontend counts the same words and stops
+    /// the round trip early, but this is the API's own rule and the only copy of it that a caller
+    /// cannot skip.
+    /// </para>
+    /// </remarks>
+    public const int MaxQuestionWords = 100;
+
     public static RouteGroupBuilder MapAssistantEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/assistant").WithTags("Assistant");
@@ -31,6 +49,17 @@ public static class AssistantEndpoints
                 if (request.Question.Length > 2000)
                 {
                     return ApiEndpoints.BadRequest("question must be 2000 characters or fewer.");
+                }
+
+                var words = CountWords(request.Question);
+
+                if (words > MaxQuestionWords)
+                {
+                    // The count is reported back, not just the limit. "Too long" leaves the caller
+                    // guessing how much to cut; "132 of 100" tells them.
+                    return ApiEndpoints.BadRequest(
+                        $"question must be {MaxQuestionWords} words or fewer; that one is {words}. "
+                        + "Ask one thing at a time.");
                 }
 
                 var clientIp = http.Connection.RemoteIpAddress?.ToString();
@@ -55,7 +84,11 @@ public static class AssistantEndpoints
                 "Every question is logged before its SQL is generated, validated, or executed "
                 + "(NFR Auditability). Only a single read-only SELECT against the published "
                 + "analytics views can ever run; anything else is rejected and explained back to "
-                + "the caller rather than attempted.")
+                + "the caller rather than attempted. Questions are limited to "
+                + $"{MaxQuestionWords} words. 'model' chooses which model answers — Cloud (the "
+                + "hosted gateway, the default) or Local (a model served on the API's own "
+                + "machine); whichever is used is recorded on the turn and returned with the "
+                + "answer.")
             .Produces<AssistantAnswerDto>()
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
@@ -86,6 +119,18 @@ public static class AssistantEndpoints
 
         return group;
     }
+
+    /// <summary>
+    /// Words in a question: runs of non-whitespace, however they are separated.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the crudest definition that matches what a person counting would get, and the
+    /// same one the frontend applies to the draft as it is typed. Anything cleverer — splitting
+    /// hyphenated compounds, folding punctuation — would make the two disagree, and a browser that
+    /// says 98 while the API says 101 turns a limit into a bug report.
+    /// </remarks>
+    private static int CountWords(string text) =>
+        text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
 
     /// <summary>
     /// Listing and reopening a user's own conversations.
