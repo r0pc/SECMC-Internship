@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
@@ -25,7 +25,7 @@ import {
   formatValue,
   humanizeEnum,
   subtractMonths,
-  todayUtc,
+  todayPkt,
 } from "@/lib/format";
 import { DEFAULT_RANGE_MONTHS } from "@/lib/series";
 import { type SearchParams, readEnum, readFlag, readPage } from "@/lib/url";
@@ -141,7 +141,7 @@ export default async function SeriesDetailPage({
     ? (readEnum(query, "periodType", PERIOD_TYPES) ?? "Month")
     : undefined;
 
-  const to = todayUtc();
+  const to = todayPkt();
   const from = range === "max" ? EARLIEST_POSSIBLE : subtractMonths(to, Number(range));
 
   const [kpiResult, trendResult, observationsResult] = await Promise.all([
@@ -403,7 +403,7 @@ export default async function SeriesDetailPage({
                           <Badge
                             tone="neutral"
                             title={`Superseded ${formatTimestamp(
-                              observation.supersededAtUtc,
+                              observation.supersededAtPkt,
                             )}`}
                           >
                             Superseded
@@ -411,7 +411,7 @@ export default async function SeriesDetailPage({
                         )}
                       </Td>
                     ) : null}
-                    <Td>{formatTimestamp(observation.collectedAtUtc)}</Td>
+                    <Td>{formatTimestamp(observation.collectedAtPkt)}</Td>
                     <Td numeric>
                       <Link
                         href={`/collection?runId=${observation.collectionRunId}`}

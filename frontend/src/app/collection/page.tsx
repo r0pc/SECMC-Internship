@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import { Suspense } from "react";
 
 import { Badge, CollectionStatusBadge } from "@/components/badges";
@@ -144,13 +144,13 @@ async function FocusedRun({ params }: { params: SearchParams }) {
       <CardHeader
         title={`Run ${formatCount(run.collectionRunId)} — ${run.sourceCode}`}
         hint={`${humanizeEnum(run.triggerType)}, attempt ${run.attempt}, scheduled for ${formatTimestamp(
-          run.scheduledForUtc,
+          run.scheduledForPkt,
         )}`}
         action={<CollectionStatusBadge status={run.status} />}
       />
       <CardBody>
         <dl className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-6">
-          <Stat label="Started" value={formatTimestamp(run.startedAtUtc)} />
+          <Stat label="Started" value={formatTimestamp(run.startedAtPkt)} />
           <Stat label="Duration" value={formatDuration(run.durationMs)} />
           <Stat label="Fetched" value={formatCount(run.observationsFetched)} />
           <Stat label="Inserted" value={formatCount(run.observationsInserted)} />
@@ -307,7 +307,7 @@ async function RunsSection({ params }: { params: SearchParams }) {
                       {run.attempt > 1 ? ` · attempt ${run.attempt}` : ""}
                     </p>
                   </Td>
-                  <Td>{formatTimestamp(run.startedAtUtc)}</Td>
+                  <Td>{formatTimestamp(run.startedAtPkt)}</Td>
                   <Td numeric>{formatDuration(run.durationMs)}</Td>
                   <Td>
                     <CollectionStatusBadge status={run.status} />

@@ -17,10 +17,10 @@ const LINKS: readonly {
   exact?: boolean;
 }[] = [
   { href: "/", label: "Dashboard", exact: true },
-  { href: "/series", label: "Series" },
   { href: "/assistant", label: "Assistant" },
-  { href: "/collection", label: "Collection" },
-  { href: "/sources", label: "Sources" },
+  // /series, /collection and /sources are intentionally absent: the routes still exist and stay
+  // reachable by URL and by the links inside the dashboard, they are just not top-level
+  // destinations any more.
 ];
 
 export function SiteNav() {

@@ -12,6 +12,8 @@
 import type {
   AskQuestionRequest,
   AssistantAnswerDto,
+  AssistantSessionSummaryDto,
+  AssistantTranscriptDto,
   AssistantFeedbackRequest,
   CollectionRunDto,
   CollectionRunStatus,
@@ -355,6 +357,16 @@ export function getCollectionHealth(windowDays?: number) {
  */
 export function askAssistant(request: AskQuestionRequest) {
   return apiPost<AssistantAnswerDto>("/api/assistant/ask", request);
+}
+
+/** The caller's past conversations, most recently used first. */
+export function getAssistantSessions(limit?: number) {
+  return apiFetch<AssistantSessionSummaryDto[]>("/api/assistant/sessions", { limit });
+}
+
+/** One past conversation, in full, for replaying into the chat. */
+export function getAssistantTranscript(sessionId: string) {
+  return apiFetch<AssistantTranscriptDto>(`/api/assistant/sessions/${sessionId}`);
 }
 
 export function submitAssistantFeedback(

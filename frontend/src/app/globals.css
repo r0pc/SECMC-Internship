@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* Every `dark:` utility in the app keys off this. Tailwind's default is the
+   `prefers-color-scheme` media query, which the user cannot override; pointing the variant at
+   an attribute on <html> lets the header toggle drive it instead. The inline script in the root
+   layout still seeds that attribute from the OS preference, so an untouched browser looks the
+   same as before. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
@@ -12,11 +19,9 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #09090b;
-    --foreground: #fafafa;
-  }
+[data-theme="dark"] {
+  --background: #09090b;
+  --foreground: #fafafa;
 }
 
 body {

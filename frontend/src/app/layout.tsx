@@ -3,8 +3,17 @@ import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 
 import { SiteNav } from "@/components/site-nav";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 import "./globals.css";
+
+/**
+ * Applies the saved theme while the browser is still parsing <head>, so the page never paints in
+ * the wrong one. Nothing here is available at request time — `localStorage` and the OS preference
+ * are client-only — and `useEffect` would run after the first paint, which is exactly the flash we
+ * are avoiding. With no saved choice we follow the OS, matching the old media-query behaviour.
+ */
+const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem("theme");if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}document.documentElement.dataset.theme=t}catch(e){}})()`;
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -33,8 +42,13 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      data-theme="light"
+      suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="flex min-h-full flex-col bg-zinc-50 dark:bg-zinc-950">
         <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
           <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-3">
@@ -46,7 +60,10 @@ export default function RootLayout({
                 Phase 4
               </span>
             </Link>
-            <SiteNav />
+            <div className="flex items-center gap-2">
+              <SiteNav />
+              <ThemeToggle />
+            </div>
           </div>
         </header>
 
@@ -80,8 +97,9 @@ export default function RootLayout({
               . Values are stored and displayed exactly as published.
             </p>
             <p className="mt-2">
-              All timestamps are UTC. Reference dates are the period a figure
-              describes; collection timestamps are when this platform learned it.
+              All timestamps are Pakistan Standard Time (UTC+5). Reference dates
+              are the period a figure describes; collection timestamps are when
+              this platform learned it.
             </p>
           </div>
         </footer>

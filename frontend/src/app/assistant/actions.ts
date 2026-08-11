@@ -13,8 +13,18 @@
  * as a message in the transcript, not as a blown-up route.
  */
 
-import { ApiError, askAssistant, submitAssistantFeedback } from "@/lib/api";
-import type { AssistantAnswerDto } from "@/types/api";
+import {
+  ApiError,
+  askAssistant,
+  getAssistantSessions,
+  getAssistantTranscript,
+  submitAssistantFeedback,
+} from "@/lib/api";
+import type {
+  AssistantAnswerDto,
+  AssistantSessionSummaryDto,
+  AssistantTranscriptDto,
+} from "@/types/api";
 
 export type AskResult =
   | { readonly ok: true; readonly answer: AssistantAnswerDto }
@@ -83,6 +93,52 @@ export async function rate(
   } catch (error) {
     if (error instanceof ApiError) {
       return false;
+    }
+
+    throw error;
+  }
+}
+
+/**
+ * The caller's past conversations, for the resume list.
+ *
+ * Returns an empty list rather than an error when the API is unreachable. This is a convenience
+ * beside the chat, not the chat itself — a user who cannot see their history can still ask a
+ * question, and an error banner over a sidebar would be louder than the problem.
+ */
+export async function listChats(): Promise<AssistantSessionSummaryDto[]> {
+  try {
+    return await getAssistantSessions();
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+export type ResumeResult =
+  | { readonly ok: true; readonly transcript: AssistantTranscriptDto }
+  | { readonly ok: false; readonly detail: string };
+
+/**
+ * Reopens one past conversation.
+ *
+ * Unlike {@link listChats} this reports failure, because the user asked for something specific and
+ * silently showing them an empty chat would look like the conversation had been lost.
+ */
+export async function resumeChat(sessionId: string): Promise<ResumeResult> {
+  try {
+    return { ok: true, transcript: await getAssistantTranscript(sessionId) };
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return {
+        ok: false,
+        detail:
+          error.problem.detail ??
+          "That conversation could not be opened. It may have been removed.",
+      };
     }
 
     throw error;

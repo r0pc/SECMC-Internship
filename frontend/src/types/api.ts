@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The API contract, mirrored in TypeScript.
  *
  * Hand-written rather than generated, because the API's OpenAPI document is only served in
@@ -110,7 +110,7 @@ export interface SeriesLatestPointDto {
   referenceDate: IsoDate;
   value: number;
   /** When the platform learned this value (FR-6), not when it was published. */
-  collectedAtUtc: IsoUtcTimestamp;
+  collectedAtPkt: IsoUtcTimestamp;
 }
 
 export interface SeriesDto {
@@ -145,9 +145,9 @@ export interface ObservationDto {
   /** 0 is the first value seen for this period; each correction increments. */
   revisionNumber: number;
   isCurrent: boolean;
-  supersededAtUtc: IsoUtcTimestamp | null;
+  supersededAtPkt: IsoUtcTimestamp | null;
   sourceAnnotation: string | null;
-  collectedAtUtc: IsoUtcTimestamp;
+  collectedAtPkt: IsoUtcTimestamp;
   collectionRunId: number;
 }
 
@@ -202,11 +202,11 @@ export interface CollectionRunDto {
   collectionRunId: number;
   dataSourceId: number;
   sourceCode: string;
-  scheduledForUtc: IsoUtcTimestamp;
+  scheduledForPkt: IsoUtcTimestamp;
   attempt: number;
   triggerType: CollectionTriggerType;
-  startedAtUtc: IsoUtcTimestamp;
-  completedAtUtc: IsoUtcTimestamp | null;
+  startedAtPkt: IsoUtcTimestamp;
+  completedAtPkt: IsoUtcTimestamp | null;
   durationMs: number | null;
   status: CollectionRunStatus;
   httpStatusCode: number | null;
@@ -232,8 +232,8 @@ export interface SourceHealthDto {
   failedRuns: number;
   /** Null when the window holds no runs — which is not the same state as 100%. */
   successRatePercent: number | null;
-  lastRunAtUtc: IsoUtcTimestamp | null;
-  lastSuccessAtUtc: IsoUtcTimestamp | null;
+  lastRunAtPkt: IsoUtcTimestamp | null;
+  lastSuccessAtPkt: IsoUtcTimestamp | null;
   lastRunStatus: CollectionRunStatus | null;
   lastFailureCategory: CollectionFailureCategory | null;
   lastErrorMessage: string | null;
@@ -254,7 +254,7 @@ export interface DashboardSummaryDto {
   latestCpiMonth: IsoDate | null;
   earliestSofrDate: IsoDate | null;
   latestSofrDate: IsoDate | null;
-  lastCollectionAtUtc: IsoUtcTimestamp | null;
+  lastCollectionAtPkt: IsoUtcTimestamp | null;
   sources: SourceHealthDto[];
 }
 
@@ -350,4 +350,41 @@ export interface ProblemDetails {
   instance?: string;
   /** Present on 400s produced by `Results.ValidationProblem`. */
   errors?: Record<string, string[]>;
+}
+
+/** One of the caller's past conversations, as the resume list shows it. */
+export interface AssistantSessionSummaryDto {
+  sessionId: string;
+  startedAtPkt: IsoUtcTimestamp;
+  lastActivityAtPkt: IsoUtcTimestamp;
+  turnCount: number;
+  /** The conversation's first question, used as its title. Null if it somehow has none. */
+  title: string | null;
+  /**
+   * Tokens the whole conversation has cost the model. Null when none of its turns reported
+   * usage — unknown, which is not the same as free, so it must not be rendered as 0.
+   */
+  totalTokens: number | null;
+}
+
+/** One exchange in a replayed conversation. Narrower than a live answer: it has no result rows. */
+export interface AssistantTranscriptTurnDto {
+  assistantQueryId: number;
+  askedAtPkt: IsoUtcTimestamp;
+  question: string;
+  answer: string | null;
+  outcome: AssistantValidationOutcome;
+  generatedSql: string | null;
+  sqlParameters: Record<string, unknown> | null;
+  explanation: string | null;
+  wasExecuted: boolean;
+  resultRowCount: number | null;
+}
+
+/** A past conversation, in full. */
+export interface AssistantTranscriptDto {
+  sessionId: string;
+  startedAtPkt: IsoUtcTimestamp;
+  lastActivityAtPkt: IsoUtcTimestamp;
+  turns: AssistantTranscriptTurnDto[];
 }

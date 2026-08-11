@@ -1,4 +1,4 @@
-/*==============================================================================
+﻿/*==============================================================================
   Data Intelligence Platform — database schema (Phase 3 deliverable)
   Target: Microsoft SQL Server 2019+ (validated on 2022 / 2025)
 
@@ -69,10 +69,10 @@
         a new vintage when the value actually changed (RowHash).
   FR-4  Append-only. A revision adds a row; it never updates one.
   FR-5  Normalised: source -> run -> observation, one table per dataset.
-  FR-6  Every stored row carries CollectedAtUtc alongside its reference date.
+  FR-6  Every stored row carries CollectedAtPkt alongside its reference date.
   FR-9  sec.AppUser / sec.Role / sec.UserRole back API authn/authz.
-  NFR   Auditability: ai.AssistantQuery logs every AI-generated SQL statement,
-        whether it passed validation, and whether it was executed.
+  NFR   Auditability: ai.AssistantSession.TranscriptJson records every question, the
+        SQL it became, whether it passed validation and whether it was executed.
   NFR   Scalability: both fact tables are clustered on their date axis. At one
         CPI series and one rate the volumes are small by construction — roughly
         1,400 CPI rows for the full 1913-to-date history and ~250 SOFR rows a
@@ -88,6 +88,21 @@
 SET ANSI_NULLS ON;
 SET QUOTED_IDENTIFIER ON;
 GO
+
+/*------------------------------------------------------------------------------
+  TIME. Every ...AtPkt / ...ForPkt column holds a Pakistan Standard Time
+  (UTC+05:00) wall-clock reading. datetime2 carries no offset, so the suffix is
+  the only thing that says which clock a value is on -- keep it on any timestamp
+  column added later.
+
+  Defaults are DATEADD(hour, 5, SYSUTCDATETIME()) rather than
+  SYSDATETIMEOFFSET() AT TIME ZONE 'Pakistan Standard Time': the AT TIME ZONE
+  form needs a time-zone database entry whose name differs between Windows and
+  Linux hosts, while Pakistan has observed no daylight saving since 2009, so the
+  fixed offset is both the whole rule and the portable one. This mirrors
+  PakistanTime in DataIntelligence.Core, which is where it changes if that ever
+  stops being true.
+------------------------------------------------------------------------------*/
 
 IF SCHEMA_ID('collect')   IS NULL EXEC('CREATE SCHEMA collect');    -- ingestion
 IF SCHEMA_ID('core')      IS NULL EXEC('CREATE SCHEMA core');       -- curated data
@@ -135,11 +150,11 @@ CREATE TABLE collect.DataSource
     -- offering these APIs for programmatic use; the terms URL is recorded so the
     -- claim is auditable rather than assumed.
     TermsOfUseUrl       NVARCHAR(500)   NULL,
-    RobotsTxtCheckedAtUtc DATETIME2(3)  NULL,
+    RobotsTxtCheckedAtPkt DATETIME2(3)  NULL,
 
     IsEnabled           BIT             NOT NULL CONSTRAINT DF_DataSource_Enabled DEFAULT 1,
-    CreatedAtUtc        DATETIME2(3)    NOT NULL CONSTRAINT DF_DataSource_Created DEFAULT SYSUTCDATETIME(),
-    UpdatedAtUtc        DATETIME2(3)    NULL,
+    CreatedAtPkt        DATETIME2(3)    NOT NULL CONSTRAINT DF_DataSource_Created DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
+    UpdatedAtPkt        DATETIME2(3)    NULL,
 
     CONSTRAINT PK_DataSource        PRIMARY KEY (DataSourceId),
     CONSTRAINT UQ_DataSource_Code   UNIQUE (Code),
@@ -165,13 +180,13 @@ CREATE TABLE collect.CollectionRun
     -- The scheduled cycle this run satisfies. With Attempt, this is the run's
     -- idempotency key: a retry of the 10:00 CPI cycle is (1, 10:00, 2), which
     -- keeps retries distinguishable from a fresh cycle and from the other source.
-    ScheduledForUtc     DATETIME2(0)    NOT NULL,
+    ScheduledForPkt     DATETIME2(0)    NOT NULL,
     Attempt             TINYINT         NOT NULL CONSTRAINT DF_CollectionRun_Attempt DEFAULT 1,
     TriggerType         VARCHAR(20)     NOT NULL CONSTRAINT DF_CollectionRun_Trigger DEFAULT 'Scheduled',
 
-    StartedAtUtc        DATETIME2(3)    NOT NULL CONSTRAINT DF_CollectionRun_Started DEFAULT SYSUTCDATETIME(),
-    CompletedAtUtc      DATETIME2(3)    NULL,
-    DurationMs          AS DATEDIFF_BIG(MILLISECOND, StartedAtUtc, CompletedAtUtc),
+    StartedAtPkt        DATETIME2(3)    NOT NULL CONSTRAINT DF_CollectionRun_Started DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
+    CompletedAtPkt      DATETIME2(3)    NULL,
+    DurationMs          AS DATEDIFF_BIG(MILLISECOND, StartedAtPkt, CompletedAtPkt),
 
     Status              VARCHAR(20)     NOT NULL CONSTRAINT DF_CollectionRun_Status DEFAULT 'Running',
     RequestUrl          NVARCHAR(1000)  NOT NULL,
@@ -188,10 +203,10 @@ CREATE TABLE collect.CollectionRun
     FailureCategory     VARCHAR(30)     NULL,
     ErrorMessage        NVARCHAR(1000)  NULL,
     ErrorDetail         NVARCHAR(MAX)   NULL,
-    AlertSentAtUtc      DATETIME2(3)    NULL,   -- NFR Reliability: alert on failure
+    AlertSentAtPkt      DATETIME2(3)    NULL,   -- NFR Reliability: alert on failure
 
     CONSTRAINT PK_CollectionRun PRIMARY KEY (CollectionRunId),
-    CONSTRAINT UQ_CollectionRun_Cycle UNIQUE (DataSourceId, ScheduledForUtc, Attempt),
+    CONSTRAINT UQ_CollectionRun_Cycle UNIQUE (DataSourceId, ScheduledForPkt, Attempt),
     CONSTRAINT FK_CollectionRun_Source FOREIGN KEY (DataSourceId)
         REFERENCES collect.DataSource (DataSourceId),
     CONSTRAINT CK_CollectionRun_Status CHECK (Status IN
@@ -205,18 +220,18 @@ CREATE TABLE collect.CollectionRun
     CONSTRAINT CK_CollectionRun_FailureRequired CHECK
         (Status <> 'Failed' OR FailureCategory IS NOT NULL),
     CONSTRAINT CK_CollectionRun_Completed CHECK
-        (CompletedAtUtc IS NULL OR CompletedAtUtc >= StartedAtUtc)
+        (CompletedAtPkt IS NULL OR CompletedAtPkt >= StartedAtPkt)
 );
 GO
 
-CREATE INDEX IX_CollectionRun_StartedAtUtc
-    ON collect.CollectionRun (StartedAtUtc DESC)
+CREATE INDEX IX_CollectionRun_StartedAtPkt
+    ON collect.CollectionRun (StartedAtPkt DESC)
     INCLUDE (DataSourceId, Status, ObservationsInserted);
 
 -- Failures are rare; a filtered index keeps the health and alerting queries cheap.
 CREATE INDEX IX_CollectionRun_Failures
-    ON collect.CollectionRun (StartedAtUtc DESC)
-    INCLUDE (DataSourceId, FailureCategory, ErrorMessage, AlertSentAtUtc)
+    ON collect.CollectionRun (StartedAtPkt DESC)
+    INCLUDE (DataSourceId, FailureCategory, ErrorMessage, AlertSentAtPkt)
     WHERE Status IN ('Failed','PartialSuccess');
 GO
 
@@ -230,7 +245,7 @@ CREATE TABLE collect.RawPayload
 (
     RawPayloadId        BIGINT          IDENTITY(1,1) NOT NULL,
     CollectionRunId     BIGINT          NOT NULL,
-    FetchedAtUtc        DATETIME2(3)    NOT NULL CONSTRAINT DF_RawPayload_Fetched DEFAULT SYSUTCDATETIME(),
+    FetchedAtPkt        DATETIME2(3)    NOT NULL CONSTRAINT DF_RawPayload_Fetched DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
     ContentType         NVARCHAR(100)   NULL,
 
     -- SHA-256 of the uncompressed body. An unchanged hash between consecutive
@@ -248,7 +263,7 @@ CREATE TABLE collect.RawPayload
 GO
 
 CREATE INDEX IX_RawPayload_Run  ON collect.RawPayload (CollectionRunId);
-CREATE INDEX IX_RawPayload_Hash ON collect.RawPayload (ContentHash, FetchedAtUtc DESC);
+CREATE INDEX IX_RawPayload_Hash ON collect.RawPayload (ContentHash, FetchedAtPkt DESC);
 GO
 
 /*==============================================================================
@@ -279,7 +294,7 @@ GO
     ReferenceDate  — first day of the period the number describes (2026-06-01
                      for M06; 2026-01-01 for M13 and S01; 2026-07-01 for S02).
                      The analytical axis.
-    CollectedAtUtc — when this platform learned it (FR-6). The audit axis.
+    CollectedAtPkt — when this platform learned it (FR-6). The audit axis.
   Asking "what did we believe CPI for June was, on 15 July?" needs both.
 
   Gaps are absent, not zero. CPI.csv has no October 2025 value at the time of
@@ -313,10 +328,10 @@ CREATE TABLE core.CpiObservation
     -- 0 is the first value we saw for this period; each later correction increments.
     RevisionNumber      SMALLINT        NOT NULL CONSTRAINT DF_Cpi_Revision DEFAULT 0,
     IsCurrent           BIT             NOT NULL CONSTRAINT DF_Cpi_Current DEFAULT 1,
-    SupersededAtUtc     DATETIME2(3)    NULL,
+    SupersededAtPkt     DATETIME2(3)    NULL,
 
     CollectionRunId     BIGINT          NOT NULL,
-    CollectedAtUtc      DATETIME2(3)    NOT NULL,   -- FR-6
+    CollectedAtPkt      DATETIME2(3)    NOT NULL,   -- FR-6
 
     -- SHA-256 over the value tuple, computed by the collector. Equal to the
     -- current vintage's hash means BLS reissued the same number, so no row is
@@ -355,8 +370,8 @@ CREATE TABLE core.CpiObservation
     CONSTRAINT CK_Cpi_Revision CHECK (RevisionNumber >= 0),
     -- A superseded row is not current, and a current row is not superseded.
     CONSTRAINT CK_Cpi_Superseded CHECK
-        ((IsCurrent = 1 AND SupersededAtUtc IS NULL)
-      OR (IsCurrent = 0 AND SupersededAtUtc IS NOT NULL))
+        ((IsCurrent = 1 AND SupersededAtPkt IS NULL)
+      OR (IsCurrent = 0 AND SupersededAtPkt IS NOT NULL))
 );
 GO
 
@@ -424,7 +439,7 @@ CREATE TABLE core.SofrDailyRate
 
     -- The business day the rate covers — the CSV's "Effective Date". Published
     -- the following business morning, ~08:00 ET, which is why this and
-    -- CollectedAtUtc are never the same instant.
+    -- CollectedAtPkt are never the same instant.
     EffectiveDate       DATE            NOT NULL,
 
     RatePercent         DECIMAL(9,5)    NOT NULL,   -- "Rate (%)", percent per annum
@@ -454,10 +469,10 @@ CREATE TABLE core.SofrDailyRate
 
     RevisionNumber      SMALLINT        NOT NULL CONSTRAINT DF_Sofr_Revision DEFAULT 0,
     IsCurrent           BIT             NOT NULL CONSTRAINT DF_Sofr_Current DEFAULT 1,
-    SupersededAtUtc     DATETIME2(3)    NULL,
+    SupersededAtPkt     DATETIME2(3)    NULL,
 
     CollectionRunId     BIGINT          NOT NULL,
-    CollectedAtUtc      DATETIME2(3)    NOT NULL,   -- FR-6
+    CollectedAtPkt      DATETIME2(3)    NOT NULL,   -- FR-6
 
     RowHash             BINARY(32)      NOT NULL,   -- FR-3, as for CPI
 
@@ -484,8 +499,8 @@ CREATE TABLE core.SofrDailyRate
             OR Percentile75Percent <= Percentile99Percent)),
     CONSTRAINT CK_Sofr_Revision CHECK (RevisionNumber >= 0),
     CONSTRAINT CK_Sofr_Superseded CHECK
-        ((IsCurrent = 1 AND SupersededAtUtc IS NULL)
-      OR (IsCurrent = 0 AND SupersededAtUtc IS NOT NULL))
+        ((IsCurrent = 1 AND SupersededAtPkt IS NULL)
+      OR (IsCurrent = 0 AND SupersededAtPkt IS NOT NULL))
 );
 GO
 
@@ -519,7 +534,7 @@ CREATE TABLE core.RejectedObservation
     -- The BLS series id, or the NY Fed rate type, as published.
     SeriesCode          NVARCHAR(100)   NULL,
     ReferenceDateText   NVARCHAR(50)    NULL,   -- as published; may be why it was rejected
-    RejectedAtUtc       DATETIME2(3)    NOT NULL CONSTRAINT DF_Rejected_At DEFAULT SYSUTCDATETIME(),
+    RejectedAtPkt       DATETIME2(3)    NOT NULL CONSTRAINT DF_Rejected_At DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
     Reason              VARCHAR(30)     NOT NULL,
     ReasonDetail        NVARCHAR(1000)  NULL,
     RawFragment         NVARCHAR(MAX)   NULL,
@@ -534,7 +549,7 @@ CREATE TABLE core.RejectedObservation
 GO
 
 CREATE INDEX IX_RejectedObservation_Run
-    ON core.RejectedObservation (CollectionRunId, RejectedAtUtc DESC);
+    ON core.RejectedObservation (CollectionRunId, RejectedAtPkt DESC);
 GO
 
 /*==============================================================================
@@ -551,8 +566,8 @@ CREATE TABLE sec.AppUser
     PasswordHash        NVARCHAR(500)   NOT NULL,   -- ASP.NET Identity v3 format
     SecurityStamp       UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_AppUser_Stamp DEFAULT NEWID(),
     IsActive            BIT             NOT NULL CONSTRAINT DF_AppUser_Active DEFAULT 1,
-    CreatedAtUtc        DATETIME2(3)    NOT NULL CONSTRAINT DF_AppUser_Created DEFAULT SYSUTCDATETIME(),
-    LastLoginAtUtc      DATETIME2(3)    NULL,
+    CreatedAtPkt        DATETIME2(3)    NOT NULL CONSTRAINT DF_AppUser_Created DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
+    LastLoginAtPkt      DATETIME2(3)    NULL,
 
     CONSTRAINT PK_AppUser       PRIMARY KEY (UserId),
     CONSTRAINT UQ_AppUser_Email UNIQUE (Email)
@@ -574,7 +589,7 @@ CREATE TABLE sec.UserRole
 (
     UserId              INT             NOT NULL,
     RoleId              TINYINT         NOT NULL,
-    GrantedAtUtc        DATETIME2(3)    NOT NULL CONSTRAINT DF_UserRole_Granted DEFAULT SYSUTCDATETIME(),
+    GrantedAtPkt        DATETIME2(3)    NOT NULL CONSTRAINT DF_UserRole_Granted DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
 
     CONSTRAINT PK_UserRole      PRIMARY KEY (UserId, RoleId),
     CONSTRAINT FK_UserRole_User FOREIGN KEY (UserId) REFERENCES sec.AppUser (UserId) ON DELETE CASCADE,
@@ -588,6 +603,35 @@ INSERT INTO sec.Role (Name, Description) VALUES
     (N'Viewer',        N'Read-only dashboards.');
 GO
 
+/*------------------------------------------------------------------------------
+  The placeholder the assistant runs as until FR-9 lands.
+
+  Not optional, and not a convenience. Authentication is not built yet, so
+  AssistantEndpoints passes a hard-coded userId: 1 with every question, and both
+  ai.AssistantSession and ai.AssistantQuery carry a foreign key to sec.AppUser.
+  Without this row the FIRST question anyone asks fails on
+  FK_AssistantSession_User -- a fresh database that looks perfectly healthy until
+  someone opens the assistant.
+
+  UserId is IDENTITY, so the value is forced rather than allocated: the endpoint
+  names 1 specifically, and a row that happened to land on 2 would not satisfy it.
+  Identity resumes at 2 afterwards, leaving real accounts unaffected.
+
+  PasswordHash is deliberately not a hash. ASP.NET Identity v3 stores base64 of a
+  byte array; this string cannot decode as one, so no password can ever verify
+  against it and the placeholder cannot become a way in. FR-9 should delete this
+  row once real accounts exist -- reassign or remove the audit rows pointing at
+  it first, since those are the record of who asked what.
+------------------------------------------------------------------------------*/
+SET IDENTITY_INSERT sec.AppUser ON;
+
+IF NOT EXISTS (SELECT 1 FROM sec.AppUser WHERE UserId = 1)
+    INSERT INTO sec.AppUser (UserId, Email, DisplayName, PasswordHash, IsActive) VALUES
+        (1, N'assistant-placeholder@local', N'Placeholder (pre-FR-9)', N'!NO-LOGIN!', 1);
+
+SET IDENTITY_INSERT sec.AppUser OFF;
+GO
+
 /*==============================================================================
   4. AI QUERY ASSISTANT (FR-13 .. FR-17, NFR Auditability)
   Every generated statement is logged BEFORE execution, so a query rejected by
@@ -597,88 +641,48 @@ CREATE TABLE ai.AssistantSession
 (
     SessionId           UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_Session_Id DEFAULT NEWSEQUENTIALID(),
     UserId              INT             NOT NULL,
-    StartedAtUtc        DATETIME2(3)    NOT NULL CONSTRAINT DF_Session_Started DEFAULT SYSUTCDATETIME(),
-    LastActivityAtUtc   DATETIME2(3)    NOT NULL CONSTRAINT DF_Session_Activity DEFAULT SYSUTCDATETIME(),
+    StartedAtPkt        DATETIME2(3)    NOT NULL CONSTRAINT DF_Session_Started DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
+    LastActivityAtPkt   DATETIME2(3)    NOT NULL CONSTRAINT DF_Session_Activity DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
+
+    -- The whole conversation as one JSON document: every turn, in order, as the chat was had.
+    -- THIS IS THE RECORD. ai.AssistantQuery is no longer written; what is not in here was not
+    -- kept. Each turn carries the question, the SQL it became, the bound parameters, the outcome,
+    -- the answer, token usage and timings -- see ChatTranscriptTurn, which defines the shape, and
+    -- section 5's note on the audit-log view that reads it back with OPENJSON.
+    --
+    -- Result rows are excluded: a turn may return up to 2,000 of them, and a document rewritten on
+    -- every turn would grow by megabytes to hold what re-running the stored statement reproduces.
+    --
+    -- Two costs of keeping a conversation as a document rather than as rows. Writes are
+    -- read-modify-write of the whole thing, so two questions answered against one session at the
+    -- same instant will both load it and the later save will drop the other's turn -- a row insert
+    -- could not lose a turn. And nothing here can be indexed: the review queue shreds every
+    -- transcript in the table on every call, where it used to seek IX_AssistantQuery_Rejected.
+    TranscriptJson      NVARCHAR(MAX)   NULL,
+
+    -- What the whole conversation has cost the model, in tokens: the turns' own totals added up.
+    -- Derived from TranscriptJson and therefore a denormalisation, kept because the chat list shows
+    -- this for every conversation a user has -- computing it there would shred each of their
+    -- transcripts with OPENJSON to return one integer per chat, which is the entire history parsed
+    -- to draw a list. AssistantService rewrites it on every save, and is the only writer; anything
+    -- that edits TranscriptJson without going through it leaves this stale and nothing here will
+    -- notice.
+    --
+    -- NULL means no turn in the conversation reported usage -- not known, as opposed to a chat that
+    -- cost nothing, which is why it is nullable rather than DEFAULT 0. Where only some turns
+    -- reported usage this is a floor rather than an exact figure.
+    TotalTokens         INT             NULL,
 
     CONSTRAINT PK_AssistantSession PRIMARY KEY (SessionId),
-    CONSTRAINT FK_AssistantSession_User FOREIGN KEY (UserId) REFERENCES sec.AppUser (UserId)
+    CONSTRAINT FK_AssistantSession_User FOREIGN KEY (UserId) REFERENCES sec.AppUser (UserId),
+    -- Checked by the database, not trusted from the application. A malformed document is otherwise
+    -- found by whoever reads the transcript back, which can be long after the write that broke it.
+    CONSTRAINT CK_AssistantSession_TranscriptJson CHECK
+        (TranscriptJson IS NULL OR ISJSON(TranscriptJson) = 1)
 );
 GO
 
-CREATE INDEX IX_AssistantSession_User ON ai.AssistantSession (UserId, StartedAtUtc DESC);
-GO
-
-CREATE TABLE ai.AssistantQuery
-(
-    AssistantQueryId    BIGINT          IDENTITY(1,1) NOT NULL,
-    SessionId           UNIQUEIDENTIFIER NOT NULL,
-    UserId              INT             NOT NULL,   -- denormalised: the audit trail must
-                                                    -- survive session cleanup
-    AskedAtUtc          DATETIME2(3)    NOT NULL CONSTRAINT DF_Query_Asked DEFAULT SYSUTCDATETIME(),
-    QuestionText        NVARCHAR(2000)  NOT NULL,   -- FR-13
-
-    -- FR-14 / auditability: the statement exactly as the model produced it, with the literals
-    -- it lifted out kept separate, so what is reviewed is what was bound and executed.
-    GeneratedSql        NVARCHAR(MAX)   NULL,
-    SqlParametersJson   NVARCHAR(MAX)   NULL,
-    -- FR-13: the model's own account of what it wrote. Recorded because a reviewer needs to know
-    -- what it believed it was writing, not only what it wrote -- the two disagreeing is the finding.
-    Explanation         NVARCHAR(2000)  NULL,
-    -- 30, not 20: 'RejectedForbiddenObject' is 23 characters. At 20 the CHECK below would permit
-    -- a value the column cannot hold, and the insert would fail on truncation instead.
-    ValidationOutcome   VARCHAR(30)     NOT NULL CONSTRAINT DF_Query_Validation DEFAULT 'Pending',
-    ValidationDetail    NVARCHAR(1000)  NULL,
-
-    -- FR-15
-    WasExecuted         BIT             NOT NULL CONSTRAINT DF_Query_Executed DEFAULT 0,
-    ExecutionStatus     VARCHAR(20)     NULL,
-    ExecutionMs         INT             NULL,
-    ResultRowCount      INT             NULL,
-    ExecutionError      NVARCHAR(1000)  NULL,
-
-    AnswerText          NVARCHAR(MAX)   NULL,       -- FR-16
-    VisualizationJson   NVARCHAR(MAX)   NULL,       -- FR-17 (stretch) chart config
-
-    ModelName           NVARCHAR(100)   NULL,
-    PromptTokens        INT             NULL,
-    CompletionTokens    INT             NULL,
-    TotalLatencyMs      INT             NULL,
-    ClientIpHash        BINARY(32)      NULL,       -- hashed, not raw (SOW 3 — Security)
-
-    CONSTRAINT PK_AssistantQuery PRIMARY KEY (AssistantQueryId),
-    CONSTRAINT FK_AssistantQuery_Session FOREIGN KEY (SessionId)
-        REFERENCES ai.AssistantSession (SessionId),
-    CONSTRAINT FK_AssistantQuery_User FOREIGN KEY (UserId)
-        REFERENCES sec.AppUser (UserId),
-    CONSTRAINT CK_AssistantQuery_Validation CHECK (ValidationOutcome IN
-        ('Pending','Approved','RejectedNotSelect','RejectedForbiddenObject',
-         'RejectedSyntax','RejectedComplexity','RejectedNoSql','NotADataQuestion',
-         'RejectedUnreadableResponse')),
-    CONSTRAINT CK_AssistantQuery_Execution CHECK (ExecutionStatus IS NULL OR ExecutionStatus IN
-        ('Succeeded','Failed','Timeout','Cancelled')),
-    -- Nothing executes unless validation approved it (SOW 9: unsafe AI SQL).
-    CONSTRAINT CK_AssistantQuery_NoUnvalidatedRun CHECK
-        (WasExecuted = 0 OR ValidationOutcome = 'Approved')
-);
-GO
-
-CREATE INDEX IX_AssistantQuery_AskedAtUtc ON ai.AssistantQuery (AskedAtUtc DESC);
-CREATE INDEX IX_AssistantQuery_User       ON ai.AssistantQuery (UserId, AskedAtUtc DESC);
--- Conversation memory: the last few turns of one session, so a follow-up like "and the year
--- before that?" can be resolved against what was asked already. SQL Server does not index a
--- foreign key on its own, so without this the FK to AssistantSession makes the relationship valid
--- but not fast, and every question would scan every question ever asked.
-CREATE INDEX IX_AssistantQuery_Session    ON ai.AssistantQuery (SessionId, AskedAtUtc DESC);
--- Review queue: everything the validator turned away that is worth a human's attention.
--- NotADataQuestion is excluded deliberately. Both it and RejectedNoSql produce no SQL, but only
--- one is interesting: "show me the password hashes" is a probe, and "hi" is not. Filed together,
--- the volume of the second buries the first, which is exactly what this index exists to prevent.
--- Chained <> rather than NOT IN: a filtered index predicate does not accept NOT IN.
-CREATE INDEX IX_AssistantQuery_Rejected   ON ai.AssistantQuery (AskedAtUtc DESC)
-    INCLUDE (QuestionText, ValidationOutcome, ValidationDetail)
-    WHERE ValidationOutcome <> 'Approved'
-      AND ValidationOutcome <> 'Pending'
-      AND ValidationOutcome <> 'NotADataQuestion';
+CREATE INDEX IX_AssistantSession_User ON ai.AssistantSession (UserId, StartedAtPkt DESC);
 GO
 
 CREATE TABLE ai.AssistantFeedback
@@ -686,12 +690,37 @@ CREATE TABLE ai.AssistantFeedback
     AssistantQueryId    BIGINT          NOT NULL,
     IsHelpful           BIT             NOT NULL,
     Comment             NVARCHAR(1000)  NULL,
-    SubmittedAtUtc      DATETIME2(3)    NOT NULL CONSTRAINT DF_Feedback_At DEFAULT SYSUTCDATETIME(),
+    SubmittedAtPkt      DATETIME2(3)    NOT NULL CONSTRAINT DF_Feedback_At DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
 
-    CONSTRAINT PK_AssistantFeedback PRIMARY KEY (AssistantQueryId),
-    CONSTRAINT FK_AssistantFeedback_Query FOREIGN KEY (AssistantQueryId)
-        REFERENCES ai.AssistantQuery (AssistantQueryId) ON DELETE CASCADE
+    -- No foreign key. The turn this feedback is about lives inside
+    -- ai.AssistantSession.TranscriptJson, and a key cannot reference a value inside a document.
+    -- AssistantQueryId is therefore an unenforced id drawn from ai.AssistantTurnId: nothing stops
+    -- a row here from naming a turn that does not exist, and deleting a session no longer cascades
+    -- to the feedback on its turns. The API checks the turn exists before writing, which covers
+    -- everything going through it and nothing going around it.
+    CONSTRAINT PK_AssistantFeedback PRIMARY KEY (AssistantQueryId)
 );
+GO
+
+/*------------------------------------------------------------------------------
+  Turn ids.
+
+  ai.AssistantQuery used to allocate these from its IDENTITY column. Turns now
+  live in ai.AssistantSession.TranscriptJson and no row is inserted per turn, so
+  the id has to come from somewhere that is not a table.
+
+  It must be unique across sessions, not within one: this is the id the API
+  returns and the id POST /assistant/queries/{id}/feedback takes, so numbering
+  turns 1..n per conversation would have every session claiming turn 1.
+
+  START WITH 1 is right only for a new database. An existing one that has already
+  written ai.AssistantQuery rows must start above the last of them, or new turns
+  will reuse ids that old feedback rows still point at:
+      DECLARE @next BIGINT = (SELECT ISNULL(MAX(AssistantQueryId), 0) + 1 FROM ai.AssistantQuery);
+      DECLARE @sql NVARCHAR(200) = N'ALTER SEQUENCE ai.AssistantTurnId RESTART WITH ' + CAST(@next AS NVARCHAR(20));
+      EXEC sp_executesql @sql;
+------------------------------------------------------------------------------*/
+CREATE SEQUENCE ai.AssistantTurnId AS BIGINT START WITH 1 INCREMENT BY 1 NO CACHE;
 GO
 
 /*==============================================================================
@@ -729,7 +758,7 @@ SELECT  c.ReferenceDate,
         c.IndexValue,
         c.RevisionNumber,
         c.Footnotes,
-        c.CollectedAtUtc
+        c.CollectedAtPkt
 FROM    core.CpiObservation AS c
 WHERE   c.IsCurrent = 1;
 GO
@@ -784,7 +813,7 @@ SELECT  c.ReferenceYear,
         MAX(CASE WHEN c.PeriodCode = 'M13' THEN c.IndexValue END) AS AnnualValue,
         MAX(CASE WHEN c.PeriodCode = 'S01' THEN c.IndexValue END) AS FirstHalfValue,
         MAX(CASE WHEN c.PeriodCode = 'S02' THEN c.IndexValue END) AS SecondHalfValue,
-        MAX(c.CollectedAtUtc)                                     AS CollectedAtUtc
+        MAX(c.CollectedAtPkt)                                     AS CollectedAtPkt
 FROM    core.CpiObservation AS c
 WHERE   c.IsCurrent = 1
   AND   c.PeriodType IN ('Annual','Semiannual')
@@ -809,7 +838,7 @@ SELECT  s.EffectiveDate,
         s.SofrIndexValue,
         s.RevisionIndicator,
         s.RevisionNumber,
-        s.CollectedAtUtc
+        s.CollectedAtPkt
 FROM    core.SofrDailyRate AS s
 WHERE   s.IsCurrent = 1;
 GO
@@ -852,8 +881,8 @@ SELECT  'CPI'                   AS IndicatorCode,
         N'Index 1982-84=100'    AS Unit,
         c.ReferenceDate         AS AsOfDate,
         c.IndexValue            AS Value,
-        c.CollectedAtUtc
-FROM   (SELECT TOP (1) o.ReferenceDate, o.IndexValue, o.CollectedAtUtc
+        c.CollectedAtPkt
+FROM   (SELECT TOP (1) o.ReferenceDate, o.IndexValue, o.CollectedAtPkt
         FROM   core.CpiObservation AS o
         WHERE  o.IsCurrent = 1
           AND  o.PeriodType = 'Month'
@@ -864,8 +893,8 @@ SELECT  'SOFR',
         N'Percent per annum',
         s.EffectiveDate,
         s.RatePercent,
-        s.CollectedAtUtc
-FROM   (SELECT TOP (1) r.EffectiveDate, r.RatePercent, r.CollectedAtUtc
+        s.CollectedAtPkt
+FROM   (SELECT TOP (1) r.EffectiveDate, r.RatePercent, r.CollectedAtPkt
         FROM   core.SofrDailyRate AS r
         WHERE  r.IsCurrent = 1
         ORDER  BY r.EffectiveDate DESC) AS s;
@@ -885,8 +914,8 @@ SELECT  c.ReferenceDate,
         c.IndexValue,
         c.IsCurrent,
         c.Footnotes,
-        c.CollectedAtUtc,
-        c.SupersededAtUtc
+        c.CollectedAtPkt,
+        c.SupersededAtPkt
 FROM    core.CpiObservation AS c
 WHERE   EXISTS (SELECT 1 FROM core.CpiObservation AS r
                 WHERE r.ReferenceYear = c.ReferenceYear
@@ -902,8 +931,8 @@ SELECT  s.EffectiveDate,
         s.VolumeUsdBillions,
         s.IsCurrent,
         s.RevisionIndicator,
-        s.CollectedAtUtc,
-        s.SupersededAtUtc
+        s.CollectedAtPkt,
+        s.SupersededAtPkt
 FROM    core.SofrDailyRate AS s
 WHERE   EXISTS (SELECT 1 FROM core.SofrDailyRate AS r
                 WHERE r.EffectiveDate = s.EffectiveDate
@@ -915,7 +944,7 @@ CREATE VIEW analytics.vw_CollectionHealth
 AS
 SELECT  d.Code                                                          AS SourceCode,
         d.Name                                                          AS SourceName,
-        CONVERT(date, r.StartedAtUtc)                                   AS RunDate,
+        CONVERT(date, r.StartedAtPkt)                                   AS RunDate,
         COUNT_BIG(*)                                                    AS TotalRuns,
         SUM(CASE WHEN r.Status = 'Succeeded' THEN 1 ELSE 0 END)         AS SucceededRuns,
         SUM(CASE WHEN r.Status = 'Failed'    THEN 1 ELSE 0 END)         AS FailedRuns,
@@ -928,9 +957,12 @@ SELECT  d.Code                                                          AS Sourc
         AVG(r.DurationMs)                                               AS AvgDurationMs
 FROM    collect.CollectionRun AS r
 JOIN    collect.DataSource AS d ON d.DataSourceId = r.DataSourceId
-WHERE   r.StartedAtUtc >= DATEADD(day, -30, SYSUTCDATETIME())
+-- PKT on both sides. StartedAtPkt is a Pakistan wall-clock reading, so comparing it
+-- against SYSUTCDATETIME() would slide the 30-day window by five hours -- small, silent,
+-- and wrong in the direction of hiding the most recent runs.
+WHERE   r.StartedAtPkt >= DATEADD(day, -30, DATEADD(hour, 5, SYSUTCDATETIME()))
   AND   r.Status <> 'Running'
-GROUP BY d.Code, d.Name, CONVERT(date, r.StartedAtUtc);
+GROUP BY d.Code, d.Name, CONVERT(date, r.StartedAtPkt);
 GO
 
 /*==============================================================================
@@ -1034,7 +1066,7 @@ GO
   8. NOTES FOR PHASE 4
 ------------------------------------------------------------------------------
   Revision handling. Inserting a revision is two statements in one transaction:
-  clear IsCurrent (setting SupersededAtUtc) on the existing current row, then
+  clear IsCurrent (setting SupersededAtPkt) on the existing current row, then
   insert the new vintage with RevisionNumber + 1. UQ_CpiObservation_Current and
   UQ_SofrDailyRate_Current make a mistake here a hard failure rather than a
   silently duplicated period.
@@ -1070,7 +1102,7 @@ GO
   purge beyond ~90 days. The two fact tables are never purged (FR-4).
 
   Append-only enforcement. Both fact tables are append-only by convention,
-  except for the IsCurrent/SupersededAtUtc flip that a revision performs. If the
+  except for the IsCurrent/SupersededAtPkt flip that a revision performs. If the
   sponsor wants it enforced in the database, an INSTEAD OF DELETE trigger plus
   an UPDATE trigger restricted to those two columns is the lighter option.
 

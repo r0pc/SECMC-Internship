@@ -1,4 +1,4 @@
-import Link from "next/link";
+﻿import Link from "next/link";
 import { Suspense } from "react";
 
 import { Card, CardBody, CardHeader, PageHeader, Stat } from "@/components/card";
@@ -13,7 +13,7 @@ import {
   formatReferenceDate,
   formatTimestamp,
   subtractMonths,
-  todayUtc,
+  todayPkt,
 } from "@/lib/format";
 import {
   CPI_SERIES_KEY,
@@ -98,7 +98,7 @@ function KpiRowFallback() {
  * makes the distribution readable against the rate. CPI is an index and gets its own.
  */
 async function TrendPanels() {
-  const to = todayUtc();
+  const to = todayPkt();
   const from = subtractMonths(to, DEFAULT_RANGE_MONTHS);
 
   const result = await attempt(
@@ -190,8 +190,8 @@ async function CoveragePanel() {
             />
             <Stat
               label="Last collection"
-              value={formatAge(summary.lastCollectionAtUtc, now)}
-              hint={formatTimestamp(summary.lastCollectionAtUtc)}
+              value={formatAge(summary.lastCollectionAtPkt, now)}
+              hint={formatTimestamp(summary.lastCollectionAtPkt)}
             />
           </dl>
         </CardBody>

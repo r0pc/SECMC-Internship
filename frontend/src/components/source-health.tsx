@@ -1,4 +1,4 @@
-import { Badge, CollectionStatusBadge } from "@/components/badges";
+﻿import { Badge, CollectionStatusBadge } from "@/components/badges";
 import {
   NOT_AVAILABLE,
   formatAge,
@@ -79,10 +79,10 @@ export function SourceHealthCard({
         <div>
           <dt className="text-xs text-zinc-500 dark:text-zinc-400">Last run</dt>
           <dd className="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
-            {formatAge(health.lastRunAtUtc, now)}
+            {formatAge(health.lastRunAtPkt, now)}
           </dd>
           <dd className="text-xs text-zinc-500 dark:text-zinc-400">
-            {formatTimestamp(health.lastRunAtUtc)}
+            {formatTimestamp(health.lastRunAtPkt)}
           </dd>
         </div>
 
@@ -91,10 +91,10 @@ export function SourceHealthCard({
             Last success
           </dt>
           <dd className="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
-            {formatAge(health.lastSuccessAtUtc, now)}
+            {formatAge(health.lastSuccessAtPkt, now)}
           </dd>
           <dd className="text-xs text-zinc-500 dark:text-zinc-400">
-            {formatTimestamp(health.lastSuccessAtUtc)}
+            {formatTimestamp(health.lastSuccessAtPkt)}
           </dd>
         </div>
       </dl>

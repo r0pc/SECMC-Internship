@@ -32,6 +32,9 @@ const dayFormatter = new Intl.DateTimeFormat(LOCALE, {
   timeZone: "UTC",
 });
 
+/** The one clock the platform reports in. Mirrors PakistanTime.IanaId on the backend. */
+export const PAKISTAN_TIME_ZONE = "Asia/Karachi";
+
 const timestampFormatter = new Intl.DateTimeFormat(LOCALE, {
   day: "numeric",
   month: "short",
@@ -39,7 +42,10 @@ const timestampFormatter = new Intl.DateTimeFormat(LOCALE, {
   hour: "2-digit",
   minute: "2-digit",
   hourCycle: "h23",
-  timeZone: "UTC",
+  // The platform records and reports in Pakistan Standard Time (see PakistanTime in
+  // DataIntelligence.Core). Pinned rather than left to the viewer's machine: a timestamp that
+  // renders differently in Karachi and on a CI box in UTC is a timestamp nobody can quote.
+  timeZone: PAKISTAN_TIME_ZONE,
 });
 
 /** Shown wherever a nullable field is genuinely absent, rather than zero. */
@@ -272,9 +278,16 @@ export function humanizeEnum(value: string | null | undefined): string {
   return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
 }
 
-/** Today in UTC as a `DateOnly`, for building default ranges. */
-export function todayUtc(now: Date = new Date()): IsoDate {
-  return now.toISOString().slice(0, 10);
+/**
+ * Today in Pakistan Standard Time as a `DateOnly`, for building default ranges.
+ *
+ * Not `toISOString().slice(0, 10)`, which is today in UTC: for the five hours after midnight PKT
+ * that returns yesterday, so a "last 30 days" range built just after midnight would quietly start
+ * and end a day early for every user in Pakistan.
+ */
+export function todayPkt(now: Date = new Date()): IsoDate {
+  // en-CA formats as yyyy-MM-dd, which is the shape IsoDate wants.
+  return new Intl.DateTimeFormat("en-CA", { timeZone: PAKISTAN_TIME_ZONE }).format(now);
 }
 
 /** A `DateOnly` a whole number of months before another. Clamps to the last valid day. */

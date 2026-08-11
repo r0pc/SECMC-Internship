@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import Link from "next/link";
 
 import { Badge } from "@/components/badges";
@@ -148,7 +148,7 @@ export default async function SeriesPage({
                           series.frequency,
                         )}
                         <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                          collected {formatTimestamp(series.latest.collectedAtUtc)}
+                          collected {formatTimestamp(series.latest.collectedAtPkt)}
                         </p>
                       </>
                     ) : (
