@@ -54,7 +54,7 @@ developed, built, and deployed separately and communicate only over HTTP.
 | Database | Microsoft SQL Server |
 | ORM | Entity Framework Core 10 |
 | Frontend | Next.js 16 (App Router), TypeScript, Tailwind CSS |
-| AI | LLM API for NL-to-SQL translation and NL answers (provider TBD) |
+| AI | DeepSeek (`deepseek-v4-flash`) for NL-to-SQL translation and NL answers |
 | CI/CD | GitHub Actions or equivalent |
 
 ## Getting Started
@@ -96,19 +96,31 @@ pipeline is running against both live APIs.
 | Data collection (FR-1 – FR-4, FR-8) | Implemented. Hourly, per source, with failure categories, deduplication and revision history |
 | Read API (FR-7, FR-10 – FR-12) | Dashboard, catalogue, observation and collection-log endpoints |
 | Authentication (FR-9) | Not started — every endpoint is currently anonymous |
-| AI query assistant (FR-13 – FR-16) | Not started. Schema and audit tables exist |
+| AI query assistant (FR-13 – FR-16) | Delivered. Question to SQL, safety validation, read-only execution, natural-language answer, and a full audit record of every turn |
 | Frontend dashboards (FR-10 – FR-12) | Delivered. Dashboard, series catalogue, series detail, collection log and sources, server-rendered against the live API |
+| Frontend assistant (FR-13 – FR-16) | Delivered. Chat with resumable conversations, the generated SQL behind a disclosure, and per-chat token cost |
+
+The assistant answers only from collected data. A question becomes a read-only `SELECT` over the
+`analytics.*` views, the statement is validated before it runs, and the answer is written from the
+rows that came back — a question that cannot be expressed against the data is refused rather than
+answered from the model's own memory. Every turn is recorded, refusals included: the question, the
+SQL, the parameters, the outcome, the answer, token usage and timings (NFR Auditability). Both are
+visible in the UI — the SQL behind each answer, and what each conversation has cost in tokens.
+
+Timestamps in the database are Pakistan Standard Time (UTC+05:00) wall-clock readings, named with
+an `...AtPkt` suffix. The frontend offers a light/dark theme toggle, remembered per browser and
+defaulting to the operating system's setting.
 
 Known gaps worth tracking:
 
 - The `analytics.*` views and least-privilege roles exist only in
   [docs/database-schema.sql](docs/database-schema.sql), not in the EF migration, so a
-  migration-built database lacks them.
-- The API host registers one read-write `DbContext`. The AI assistant's separate read-only
-  connection (SOW 9, Risk 3) is not wired up — it belongs with the SQL-safety work.
+  migration-built database lacks them — including the views the assistant queries.
 - The Scope of Work still describes a single scraped source; it needs refreshing against the
   signed-off API sources, and against the narrowing to one CPI series and the current year of SOFR.
 - Architecture document and risk log (Phase 3 deliverables) are not started.
+- Nothing in CI runs against `frontend/`, and the OpenAPI document is not published as a versioned
+  artifact under `docs/`.
 - No performance measurement has been taken against the 3-second dashboard budget; there is no
   seeded staging environment to take it in yet.
 
