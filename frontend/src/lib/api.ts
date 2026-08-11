@@ -14,7 +14,6 @@ import type {
   AssistantAnswerDto,
   AssistantSessionSummaryDto,
   AssistantTranscriptDto,
-  AssistantFeedbackRequest,
   CollectionRunDto,
   CollectionRunStatus,
   DashboardSummaryDto,
@@ -367,14 +366,4 @@ export function getAssistantSessions(limit?: number) {
 /** One past conversation, in full, for replaying into the chat. */
 export function getAssistantTranscript(sessionId: string) {
   return apiFetch<AssistantTranscriptDto>(`/api/assistant/sessions/${sessionId}`);
-}
-
-export function submitAssistantFeedback(
-  assistantQueryId: number,
-  request: AssistantFeedbackRequest,
-) {
-  return apiPost<void>(
-    `/api/assistant/queries/${assistantQueryId}/feedback`,
-    request,
-  );
 }

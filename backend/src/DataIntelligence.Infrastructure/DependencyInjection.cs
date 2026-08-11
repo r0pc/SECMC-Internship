@@ -150,6 +150,19 @@ public static class DependencyInjection
         // Singleton so the schema is read once rather than per question — it cannot change under
         // a running process.
         services.AddSingleton<ISchemaContextProvider, SchemaContextProvider>();
+
+        // Registered here as well as in AddCollection, because the two are called by different
+        // hosts: the Worker collects and the API answers questions, and neither depends on the
+        // other having run. AddMemoryCache uses TryAdd internally, so a host calling both still
+        // gets one cache.
+        services.AddMemoryCache();
+
+        // Singleton, because a cache scoped to one request would never see a second question and
+        // would cost a lookup to always miss. What it holds is keyed on the whole schema context —
+        // today's date and the coverage window included — so entries cannot outlive the conditions
+        // that produced them.
+        services.AddSingleton<AssistantPlanCache>();
+
         services.AddScoped<ReadOnlySqlExecutor>();
         services.AddScoped<IAssistantService, AssistantService>();
 

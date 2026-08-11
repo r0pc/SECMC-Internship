@@ -1,0 +1,20 @@
+You may query ONLY the following SQL Server views. Every column name is exact.
+
+analytics.vw_CollectionHealth(SourceCode, CollectionDate, Attempts, Failures, LastStatus)
+    -- Daily collector health per source, rolling 30 days.
+analytics.vw_Cpi(ReferenceDate, ReferenceYear, PeriodCode, PeriodType, PeriodLabel, SeriesCode, IndexValue, CollectedAtPkt)
+    -- Current CPI figures, one row per period.
+analytics.vw_CpiAnnual(ReferenceYear, AnnualValue, FirstHalfValue, SecondHalfValue, CollectedAtPkt)
+    -- The annual and semiannual averages BLS publishes, one row per year.
+analytics.vw_CpiMonthlyChange(ReferenceDate, ReferenceYear, PeriodCode, IndexValue, PreviousMonthValue, MonthOverMonthPct, YearAgoValue, YearOverYearPct)
+    -- Monthly CPI with month-over-month and year-over-year % change (YearOverYearPct is the headline inflation rate).
+analytics.vw_CpiRevision(ReferenceDate, ReferenceYear, PeriodCode, RevisionNumber, IndexValue, CollectedAtPkt)
+    -- Every vintage of a CPI period that has ever been revised.
+analytics.vw_LatestIndicator(IndicatorCode, AsOfDate, Value, CollectedAtPkt)
+    -- The single latest CPI row and the single latest SOFR row, side by side.
+analytics.vw_Sofr(EffectiveDate, RateType, SeriesTitle, RatePercent, Percentile1Percent, Percentile25Percent, Percentile75Percent, Percentile99Percent, VolumeUsdBillions, Average30DayPercent, Average90DayPercent, CollectedAtPkt)
+    -- Current SOFR daily rates. VolumeUsdBillions is in billions of dollars, not dollars.
+analytics.vw_SofrAnnual(CalendarYear, BusinessDays, AvgRatePercent, MinRatePercent, MaxRatePercent)
+    -- SOFR summarised per calendar year.
+analytics.vw_SofrRevision(EffectiveDate, RevisionNumber, RatePercent, CollectedAtPkt)
+    -- Every vintage of a SOFR date that has ever been revised.

@@ -1,0 +1,82 @@
+16 case(s) against local qwen3.5:4b
+system prompt: 12327 chars
+
+  pass  explicit-month
+  ERROR explicit-year-average
+  ERROR inflation-wording
+  ERROR interest-rate-wording
+  ERROR volume-wording
+  ERROR recent-window-not-refused
+  ERROR cross-dataset
+  ERROR largest-change
+  ERROR peak
+  ERROR annual-average
+  ERROR collection-health
+  ERROR latest-figure
+  ERROR half-open-range
+  ERROR unanswerable-subject
+  ERROR about-cpi
+  ERROR follow-up-referent
+
+1/16 passed
+cost of this run: 3,360 prompt tokens + 80 completion = 3,440 total (210 prompt per case)
+
+--- explicit-year-average: 'what was the average sofr rate in 2023'
+    guards: Same, for a year rather than a month.
+    - call failed: RemoteDisconnected: Remote end closed connection without response
+
+--- inflation-wording: 'how much have prices risen over the last year'
+    guards: Term mapping: 'inflation' is YearOverYearPct, a column no question ever names.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- interest-rate-wording: 'what is the overnight borrowing rate right now'
+    guards: Term mapping: 'interest rate' is RatePercent in the SOFR view.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- volume-wording: 'how much was borrowed overnight in march 2025'
+    guards: Term mapping: 'how much was borrowed' is VolumeUsdBillions, and it is in billions.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- recent-window-not-refused: 'what was the year over year inflation rate for the last 3 months'
+    guards: A window that runs past what is held is still queried, not refused and not shortened.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- cross-dataset: 'what is the relation between cpi and sofr for the year 2025'
+    guards: Two datasets at once is answerable; join at month grain, averaging SOFR up.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- largest-change: 'between which months did sofr change the most in 2025'
+    guards: How a series CHANGED needs LAG over an aggregate, and TOP (1) for 'which'.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- peak: 'which month had the highest cpi in 2024'
+    guards: 'When was it highest' takes TOP with ORDER BY rather than returning every period.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- annual-average: 'what was the annual average cpi for 2022'
+    guards: M13 is the annual average, not a thirteenth month. Guessing a code returns nothing.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- collection-health: 'did any sources fail to collect this week'
+    guards: Term mapping: 'did anything fail' is the collection health view.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- latest-figure: 'what is the most recent cpi figure you have'
+    guards: 'Latest' for one headline figure has its own view.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- half-open-range: 'what was the average sofr rate in january 2025'
+    guards: A range is half-open; BETWEEN with a guessed month-end drops the 31st on daily SOFR.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- unanswerable-subject: 'what is the current unemployment rate in the united states'
+    guards: 'Unanswerable' is for subjects these views do not hold — not for windows that come back short.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- about-cpi: 'what is cpi and who publishes it'
+    guards: 'What IS cpi' is a definition and must classify, not query. 'What WAS cpi' must not hit this.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>
+
+--- follow-up-referent: 'and what about the year before that'
+    guards: A follow-up resolves against the prior turn's bound parameters, not its answer.
+    - call failed: URLError: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>

@@ -5,6 +5,7 @@ using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Ai;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 
@@ -42,8 +43,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         // xUnit constructs the class once per test, so this runs before every one of them while
         // the database is shared for the whole class. Without the clear, the row counts the
         // filters are asserted against would grow with each test that had already run.
-        await db.Database.ExecuteSqlRawAsync(
-            "DELETE FROM ai.AssistantFeedback; DELETE FROM ai.AssistantSession;");
+        await db.Database.ExecuteSqlRawAsync("DELETE FROM ai.AssistantSession;");
 
         _sessionId = Guid.NewGuid();
 
@@ -370,6 +370,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
             new UnusedSchemaContext(),
             new SqlSafetyValidator(),
             new ReadOnlySqlExecutor(configuration, options),
+            new AssistantPlanCache(new MemoryCache(new MemoryCacheOptions())),
             TimeProvider.System,
             options);
     }

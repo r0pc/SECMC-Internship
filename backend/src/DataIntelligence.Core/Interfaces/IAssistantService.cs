@@ -8,9 +8,6 @@ public interface IAssistantService
     Task<AssistantAnswerDto> AskAsync(
         int userId, AskQuestionRequest request, string? clientIp, CancellationToken cancellationToken);
 
-    Task RecordFeedbackAsync(
-        long assistantQueryId, AssistantFeedbackRequest request, CancellationToken cancellationToken);
-
     /// <summary>
     /// The audit log, newest first — every question the assistant was asked, including the ones it
     /// refused (NFR Auditability).

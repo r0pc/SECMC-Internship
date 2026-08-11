@@ -695,23 +695,6 @@ GO
 CREATE INDEX IX_AssistantSession_User ON ai.AssistantSession (UserId, StartedAtPkt DESC);
 GO
 
-CREATE TABLE ai.AssistantFeedback
-(
-    AssistantQueryId    BIGINT          NOT NULL,
-    IsHelpful           BIT             NOT NULL,
-    Comment             NVARCHAR(1000)  NULL,
-    SubmittedAtPkt      DATETIME2(3)    NOT NULL CONSTRAINT DF_Feedback_At DEFAULT DATEADD(hour, 5, SYSUTCDATETIME()),
-
-    -- No foreign key. The turn this feedback is about lives inside
-    -- ai.AssistantSession.TranscriptJson, and a key cannot reference a value inside a document.
-    -- AssistantQueryId is therefore an unenforced id drawn from ai.AssistantTurnId: nothing stops
-    -- a row here from naming a turn that does not exist, and deleting a session no longer cascades
-    -- to the feedback on its turns. The API checks the turn exists before writing, which covers
-    -- everything going through it and nothing going around it.
-    CONSTRAINT PK_AssistantFeedback PRIMARY KEY (AssistantQueryId)
-);
-GO
-
 /*------------------------------------------------------------------------------
   Turn ids.
 
@@ -720,15 +703,12 @@ GO
   the id has to come from somewhere that is not a table.
 
   It must be unique across sessions, not within one: this is the id the API
-  returns and the id POST /assistant/queries/{id}/feedback takes, so numbering
-  turns 1..n per conversation would have every session claiming turn 1.
+  returns with every answer and the id GET /assistant/queries/{id} takes, so
+  numbering turns 1..n per conversation would have every session claiming turn 1.
 
-  START WITH 1 is right only for a new database. An existing one that has already
-  written ai.AssistantQuery rows must start above the last of them, or new turns
-  will reuse ids that old feedback rows still point at:
-      DECLARE @next BIGINT = (SELECT ISNULL(MAX(AssistantQueryId), 0) + 1 FROM ai.AssistantQuery);
-      DECLARE @sql NVARCHAR(200) = N'ALTER SEQUENCE ai.AssistantTurnId RESTART WITH ' + CAST(@next AS NVARCHAR(20));
-      EXEC sp_executesql @sql;
+  Nothing outside the transcripts holds one of these ids any more -- ai.AssistantFeedback
+  was the last table that did, and it is gone -- so the sequence is only ever read
+  forward and START WITH 1 is right for every database.
 ------------------------------------------------------------------------------*/
 CREATE SEQUENCE ai.AssistantTurnId AS BIGINT START WITH 1 INCREMENT BY 1 NO CACHE;
 GO

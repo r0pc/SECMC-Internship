@@ -75,6 +75,17 @@ public interface INlToSqlClient
 /// <param name="Refusal">
 /// Why there is no SQL. <see cref="NlRefusalKind.None"/> whenever <paramref name="Sql"/> is present.
 /// </param>
+/// <param name="CachedPromptTokens">
+/// How much of <paramref name="PromptTokens"/> the provider served from its own cache instead of
+/// reading again, or null where it does not say — which is not the same as zero.
+/// </param>
+/// <remarks>
+/// The cached count is carried separately from the total because the total cannot answer what it
+/// costs. Most of every prompt is a byte-identical prefix, arranged that way on purpose so a
+/// provider can reuse it, and a reused prefix bills at a fraction of the input rate. Two questions
+/// reporting the same 3,600 prompt tokens can therefore differ threefold in price, and only this
+/// tells them apart.
+/// </remarks>
 public sealed record NlToSqlResult(
     string? Sql,
     IReadOnlyDictionary<string, object?> Parameters,
@@ -83,13 +94,15 @@ public sealed record NlToSqlResult(
     int? PromptTokens,
     int? CompletionTokens,
     int LatencyMs,
-    NlRefusalKind Refusal = NlRefusalKind.None)
+    NlRefusalKind Refusal = NlRefusalKind.None,
+    int? CachedPromptTokens = null)
 {
     /// <summary>The model declined to answer — a legitimate outcome, not a failed call.</summary>
     public static NlToSqlResult NoSql(
-        NlRefusalKind refusal, string modelName, int? promptTokens, int? completionTokens, int latencyMs) =>
+        NlRefusalKind refusal, string modelName, int? promptTokens, int? completionTokens,
+        int latencyMs, int? cachedPromptTokens = null) =>
         new(null, new Dictionary<string, object?>(), null,
-            modelName, promptTokens, completionTokens, latencyMs, refusal);
+            modelName, promptTokens, completionTokens, latencyMs, refusal, cachedPromptTokens);
 }
 
 /// <summary>Why a question produced no statement.</summary>
@@ -162,7 +175,22 @@ public enum NlRefusalKind
     AboutPlatform
 }
 
-public sealed record NlSummaryResult(string AnswerText, int? CompletionTokens, int LatencyMs);
+/// <param name="PromptTokens">
+/// What the summary call was sent. Counted separately from the generation call's prompt rather than
+/// folded into it, because the two are different prompts with different economics: the generation
+/// prompt is mostly a fixed prefix a provider can cache, while this one is mostly the question, the
+/// parameters and the rows — all different every time, and therefore all billed at full rate.
+/// </param>
+/// <param name="CachedPromptTokens">
+/// How much of <paramref name="PromptTokens"/> the provider served from its own cache. Null where it
+/// does not say, which is not the same as zero.
+/// </param>
+public sealed record NlSummaryResult(
+    string AnswerText,
+    int? CompletionTokens,
+    int LatencyMs,
+    int? PromptTokens = null,
+    int? CachedPromptTokens = null);
 
 /// <summary>One earlier exchange in the same session: what was asked, and the query it became.</summary>
 /// <remarks>

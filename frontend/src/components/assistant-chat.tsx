@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 
-import { ask, listChats, rate, resumeChat } from "@/app/assistant/actions";
-import { Table, Td, Th, Tr } from "@/components/table";
+import { ask, listChats, resumeChat } from "@/app/assistant/actions";
 import { formatCount, formatTimestamp } from "@/lib/format";
 import { MAX_QUESTION_WORDS, countWords } from "@/lib/question";
 import type {
@@ -17,9 +16,9 @@ import type {
 /**
  * The AI query assistant (FR-13 – FR-16).
  *
- * A Client Component because a conversation is state: the transcript, what is in flight, and which
- * answers have been rated all live here. The calls it makes are Server Functions, so the browser
- * still never talks to the API directly.
+ * A Client Component because a conversation is state: the transcript and what is in flight live
+ * here. The calls it makes are Server Functions, so the browser still never talks to the API
+ * directly.
  *
  * Nothing is kept in `localStorage`. Conversations survive a reload because the server already has
  * them — every turn is written to the session's transcript as it happens — so resuming is a matter
@@ -206,9 +205,7 @@ export function AssistantChat() {
         {turns.length === 0 ? (
           <Welcome onPick={submit} disabled={pending} />
         ) : (
-          turns.map((turn) => (
-            <TurnView key={turn.key} turn={turn} onRate={rate} />
-          ))
+          turns.map((turn) => <TurnView key={turn.key} turn={turn} />)
         )}
 
         {pending ? <Thinking model={model} /> : null}
@@ -276,10 +273,9 @@ export function AssistantChat() {
 /**
  * Turns a stored turn back into the shape a live answer has, so one renderer draws both.
  *
- * The two differ in exactly one way that matters: a replayed turn has no result rows. They were
- * never stored — a turn can return up to 2,000 of them — so a resumed conversation shows the
- * answer text and the query that produced it, and not the table underneath. `resultRowCount`
- * survives, which is what lets the answer still say how many rows it was drawn from.
+ * A replayed turn has no result rows: they were never stored, because a turn can return up to
+ * 2,000 of them. That costs nothing now — an answer is prose, and no part of this view reads the
+ * rows — so the row fields are carried across as the transcript has them and left at that.
  *
  * The key is supplied rather than derived from the turn: it has to come from the same counter as
  * live turns, or a resumed conversation and the next question asked in it can claim the same one.
@@ -560,13 +556,7 @@ function Thinking({ model }: { model: AssistantModelChoice }) {
   );
 }
 
-function TurnView({
-  turn,
-  onRate,
-}: {
-  turn: Turn;
-  onRate: (id: number, helpful: boolean) => Promise<boolean>;
-}) {
+function TurnView({ turn }: { turn: Turn }) {
   return (
     <article className="space-y-3">
       <div className="flex justify-end">
@@ -589,18 +579,12 @@ function TurnView({
         </div>
       ) : null}
 
-      {turn.answer ? <AnswerView answer={turn.answer} onRate={onRate} /> : null}
+      {turn.answer ? <AnswerView answer={turn.answer} /> : null}
     </article>
   );
 }
 
-function AnswerView({
-  answer,
-  onRate,
-}: {
-  answer: Answer;
-  onRate: (id: number, helpful: boolean) => Promise<boolean>;
-}) {
+function AnswerView({ answer }: { answer: Answer }) {
   return (
     <div className="max-w-[85%] space-y-3 rounded-lg rounded-bl-sm border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
       <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-800 dark:text-zinc-200">
@@ -608,10 +592,6 @@ function AnswerView({
       </p>
 
       <OutcomeNote outcome={answer.validationOutcome} />
-
-      {answer.rows && answer.rows.length > 0 ? (
-        <ResultTable rows={answer.rows} total={answer.resultRowCount} />
-      ) : null}
 
       {answer.generatedSql ? (
         <QueryDetails
@@ -621,10 +601,7 @@ function AnswerView({
         />
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <Rating assistantQueryId={answer.assistantQueryId} onRate={onRate} />
-        <ModelNote choice={answer.modelChoice} name={answer.modelName} />
-      </div>
+      <ModelNote choice={answer.modelChoice} name={answer.modelName} />
     </div>
   );
 }
@@ -653,74 +630,6 @@ function OutcomeNote({ outcome }: { outcome: AssistantValidationOutcome }) {
       {reason} Recorded as <code className="font-mono">{outcome}</code>.
     </p>
   );
-}
-
-function ResultTable({
-  rows,
-  total,
-}: {
-  rows: Record<string, unknown>[];
-  total: number | null;
-}) {
-  // Column order follows the first row, which is the order the query selected them in.
-  const columns = Object.keys(rows[0] ?? {});
-  const shown = rows.slice(0, 50);
-
-  return (
-    <div className="rounded-md border border-zinc-200 dark:border-zinc-800">
-      <Table caption="Rows returned by the generated query">
-        <thead>
-          <tr>
-            {columns.map((column) => (
-              <Th key={column}>{column}</Th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {shown.map((row, index) => (
-            <Tr key={index}>
-              {columns.map((column) => (
-                <Cell key={column} value={row[column]} />
-              ))}
-            </Tr>
-          ))}
-        </tbody>
-      </Table>
-      {total !== null && total > shown.length ? (
-        <p className="border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-          Showing {shown.length} of {total} rows.
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * One cell, formatted by what the value actually is.
- *
- * Values arrive untyped — the columns depend on whatever the model selected — so numbers are
- * right-aligned and tabular by detection rather than by a column definition that does not exist.
- */
-function Cell({ value }: { value: unknown }) {
-  if (value === null || value === undefined) {
-    return <Td className="text-zinc-400 dark:text-zinc-600">—</Td>;
-  }
-
-  if (typeof value === "number") {
-    return <Td numeric>{value.toLocaleString("en-US")}</Td>;
-  }
-
-  if (typeof value === "boolean") {
-    return <Td>{value ? "Yes" : "No"}</Td>;
-  }
-
-  const text = String(value);
-
-  // Trim the time off a midnight timestamp. Every reference date the API returns is a whole day,
-  // and "2025-06-01T00:00:00.0000000Z" in a cell is noise standing where a date should be.
-  const midnightUtc = /^(\d{4}-\d{2}-\d{2})T00:00:00(\.0+)?Z$/.exec(text);
-
-  return <Td>{midnightUtc ? midnightUtc[1] : text}</Td>;
 }
 
 /** The query, folded away. Available on every answer, in the way of none of them. */
@@ -771,54 +680,5 @@ function QueryDetails({
         ) : null}
       </div>
     </details>
-  );
-}
-
-function Rating({
-  assistantQueryId,
-  onRate,
-}: {
-  assistantQueryId: number;
-  onRate: (id: number, helpful: boolean) => Promise<boolean>;
-}) {
-  const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">(
-    "idle",
-  );
-
-  if (state === "saved") {
-    return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        Thanks — recorded.
-      </p>
-    );
-  }
-
-  return (
-    <div className="flex items-center gap-2">
-      {(
-        [
-          ["Helpful", true],
-          ["Not helpful", false],
-        ] as const
-      ).map(([label, helpful]) => (
-        <button
-          key={label}
-          type="button"
-          disabled={state === "saving"}
-          onClick={async () => {
-            setState("saving");
-            setState((await onRate(assistantQueryId, helpful)) ? "saved" : "failed");
-          }}
-          className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-600 transition-colors hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:bg-zinc-900"
-        >
-          {label}
-        </button>
-      ))}
-      {state === "failed" ? (
-        <span className="text-xs text-zinc-500 dark:text-zinc-400">
-          Could not save that.
-        </span>
-      ) : null}
-    </div>
   );
 }

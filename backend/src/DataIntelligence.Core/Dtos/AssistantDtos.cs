@@ -64,12 +64,6 @@ public sealed record AssistantAnswerDto
     public string? ModelName { get; init; }
 }
 
-public sealed record AssistantFeedbackRequest
-{
-    public required bool IsHelpful { get; init; }
-    public string? Comment { get; init; }
-}
-
 /// <summary>
 /// One conversation, serialised into <c>ai.AssistantSession.TranscriptJson</c>.
 /// </summary>
@@ -109,8 +103,9 @@ public sealed record ChatTranscriptTurn
     /// an identity column, since there is no longer a row being inserted to allocate one.
     /// </summary>
     /// <remarks>
-    /// Still named for the query it represents because it is the id the API returns and the
-    /// feedback endpoint takes; renaming it would break both for no gain.
+    /// Still named for the query it represents because it is the id the API returns with every
+    /// answer and the id <c>GET /assistant/queries/{id}</c> takes; renaming it would break both
+    /// for no gain.
     /// </remarks>
     public required long AssistantQueryId { get; init; }
 
@@ -169,6 +164,53 @@ public sealed record ChatTranscriptTurn
 
     /// <summary>Tokens the model was sent for this turn — the schema context dominates it.</summary>
     public int? PromptTokens { get; init; }
+
+    /// <summary>
+    /// How many of <see cref="PromptTokens"/> the provider served from its own cache rather than
+    /// reading again. Null where it does not say, which is not the same as zero.
+    /// </summary>
+    /// <remarks>
+    /// Recorded because <see cref="PromptTokens"/> counts what was read, not what was paid for.
+    /// Most of every prompt is a byte-identical prefix — the output contract, the views, the rules
+    /// and the worked examples, ordered that way on purpose — and a provider that reuses it bills
+    /// the reused part at a fraction of the input rate. Two turns reporting the same prompt size can
+    /// differ severalfold in cost, and this is the only field that tells them apart.
+    /// <para>
+    /// It is also how anyone decides whether trimming the prompt further is worth doing: a prefix
+    /// that is being reused is already nearly free, and the tokens left to save are the ones after
+    /// it. Local turns leave this null — Ollama reuses a prefix but publishes no count of it.
+    /// </para>
+    /// </remarks>
+    public int? CachedPromptTokens { get; init; }
+
+    /// <summary>
+    /// The same, for the summary call's prompt.
+    /// </summary>
+    /// <remarks>
+    /// Kept apart from <see cref="CachedPromptTokens"/> rather than summed with it, because the two
+    /// prompts cache independently and one hitting says nothing about the other. Summed, they would
+    /// hide the case most worth seeing: a large stable schema prefix reused every time while the
+    /// summary prompt — mostly the question, the parameters and the rows, all different each time —
+    /// is paid for in full on every question.
+    /// </remarks>
+    public int? CachedSummaryPromptTokens { get; init; }
+
+    /// <summary>
+    /// True when the statement was not written for this turn but reused from an identical question
+    /// asked recently.
+    /// </summary>
+    /// <remarks>
+    /// Recorded because a turn answered from a remembered statement and one answered fresh are
+    /// otherwise indistinguishable in the review queue, and they are different facts. Without it,
+    /// "why does this turn report no prompt tokens" has no answer, and a reviewer reading a bad
+    /// statement cannot tell whether the model wrote it today or an hour ago.
+    /// <para>
+    /// It says nothing about the answer, which is never reused: a hit still validates the statement,
+    /// still runs it, and still summarises the rows that come back. Only the writing of the SQL was
+    /// skipped.
+    /// </para>
+    /// </remarks>
+    public bool PlanWasReused { get; init; }
 
     /// <summary>
     /// Tokens the model produced, across both calls a turn can make: the statement, and the
@@ -332,7 +374,4 @@ public sealed record AssistantQueryLogDto
     public int? TotalTokens { get; init; }
 
     public int? TotalLatencyMs { get; init; }
-
-    public bool? FeedbackIsHelpful { get; init; }
-    public string? FeedbackComment { get; init; }
 }

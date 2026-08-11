@@ -93,27 +93,6 @@ public static class AssistantEndpoints
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-        group.MapPost("/queries/{assistantQueryId:long}/feedback", async (
-                long assistantQueryId,
-                AssistantFeedbackRequest request,
-                IAssistantService assistant,
-                CancellationToken cancellationToken) =>
-            {
-                try
-                {
-                    await assistant.RecordFeedbackAsync(assistantQueryId, request, cancellationToken);
-                    return Results.NoContent();
-                }
-                catch (KeyNotFoundException ex)
-                {
-                    return ApiEndpoints.NotFound(ex.Message);
-                }
-            })
-            .WithName("SubmitAssistantFeedback")
-            .WithSummary("Thumbs up/down on one answer.")
-            .Produces(StatusCodes.Status204NoContent)
-            .ProducesProblem(StatusCodes.Status404NotFound);
-
         MapSessionEndpoints(group);
         MapReviewEndpoints(group);
 

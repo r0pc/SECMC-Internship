@@ -90,7 +90,7 @@ Paging is uniform: `?page=` (1-based) and `?pageSize=`, answered with `items`, `
 
 ### AI query assistant (FR-13 – FR-16)
 
-| Endpoint | Purpose || --- | --- || `POST /api/assistant/ask` | A question in, a natural-language answer out, with the SQL that produced it, its parameters, the model's explanation, and the rows it returned || `POST /api/assistant/queries/{id}/feedback` | Thumbs up/down on one answer || `GET /api/assistant/queries` | The audit log, newest first. `rejectedOnly`, `outcome`, `userId`, `fromUtc`, `toUtc`, paged || `GET /api/assistant/queries/{id}` | One audit record in full |
+| Endpoint | Purpose || --- | --- || `POST /api/assistant/ask` | A question in, a natural-language answer out, with the SQL that produced it, its parameters, the model's explanation, and the rows it returned || `GET /api/assistant/queries` | The audit log, newest first. `rejectedOnly`, `outcome`, `userId`, `fromUtc`, `toUtc`, paged || `GET /api/assistant/queries/{id}` | One audit record in full |
 
 The round trip is question → SQL → **validate** → execute read-only → results back to the model →answer. It is natural-language-to-SQL, not retrieval over documents: the data is numeric timeseries, so the model writes a query rather than reading passages.
 

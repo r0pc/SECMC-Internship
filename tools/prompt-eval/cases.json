@@ -1,0 +1,157 @@
+{
+  "//": "Each case names the rule it exists to protect. Delete that rule from the prompt, run this, and the cases that fail tell you what the rule was buying. A case with no `guards` is a case nobody can act on.",
+
+  "global": {
+    "//": "Applied to every case that comes back with SQL. These are the mistakes that are always wrong, whatever was asked.",
+    "absent": ["LIMIT ", "```"],
+    "notStartsWith": ["WITH"],
+    "onlyViews": true
+  },
+
+  "cases": [
+    {
+      "id": "explicit-month",
+      "guards": "Today's date is for relative periods only. A question naming its own month must use that month.",
+      "question": "what is the cpi in june 2025",
+      "expect": {
+        "views": ["analytics.vw_Cpi"],
+        "parameterValues": ["2025-06-01"]
+      }
+    },
+    {
+      "id": "explicit-year-average",
+      "guards": "Same, for a year rather than a month.",
+      "question": "what was the average sofr rate in 2023",
+      "expect": {
+        "views": ["analytics.vw_Sofr", "analytics.vw_SofrAnnual"],
+        "viewsAnyOf": true,
+        "parameterValues": ["2023"]
+      }
+    },
+    {
+      "id": "inflation-wording",
+      "guards": "Term mapping: 'inflation' is YearOverYearPct, a column no question ever names.",
+      "question": "how much have prices risen over the last year",
+      "expect": {
+        "views": ["analytics.vw_CpiMonthlyChange"],
+        "contains": ["YearOverYearPct"]
+      }
+    },
+    {
+      "id": "interest-rate-wording",
+      "guards": "Term mapping: 'interest rate' is RatePercent in the SOFR view.",
+      "question": "what is the overnight borrowing rate right now",
+      "expect": {
+        "views": ["analytics.vw_Sofr", "analytics.vw_LatestIndicator"],
+        "viewsAnyOf": true
+      }
+    },
+    {
+      "id": "volume-wording",
+      "guards": "Term mapping: 'how much was borrowed' is VolumeUsdBillions, and it is in billions.",
+      "question": "how much was borrowed overnight in march 2025",
+      "expect": {
+        "views": ["analytics.vw_Sofr"],
+        "contains": ["VolumeUsdBillions"]
+      }
+    },
+    {
+      "id": "recent-window-not-refused",
+      "guards": "A window that runs past what is held is still queried, not refused and not shortened.",
+      "question": "what was the year over year inflation rate for the last 3 months",
+      "expect": {
+        "views": ["analytics.vw_CpiMonthlyChange"],
+        "hasParameters": true
+      }
+    },
+    {
+      "id": "cross-dataset",
+      "guards": "Two datasets at once is answerable; join at month grain, averaging SOFR up.",
+      "question": "what is the relation between cpi and sofr for the year 2025",
+      "expect": {
+        "views": ["analytics.vw_Sofr"],
+        "contains": ["AVG", "JOIN"]
+      }
+    },
+    {
+      "id": "largest-change",
+      "guards": "How a series CHANGED needs LAG over an aggregate, and TOP (1) for 'which'.",
+      "question": "between which months did sofr change the most in 2025",
+      "expect": {
+        "contains": ["LAG", "TOP"]
+      }
+    },
+    {
+      "id": "peak",
+      "guards": "'When was it highest' takes TOP with ORDER BY rather than returning every period.",
+      "question": "which month had the highest cpi in 2024",
+      "expect": {
+        "contains": ["TOP", "ORDER BY"]
+      }
+    },
+    {
+      "id": "annual-average",
+      "guards": "M13 is the annual average, not a thirteenth month. Guessing a code returns nothing.",
+      "question": "what was the annual average cpi for 2022",
+      "expect": {
+        "views": ["analytics.vw_CpiAnnual", "analytics.vw_Cpi"],
+        "viewsAnyOf": true
+      }
+    },
+    {
+      "id": "collection-health",
+      "guards": "Term mapping: 'did anything fail' is the collection health view.",
+      "question": "did any sources fail to collect this week",
+      "expect": {
+        "views": ["analytics.vw_CollectionHealth"]
+      }
+    },
+    {
+      "id": "latest-figure",
+      "guards": "'Latest' for one headline figure has its own view.",
+      "question": "what is the most recent cpi figure you have",
+      "expect": {
+        "views": ["analytics.vw_LatestIndicator", "analytics.vw_Cpi"],
+        "viewsAnyOf": true
+      }
+    },
+    {
+      "id": "half-open-range",
+      "guards": "A range is half-open; BETWEEN with a guessed month-end drops the 31st on daily SOFR.",
+      "question": "what was the average sofr rate in january 2025",
+      "expect": {
+        "views": ["analytics.vw_Sofr"],
+        "contains": ["AVG"],
+        "absent": ["BETWEEN"]
+      }
+    },
+    {
+      "id": "unanswerable-subject",
+      "guards": "'Unanswerable' is for subjects these views do not hold — not for windows that come back short.",
+      "question": "what is the current unemployment rate in the united states",
+      "expect": { "refusal": "unanswerable" }
+    },
+    {
+      "id": "about-cpi",
+      "guards": "'What IS cpi' is a definition and must classify, not query. 'What WAS cpi' must not hit this.",
+      "question": "what is cpi and who publishes it",
+      "expect": { "refusal": "about_cpi" }
+    },
+    {
+      "id": "follow-up-referent",
+      "guards": "A follow-up resolves against the prior turn's bound parameters, not its answer.",
+      "question": "and what about the year before that",
+      "history": [
+        {
+          "question": "what is the average cpi of 2022",
+          "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+          "parameters": { "@year": 2022 }
+        }
+      ],
+      "expect": {
+        "views": ["analytics.vw_CpiAnnual"],
+        "parameterValues": ["2021"]
+      }
+    }
+  ]
+}

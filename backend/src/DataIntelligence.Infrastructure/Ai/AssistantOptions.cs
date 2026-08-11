@@ -128,19 +128,31 @@ public sealed class AssistantOptions
     public int MaxSummaryRows { get; set; } = 60;
 
     /// <summary>
-    /// Sent to the hosted gateway as <c>reasoning_effort</c>. Empty — the default — omits the field.
+    /// Sent to the hosted gateway as <c>reasoning_effort</c>. <c>"none"</c> turns the model's
+    /// thinking off; empty omits the field entirely.
     /// </summary>
     /// <remarks>
-    /// Empty rather than <c>"none"</c> because the configured model does not reason and an
-    /// OpenAI-shaped API is within its rights to reject a parameter it does not know. It exists for
-    /// the deployment that points <see cref="BaseUrl"/> at a gateway whose model does: thinking
-    /// tokens are billed like any other, and nothing in this pipeline benefits from them — the
-    /// question arrives with the schema, the rules and worked examples in front of it, and the reply
-    /// is a single statement in a fixed shape. The local model's equivalent is
+    /// This defaulted to empty on the assumption that the configured model does not reason. Measured
+    /// against the live gateway, that was wrong: <c>deepseek-v4-flash</c> reports
+    /// <c>completion_tokens_details.reasoning_tokens</c>, and on one CPI question it spent 147 of
+    /// its 208 completion tokens thinking before writing a statement essentially identical to the
+    /// one it produced with thinking off — 54 completion tokens, and a shorter prompt too, since the
+    /// gateway stops prepending its own reasoning scaffolding.
+    /// <para>
+    /// Completion tokens are the expensive half of a bill, so this is the rare setting that cuts
+    /// cost without cutting anything the answer needed. Nothing in this pipeline benefits from
+    /// deliberation: the question arrives with the schema, the rules and four worked examples in
+    /// front of it, and the reply is one statement in a fixed shape.
+    /// </para>
+    /// <para>
+    /// Set it back to empty for a gateway that rejects the parameter — an OpenAI-shaped API is
+    /// within its rights to refuse a field it does not know rather than ignore it, and that is the
+    /// one failure mode this default risks. The local model's equivalent is
     /// <see cref="LocalModelOptions.ReasoningEffort"/>, where the same setting is not an economy but
     /// the difference between answering and not.
+    /// </para>
     /// </remarks>
-    public string ReasoningEffort { get; set; } = string.Empty;
+    public string ReasoningEffort { get; set; } = "none";
 
     /// <summary>
     /// The alternative to the hosted gateway: a model served on the machine the API runs on,
@@ -222,11 +234,28 @@ public sealed class LocalModelOptions
     public int? ContextTokens { get; set; } = 16384;
 
     /// <summary>
-    /// The model as the local server names it, tag included. Ollama distinguishes <c>qwen3.5:2b</c>
-    /// from <c>qwen3.5:7b</c> only by that tag, and a name it has not pulled is a 404 rather than a
+    /// The model as the local server names it, tag included. Ollama distinguishes <c>qwen3.5:4b</c>
+    /// from <c>qwen3.5:2b</c> only by that tag, and a name it has not pulled is a 404 rather than a
     /// fallback. <c>ollama list</c> shows what is actually available.
     /// </summary>
-    public string Model { get; set; } = "qwen3.5:2b";
+    /// <remarks>
+    /// Raised from <c>qwen3.5:2b</c>, which could not resolve a date the question stated. Asked
+    /// "what is the cpi in june 2025" it queried the current month instead — measured against the
+    /// prompt as it stands, against the longer prompt that preceded it, and against one carrying an
+    /// explicit rule that a named period is absolute. All three produced a query for the wrong
+    /// period, and one of them a range whose start was after its end. The 4B model, same prompt and
+    /// same question, wrote <c>ReferenceDate = @month</c> with <c>@month = '2025-06-01'</c>.
+    /// <para>
+    /// The failure was worth more than the size difference because of what it looks like from the
+    /// outside: a query for the wrong period returns nothing, and nothing is then explained as
+    /// though the platform did not hold the data. The reader is told a figure does not exist when it
+    /// does — see the summariser's instructions about a query that asked for a period the question
+    /// did not name.
+    /// </para>
+    /// A 4B model is slower per question and holds more in memory, both of which are felt on a CPU.
+    /// Set this back to <c>qwen3.5:2b</c> for a machine where that matters more than the answer.
+    /// </remarks>
+    public string Model { get; set; } = "qwen3.5:4b";
 
     /// <summary>
     /// Sent as a bearer token, and ignored by Ollama, which authenticates nothing.

@@ -1,0 +1,8 @@
+
+Today's date is {TODAY} (Pakistan Standard Time, UTC+05:00).
+Resolve every relative date against it — "last month", "this year", "the last 6 months", "year to date" — and write the resulting dates in as parameters; never ask which dates were meant. Weeks are rolling, not calendar: "this week"/"the past week" = the 7 days ending today inclusive, "last week" = the 7 before those, "the last N weeks" = N*7 days ending today.
+
+What the database currently holds:
+- CPI (analytics.vw_Cpi, ReferenceDate): 2015-01-01 to 2026-06-01
+- SOFR (analytics.vw_Sofr, EffectiveDate): 2018-04-02 to 2026-08-10
+Publishers release in arrears, so the newest figure is normally older than today. If a range falls partly or wholly outside what is held, still query the range asked for — a short or empty result is the honest answer.

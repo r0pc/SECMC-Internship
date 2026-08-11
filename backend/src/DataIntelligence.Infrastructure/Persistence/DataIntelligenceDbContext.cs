@@ -32,7 +32,6 @@ public class DataIntelligenceDbContext : DbContext
     public DbSet<SofrDailyRate> SofrDailyRates => Set<SofrDailyRate>();
     public DbSet<RejectedObservation> RejectedObservations => Set<RejectedObservation>();
     public DbSet<AssistantSession> AssistantSessions => Set<AssistantSession>();
-    public DbSet<AssistantFeedback> AssistantFeedback => Set<AssistantFeedback>();
 
     /// <summary>Read-only view of the turns inside every session's JSON transcript.</summary>
     public DbSet<AssistantTurn> AssistantTurns => Set<AssistantTurn>();
@@ -61,7 +60,6 @@ public class DataIntelligenceDbContext : DbContext
         ConfigureSofrDailyRate(modelBuilder.Entity<SofrDailyRate>());
         ConfigureRejectedObservation(modelBuilder.Entity<RejectedObservation>());
         ConfigureAssistantSession(modelBuilder.Entity<AssistantSession>());
-        ConfigureAssistantFeedback(modelBuilder.Entity<AssistantFeedback>());
         ConfigureAssistantTurn(modelBuilder.Entity<AssistantTurn>());
         ConfigureAssistantSessionSummary(modelBuilder.Entity<AssistantSessionSummary>());
 
@@ -488,26 +486,6 @@ public class DataIntelligenceDbContext : DbContext
         entity.HasIndex(e => new { e.UserId, e.StartedAtPkt })
             .IsDescending(false, true)
             .HasDatabaseName("IX_AssistantSession_User");
-    }
-
-    private static void ConfigureAssistantFeedback(EntityTypeBuilder<AssistantFeedback> entity)
-    {
-        entity.ToTable("AssistantFeedback", "ai");
-
-        entity.HasKey(e => e.AssistantQueryId);
-        entity.Property(e => e.AssistantQueryId).ValueGeneratedNever();
-        entity.Property(e => e.Comment).HasMaxLength(1000);
-        entity.Property(e => e.SubmittedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
-
-        // No relationship to AssistantQuery any more. The turn this feedback is about lives inside
-        // a JSON document, and a foreign key cannot point into one — so AssistantQueryId is now an
-        // id the database does not enforce, allocated from the ai.AssistantTurnId sequence.
-        //
-        // What that loses is worth stating plainly: nothing stops a row here referring to a turn
-        // that does not exist, and deleting a session no longer cascades to the feedback on its
-        // turns. RecordFeedbackAsync checks the turn exists before writing, which closes the first
-        // gap for anything going through the API but not for anything going around it.
-        //
     }
 
     /// <summary>

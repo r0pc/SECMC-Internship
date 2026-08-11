@@ -145,6 +145,7 @@ public sealed class AssistantService : IAssistantService
     private readonly ISchemaContextProvider _schemaContext;
     private readonly ISqlSafetyValidator _validator;
     private readonly ReadOnlySqlExecutor _executor;
+    private readonly AssistantPlanCache _planCache;
     private readonly TimeProvider _timeProvider;
     private readonly int _historyTurns;
     private readonly int _maxSummaryRows;
@@ -155,6 +156,7 @@ public sealed class AssistantService : IAssistantService
         ISchemaContextProvider schemaContext,
         ISqlSafetyValidator validator,
         ReadOnlySqlExecutor executor,
+        AssistantPlanCache planCache,
         TimeProvider timeProvider,
         IOptions<AssistantOptions> options)
     {
@@ -163,6 +165,7 @@ public sealed class AssistantService : IAssistantService
         _schemaContext = schemaContext;
         _validator = validator;
         _executor = executor;
+        _planCache = planCache;
         _timeProvider = timeProvider;
         _historyTurns = options.Value.HistoryTurns;
         _maxSummaryRows = options.Value.MaxSummaryRows;
@@ -207,20 +210,73 @@ public sealed class AssistantService : IAssistantService
 
         var overallStopwatch = Stopwatch.StartNew();
 
+        // Before the schema is built and before the model is reached, because reaching it is the
+        // entire cost being avoided: "hi" spends about 3,600 prompt tokens to be told what this
+        // already knows, and the reply it earns is the fixed text below either way. The filter only
+        // recognises what cannot be a question — see PleasantryFilter for why it is an allow-list of
+        // words rather than a judgement about them — so anything it is unsure of falls through here
+        // and is answered exactly as it was before.
+        if (PleasantryFilter.IsPleasantry(request.Question))
+        {
+            draft.Outcome = AssistantValidationOutcome.NotADataQuestion;
+
+            // The same outcome the model's own not_a_data_question produces, so the review queue
+            // keeps treating both as the non-events they are. The detail is what separates them:
+            // this turn carries no model name and no token counts, and a reader who did not know
+            // why would take that for a turn whose usage went missing rather than one that never
+            // called anything.
+            draft.ValidationDetail =
+                "Not a question about data — recognised here as a greeting, so no model was called.";
+
+            draft.Answer = Greeting;
+            draft.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
+
+            return await FinishAsync(session, turns, draft, null, cancellationToken);
+        }
+
         var schemaContext = await _schemaContext.GetContextAsync(cancellationToken);
         var history = BuildHistory(turns, draft.AssistantQueryId);
 
-        var generation = await _llm.GenerateSqlAsync(
-            request.Question, schemaContext, history, request.Model, cancellationToken);
+        // Only for a question standing on its own. A follow-up means what the conversation before it
+        // makes it mean, so two identical follow-up texts in different sessions are different
+        // questions — and the schema context, which is what the key is built from, says nothing
+        // about either.
+        var cacheable = history.Count == 0;
 
-        draft.ModelName = generation.ModelName;
-        draft.PromptTokens = generation.PromptTokens;
-        draft.CompletionTokens = generation.CompletionTokens;
-        draft.Sql = generation.Sql;
-        draft.Explanation = generation.Explanation;
-        draft.Parameters = generation.Sql is null ? null : generation.Parameters;
+        var cached = cacheable
+            ? _planCache.Find(request.Question, schemaContext, request.Model)
+            : null;
 
-        if (generation.Sql is null)
+        NlToSqlResult? generation = null;
+
+        if (cached is not null)
+        {
+            draft.ModelName = cached.ModelName;
+            draft.Sql = cached.Sql;
+            draft.Explanation = cached.Explanation;
+            draft.Parameters = cached.Parameters;
+
+            // Token counts stay null rather than zero, and that distinction is already load-bearing
+            // elsewhere in this file: null is "no model was asked", zero would be "a model answered
+            // for free". No model was asked. The summary call below still reports its own, so the
+            // turn ends up recording exactly what it spent.
+            draft.PlanWasReused = true;
+        }
+        else
+        {
+            generation = await _llm.GenerateSqlAsync(
+                request.Question, schemaContext, history, request.Model, cancellationToken);
+
+            draft.ModelName = generation.ModelName;
+            draft.PromptTokens = generation.PromptTokens;
+            draft.CachedPromptTokens = generation.CachedPromptTokens;
+            draft.CompletionTokens = generation.CompletionTokens;
+            draft.Sql = generation.Sql;
+            draft.Explanation = generation.Explanation;
+            draft.Parameters = generation.Sql is null ? null : generation.Parameters;
+        }
+
+        if (generation is not null && generation.Sql is null)
         {
             var (outcome, detail, answer) = generation.Refusal switch
             {
@@ -276,7 +332,13 @@ public sealed class AssistantService : IAssistantService
             return await FinishAsync(session, turns, draft, null, cancellationToken);
         }
 
-        var validation = _validator.Validate(generation.Sql, generation.Parameters);
+        // Read off the draft rather than off `generation`, because on a cache hit there is no
+        // generation. A reused statement is validated exactly as a fresh one is — the validator is
+        // what stands between a statement and the database, and a statement that was safe an hour
+        // ago is not thereby exempt from being checked again.
+        var offered = draft.Parameters ?? new Dictionary<string, object?>();
+
+        var validation = _validator.Validate(draft.Sql!, offered);
         draft.Outcome = validation.Outcome;
         draft.ValidationDetail = validation.Detail;
 
@@ -284,7 +346,7 @@ public sealed class AssistantService : IAssistantService
         // supplied for a placeholder it then did not write is dropped rather than refused. Recorded
         // in place of the model's list so the parameters shown beside an answer are the ones that
         // produced it — see SqlValidationResult.BoundParameters.
-        var bound = validation.BoundParameters ?? generation.Parameters;
+        var bound = validation.BoundParameters ?? offered;
         draft.Parameters = bound;
 
         if (!validation.IsApproved)
@@ -330,6 +392,18 @@ public sealed class AssistantService : IAssistantService
         draft.ExecutionStatus = AssistantExecutionStatus.Succeeded;
         draft.ResultRowCount = execution.Rows!.Count;
 
+        // Remembered only here — past validation and past a successful run. A statement the
+        // validator refused or the database rejected is one this platform has already judged wrong,
+        // and caching it would repeat the failure faster rather than avoid it. Not re-stored on a
+        // hit, since it is already there and the entry's lifetime should count from when the
+        // statement was written, not from the last time someone asked for it.
+        if (cacheable && cached is null && draft.Sql is not null)
+        {
+            _planCache.Remember(
+                request.Question, schemaContext, request.Model,
+                new CachedPlan(draft.Sql, bound, draft.Explanation, draft.ModelName ?? "unknown"));
+        }
+
         // Columnar, and capped — see ResultSetFormatter. The rows handed back to the browser below
         // are the full set, unchanged: this shape exists for the model that has to describe them,
         // and only for it.
@@ -358,39 +432,23 @@ public sealed class AssistantService : IAssistantService
             ? null
             : (draft.CompletionTokens ?? 0) + (summary.CompletionTokens ?? 0);
 
+        // The same for the prompt, which until now counted the generation call alone. That made
+        // every recorded figure — and every estimate drawn from one — short by the whole summary
+        // call, which is a fifth of the tokens a question spends and the part of it that caches
+        // least: its payload is the question, the parameters and the rows, all different each time.
+        draft.PromptTokens = draft.PromptTokens is null && summary.PromptTokens is null
+            ? null
+            : (draft.PromptTokens ?? 0) + (summary.PromptTokens ?? 0);
+
+        // Kept apart rather than summed with the generation call's, because the two prompts are
+        // cached independently and one hitting says nothing about the other. Summing them would
+        // hide exactly the case worth seeing: a large stable prefix reused while a volatile second
+        // prompt is paid for in full, every question.
+        draft.CachedSummaryPromptTokens = summary.CachedPromptTokens;
+
         draft.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
         return await FinishAsync(session, turns, draft, execution.Rows, cancellationToken);
-    }
-
-    public async Task RecordFeedbackAsync(
-        long assistantQueryId, AssistantFeedbackRequest request, CancellationToken cancellationToken)
-    {
-        // Checked against the transcripts, since there is no longer a row per turn. This is the
-        // only thing standing between the feedback table and an orphan: the foreign key that used
-        // to guarantee it cannot point into a JSON document.
-        var exists = await _db.AssistantTurns
-            .AnyAsync(t => t.AssistantQueryId == assistantQueryId, cancellationToken);
-
-        if (!exists)
-        {
-            throw new KeyNotFoundException($"No assistant query with id {assistantQueryId}.");
-        }
-
-        var feedback = await _db.AssistantFeedback
-            .FirstOrDefaultAsync(f => f.AssistantQueryId == assistantQueryId, cancellationToken);
-
-        if (feedback is null)
-        {
-            feedback = new AssistantFeedback { AssistantQueryId = assistantQueryId };
-            _db.AssistantFeedback.Add(feedback);
-        }
-
-        feedback.IsHelpful = request.IsHelpful;
-        feedback.Comment = request.Comment;
-        feedback.SubmittedAtPkt = PakistanTime.Now(_timeProvider);
-
-        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<PagedResult<AssistantQueryLogDto>> GetQueryLogAsync(
@@ -438,7 +496,7 @@ public sealed class AssistantService : IAssistantService
             .Take(query.Page.PageSize)
             .ToListAsync(cancellationToken);
 
-        var items = await AttachFeedbackAsync(page, cancellationToken);
+        var items = page.Select(ToLogDto).ToList();
 
         return PagedResult<AssistantQueryLogDto>.From(items, query.Page, totalCount);
     }
@@ -450,14 +508,7 @@ public sealed class AssistantService : IAssistantService
             .AsNoTracking()
             .FirstOrDefaultAsync(t => t.AssistantQueryId == assistantQueryId, cancellationToken);
 
-        if (turn is null)
-        {
-            return null;
-        }
-
-        var withFeedback = await AttachFeedbackAsync([turn], cancellationToken);
-
-        return withFeedback[0];
+        return turn is null ? null : ToLogDto(turn);
     }
 
     public async Task<IReadOnlyList<AssistantSessionSummaryDto>> GetSessionsAsync(
@@ -551,36 +602,7 @@ public sealed class AssistantService : IAssistantService
         ModelName = t.ModelName
     };
 
-    /// <summary>
-    /// Joins each turn to its feedback, if any.
-    /// </summary>
-    /// <remarks>
-    /// Done as a second query against the ids of one page rather than as a join in the shredding
-    /// query. A join would make the optimiser choose a plan across a table and a CROSS APPLY over
-    /// every transcript in the database, and the shape that loses is the one where it decides to
-    /// shred everything before filtering. Two queries keep the expensive half bounded by the page.
-    /// </remarks>
-    private async Task<List<AssistantQueryLogDto>> AttachFeedbackAsync(
-        IReadOnlyList<AssistantTurn> turns, CancellationToken cancellationToken)
-    {
-        if (turns.Count == 0)
-        {
-            return [];
-        }
-
-        var ids = turns.Select(t => t.AssistantQueryId).ToList();
-
-        var feedback = await _db.AssistantFeedback
-            .AsNoTracking()
-            .Where(f => ids.Contains(f.AssistantQueryId))
-            .ToDictionaryAsync(f => f.AssistantQueryId, cancellationToken);
-
-        return turns
-            .Select(t => ToLogDto(t, feedback.GetValueOrDefault(t.AssistantQueryId)))
-            .ToList();
-    }
-
-    private static AssistantQueryLogDto ToLogDto(AssistantTurn t, AssistantFeedback? feedback) => new()
+    private static AssistantQueryLogDto ToLogDto(AssistantTurn t) => new()
     {
         AssistantQueryId = t.AssistantQueryId,
         SessionId = t.SessionId,
@@ -607,9 +629,7 @@ public sealed class AssistantService : IAssistantService
         PromptTokens = t.PromptTokens,
         CompletionTokens = t.CompletionTokens,
         TotalTokens = t.TotalTokens,
-        TotalLatencyMs = t.TotalLatencyMs,
-        FeedbackIsHelpful = feedback?.IsHelpful,
-        FeedbackComment = feedback?.Comment
+        TotalLatencyMs = t.TotalLatencyMs
     };
 
     /// <summary>
@@ -696,9 +716,10 @@ public sealed class AssistantService : IAssistantService
     /// </summary>
     /// <remarks>
     /// A sequence rather than a count of the turns already in the document, because the id has to
-    /// be unique across every session: it is what the API returns and what the feedback endpoint
-    /// takes, and per-session numbering would have two conversations both claiming turn 1. The
-    /// identity column that used to do this job belonged to a table that is no longer written.
+    /// be unique across every session: it is what the API returns and what
+    /// <c>GET /assistant/queries/{id}</c> takes, and per-session numbering would have two
+    /// conversations both claiming turn 1. The identity column that used to do this job belonged
+    /// to a table that is no longer written.
     /// </remarks>
     private async Task<long> NextTurnIdAsync(CancellationToken cancellationToken)
     {
@@ -858,6 +879,9 @@ public sealed class AssistantService : IAssistantService
         public required AssistantModelChoice ModelChoice { get; init; }
         public string? ModelName { get; set; }
         public int? PromptTokens { get; set; }
+        public int? CachedPromptTokens { get; set; }
+        public int? CachedSummaryPromptTokens { get; set; }
+        public bool PlanWasReused { get; set; }
         public int? CompletionTokens { get; set; }
         public int? TotalLatencyMs { get; set; }
 
@@ -880,6 +904,9 @@ public sealed class AssistantService : IAssistantService
             ModelChoice = ModelChoice,
             ModelName = ModelName,
             PromptTokens = PromptTokens,
+            CachedPromptTokens = CachedPromptTokens,
+            CachedSummaryPromptTokens = CachedSummaryPromptTokens,
+            PlanWasReused = PlanWasReused,
             CompletionTokens = CompletionTokens,
 
             // Null unless both halves are known — see ChatTranscriptTurn.TotalTokens. Adding a

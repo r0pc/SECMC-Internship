@@ -351,11 +351,6 @@ export interface AssistantAnswerDto {
   modelName: string | null;
 }
 
-export interface AssistantFeedbackRequest {
-  isHelpful: boolean;
-  comment?: string;
-}
-
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------

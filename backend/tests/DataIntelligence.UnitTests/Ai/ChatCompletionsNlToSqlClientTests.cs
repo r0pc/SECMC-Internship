@@ -261,6 +261,54 @@ public class ChatCompletionsNlToSqlClientTests
         Assert.Equal(NlRefusalKind.None, result.Refusal);
     }
 
+    [Theory]
+    // Two gateways, two names for one number, and which one answers is configuration rather than
+    // code — so both are read. DeepSeek reports it at the top of `usage`; OpenAI's shape nests it
+    // under `prompt_tokens_details`. Getting this wrong would not fail loudly: it would report every
+    // prompt as uncached, which reads as "the caching we arranged the prompt for is not working"
+    // and would send someone to trim a prompt that is already nearly free.
+    [InlineData("""{"prompt_tokens":3600,"completion_tokens":40,"prompt_cache_hit_tokens":2740}""")]
+    [InlineData("""{"prompt_tokens":3600,"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":2740}}""")]
+    public async Task ReadsTheCachedPrefixInEitherSpelling(string usage)
+    {
+        var client = ClientReturning(CompletionWithUsage(
+            """{"sql": "SELECT 1 FROM analytics.vw_Cpi"}""", usage));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], Cloud, default);
+
+        Assert.Equal(3600, result.PromptTokens);
+        Assert.Equal(2740, result.CachedPromptTokens);
+    }
+
+    [Fact]
+    public async Task ReportsNothingRatherThanZeroWhenTheGatewaySaysNothingAboutCaching()
+    {
+        // Null and zero are different claims. Zero says the prefix was read afresh — a fact worth
+        // acting on. Null says nobody was asked, which is the ordinary state of a provider that
+        // does not publish the figure, and must not be mistaken for the first.
+        var client = ClientReturning(Completion(
+            """{"sql": "SELECT 1 FROM analytics.vw_Cpi"}""", promptTokens: 3600));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], Cloud, default);
+
+        Assert.Null(result.CachedPromptTokens);
+    }
+
+    [Fact]
+    public async Task ReportsNoCachedPrefixForTheLocalModel()
+    {
+        // Ollama does reuse a cached prefix — it is most of why the second question of a session
+        // answers faster than the first — but publishes no count of it. Reporting a zero here would
+        // read as "the prefix was not reused", which is the opposite of what happens.
+        var client = ClientReturning(OllamaCompletion(
+            """{"sql": "SELECT 1 FROM analytics.vw_Cpi"}""", promptTokens: 3600));
+
+        var result = await client.GenerateSqlAsync("q", SchemaContext, [], Local, default);
+
+        Assert.Equal(3600, result.PromptTokens);
+        Assert.Null(result.CachedPromptTokens);
+    }
+
     [Fact]
     public async Task CarriesTokenUsageBackForTheAuditLog()
     {
@@ -574,6 +622,26 @@ public class ChatCompletionsNlToSqlClientTests
     }
 
     [Fact]
+    public async Task AsksTheSummariserForProseRatherThanMarkdown()
+    {
+        // A model given three figures and no instruction reaches for a markdown table, and the
+        // answer is rendered as text — so the reader gets pipes and dashes where a sentence was
+        // meant. The constructs are named because "plain prose" on its own reads as advice about
+        // tone rather than about format.
+        var handler = new CapturingHandler(Completion("CPI stood at 320.3 in June."));
+        var client = ClientOver(handler);
+
+        await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", NoCoverage, Cloud, default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var system = doc.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
+
+        Assert.Contains("plain prose", system);
+        Assert.Contains("No tables", system);
+        Assert.Contains("lists", system);
+    }
+
+    [Fact]
     public async Task SendsTheQuestionSqlAndResultsToTheSummariser()
     {
         var handler = new CapturingHandler(Completion("CPI stood at 320.3 in June."));
@@ -589,6 +657,26 @@ public class ChatCompletionsNlToSqlClientTests
         Assert.Contains("What was CPI in June?", user);
         Assert.Contains("SELECT IndexValue FROM analytics.vw_Cpi", user);
         Assert.Contains("320.3", user);
+    }
+
+    [Fact]
+    public async Task ReportsWhatTheSummaryCallCostAsWellAsWhatItSaid()
+    {
+        // This used to be discarded. NlSummaryResult carried the completion count and nothing about
+        // the prompt, so every recorded prompt figure — and every estimate drawn from one — was
+        // short by the whole second call. That is roughly a fifth of what a question spends, and it
+        // is the part that caches least: the payload is the question, the parameters and the rows,
+        // all different every time.
+        var client = ClientReturning(CompletionWithUsage(
+            "CPI stood at 320.3 in June.",
+            """{"prompt_tokens":940,"completion_tokens":120,"prompt_cache_hit_tokens":448}"""));
+
+        var result = await client.SummariseResultsAsync(
+            "q", "SELECT 1", NoParameters, "[]", NoCoverage, Cloud, default);
+
+        Assert.Equal(940, result.PromptTokens);
+        Assert.Equal(120, result.CompletionTokens);
+        Assert.Equal(448, result.CachedPromptTokens);
     }
 
     [Fact]
@@ -966,13 +1054,16 @@ public class ChatCompletionsNlToSqlClientTests
     }
 
     [Fact]
-    public async Task SendsNoReasoningEffortToTheHostedGateway()
+    public async Task OmitsReasoningEffortFromTheHostedGatewayWhenItIsEmptied()
     {
-        // Absent, not null. The hosted gateway is not a reasoning model and has no use for the
-        // field, and an OpenAI-shaped API is within its rights to reject a parameter it does not
-        // know rather than ignore it.
+        // Absent, not null — an OpenAI-shaped API is within its rights to reject a parameter it does
+        // not know rather than ignore it, so emptying the setting has to mean "do not send this".
+        //
+        // Note this is no longer the default. deepseek-v4-flash turned out to reason, spending most
+        // of its completion budget on thinking that changed the statement not at all, so production
+        // now sends "none". This pins the escape hatch for a gateway that refuses the field.
         var handler = new CapturingHandler(Completion("""{"sql": null}"""));
-        var client = ClientOver(handler);
+        var client = ClientOver(handler, cloudReasoningEffort: "");
 
         await client.GenerateSqlAsync("q", SchemaContext, [], Cloud, default);
 
@@ -1227,6 +1318,16 @@ public class ChatCompletionsNlToSqlClientTests
             },
             usage = new { prompt_tokens = promptTokens, completion_tokens = completionTokens }
         });
+
+    /// <summary>
+    /// A completion whose <c>usage</c> object is supplied verbatim, so a test can pin how a
+    /// particular gateway spells its fields rather than how this file happens to build them.
+    /// </summary>
+    private static string CompletionWithUsage(string content, string usageJson) =>
+        $$"""
+        {"choices":[{"message":{"role":"assistant","content":{{JsonSerializer.Serialize(content)}}},
+         "finish_reason":"stop"}],"usage":{{usageJson}}}
+        """;
 
     private static ChatCompletionsNlToSqlClient ClientReturning(string responseJson) =>
         ClientOver(new CapturingHandler(responseJson));

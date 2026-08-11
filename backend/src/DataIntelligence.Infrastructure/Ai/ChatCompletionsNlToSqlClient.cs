@@ -149,7 +149,8 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
             {
                 return NlToSqlResult.NoSql(
                     refusal, provider.Model, response.PromptTokens,
-                    response.CompletionTokens, (int)stopwatch.ElapsedMilliseconds);
+                    response.CompletionTokens, (int)stopwatch.ElapsedMilliseconds,
+                    response.CachedPromptTokens);
             }
 
             if (root.TryGetProperty("sql", out var sqlElement))
@@ -237,13 +238,13 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
 
             return NlToSqlResult.NoSql(
                 refusal, provider.Model, response.PromptTokens, response.CompletionTokens,
-                (int)stopwatch.ElapsedMilliseconds);
+                (int)stopwatch.ElapsedMilliseconds, response.CachedPromptTokens);
         }
 
         return new NlToSqlResult(
             sql, parameters, explanation,
             provider.Model, response.PromptTokens, response.CompletionTokens,
-            (int)stopwatch.ElapsedMilliseconds);
+            (int)stopwatch.ElapsedMilliseconds, NlRefusalKind.None, response.CachedPromptTokens);
     }
 
     public async Task<NlSummaryResult> SummariseResultsAsync(
@@ -255,6 +256,12 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         AssistantModelChoice model,
         CancellationToken cancellationToken)
     {
+        // The prose rule is second because it is about the whole answer rather than any part of it.
+        // A model left to choose its own format reaches for a markdown table whenever it has more
+        // than two figures to give, and this answer is rendered as text — so the reader gets pipes
+        // and dashes where a sentence was meant. Naming the constructs is what makes it hold; "plain
+        // prose" alone is read as advice about tone.
+        //
         // The middle sentences are about follow-ups. This step is given one question at a time and
         // never sees the conversation, so a question like "and the year before that?" arrives with
         // its referent missing — and a model trying to honour the wording will report the figures it
@@ -267,20 +274,29 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         const string system =
             "You answer questions about US economic data (CPI, SOFR) from a query result. "
             + "Be concise, cite the actual figures, and never invent a number that is not in the "
-            + "data given to you. The result is columnar: \"columns\" names the fields in order, "
+            + "data given to you. Write plain prose — sentences and paragraphs, with the figures "
+            + "inside them. No tables, no bullet or numbered lists, no headings, no code fences, no "
+            + "bold or italic markers. "
+            + "The result is columnar: \"columns\" names the fields in order, "
             + "and each entry of \"rows\" holds one record's values in that same order. A result "
             + "too long to list arrives summarised instead, and carries its own note saying how to "
             + "read it. "
-            + "The question may be a follow-up whose wording refers to something you cannot see "
-            + "(\"that year\", \"the year before that\", \"the same for SOFR\"); the SQL and its "
-            + "parameters are that reference already resolved. Where the wording and the query "
-            + "disagree, the query is right — answer for what was queried, and never say data is "
-            + "missing merely because the wording implies a period the query did not ask for. "
-            + "When there are no rows, say why and not only that there are none: if the period "
-            + "queried falls outside the coverage below, say so and give the range that is held — "
-            + "a reader cannot otherwise tell 'we never collected this' from 'this period is "
-            + "before the series existed'. If the period IS covered and the result is still empty, "
-            + "say that plainly instead; do not invent a coverage explanation for it.";
+            + "A follow-up's wording may refer to something you cannot see (\"that year\", \"the "
+            + "year before that\", \"the same for SOFR\"); the SQL and its parameters are that "
+            + "reference already resolved, so answer for what was queried rather than for the "
+            + "wording. That holds only while the question names no period of its own. "
+            + "If the question DOES name one — \"June 2025\", \"in 2023\", \"March 2019\" — and "
+            + "the query asked for a different period, then the query is simply wrong. Say so: "
+            + "that the question asked about the period it named, that the query that ran asked "
+            + "for another, and that this is a fault on our side worth asking again. Do not "
+            + "explain the empty result as anything else, and never tell the reader a period is "
+            + "unavailable when the query did not ask for it — that turns our mistake into a "
+            + "false claim about the data. "
+            + "Otherwise, when there are no rows, say why and not only that there are none: if the "
+            + "period queried falls outside the coverage below, say so and give the range that is "
+            + "held — a reader cannot otherwise tell 'we never collected this' from 'this period "
+            + "is before the series existed'. If the period IS covered and the result is still "
+            + "empty, say that plainly instead; do not invent a coverage explanation for it.";
 
         var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\n"
             + $"Parameters bound to it (JSON): {JsonSerializer.Serialize(parameters)}\n\n"
@@ -291,7 +307,9 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         var response = await SendAsync(
             Resolve(model), system, user, jsonMode: false, [], cancellationToken);
 
-        return new NlSummaryResult(response.Text.Trim(), response.CompletionTokens, (int)stopwatch.ElapsedMilliseconds);
+        return new NlSummaryResult(
+            response.Text.Trim(), response.CompletionTokens, (int)stopwatch.ElapsedMilliseconds,
+            response.PromptTokens, response.CachedPromptTokens);
     }
 
     /// <summary>
@@ -426,7 +444,8 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
 
     private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled);
 
-    private async Task<(string Text, int? PromptTokens, int? CompletionTokens, bool Truncated)> SendAsync(
+    private async Task<(string Text, int? PromptTokens, int? CompletionTokens, bool Truncated,
+        int? CachedPromptTokens)> SendAsync(
         Provider provider,
         string system,
         string userMessage,
@@ -565,6 +584,7 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
             bool truncated;
             int? promptTokens;
             int? completionTokens;
+            int? cachedPromptTokens = null;
 
             if (provider.Dialect == Wire.Ollama)
             {
@@ -578,6 +598,11 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
                 truncated = string.Equals(parsed.DoneReason, "length", StringComparison.Ordinal);
                 promptTokens = parsed.PromptEvalCount;
                 completionTokens = parsed.EvalCount;
+
+                // Left null rather than reported as zero. Ollama does reuse a cached prefix — it is
+                // most of why a second question on one session answers faster than the first — but
+                // it publishes no count of it, and inventing a zero here would read as "the prefix
+                // was not reused" when what happened is that nobody was asked.
             }
             else
             {
@@ -591,6 +616,22 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
                 truncated = string.Equals(choice?.FinishReason, "length", StringComparison.Ordinal);
                 promptTokens = parsed.Usage?.PromptTokens;
                 completionTokens = parsed.Usage?.CompletionTokens;
+                cachedPromptTokens = parsed.Usage?.CachedPromptTokens;
+            }
+
+            // One line per call, at Information, because the question it answers is one nobody can
+            // answer from the token totals: those count what was read, not what was paid for. The
+            // prompt is deliberately arranged so its first ~2,700 tokens never change, and whether a
+            // provider reuses them decides both what a question costs and whether trimming the
+            // prompt further is worth anyone's time. A gateway that reports nothing logs a cached
+            // count of "not reported", which is itself the answer for that provider.
+            if (_logger.IsEnabled(LogLevel.Information))
+            {
+                _logger.LogInformation(
+                    "The {Choice} model '{Model}' read {PromptTokens} prompt tokens ({CachedTokens} "
+                    + "from cache) and wrote {CompletionTokens}.",
+                    provider.Choice, provider.Model, promptTokens,
+                    (object?)cachedPromptTokens ?? "not reported", completionTokens);
             }
 
             if (truncated)
@@ -615,7 +656,7 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
                     AssistantOptions.SectionName);
             }
 
-            return (text, promptTokens, completionTokens, truncated);
+            return (text, promptTokens, completionTokens, truncated, cachedPromptTokens);
         }
     }
 
@@ -873,9 +914,47 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         [property: JsonPropertyName("message")] ChatMessage Message,
         [property: JsonPropertyName("finish_reason")] string? FinishReason);
 
+    /// <summary>
+    /// How much of the prompt the provider served from its own cache rather than reading again.
+    /// </summary>
+    /// <remarks>
+    /// Both spellings are read because the two gateways this client speaks to disagree, and which
+    /// one answers is configuration rather than code: DeepSeek reports
+    /// <c>prompt_cache_hit_tokens</c> at the top of <c>usage</c>, while OpenAI's shape puts
+    /// <c>cached_tokens</c> inside <c>prompt_tokens_details</c>. Neither is mandatory, and a gateway
+    /// that reports no caching at all leaves both absent — which reads as null, not zero, because
+    /// "this provider does not say" and "nothing was cached" are different facts and only one of
+    /// them is worth acting on.
+    /// <para>
+    /// This exists to answer a question the token count alone cannot: roughly 2,700 tokens of every
+    /// prompt are a byte-identical prefix, deliberately arranged that way so a provider can reuse
+    /// it, and until now nothing recorded whether any provider actually did. A cached prefix bills
+    /// at a fraction of the input rate, so if it is being reused the effective cost of a question is
+    /// a third of its token count — and further trimming of the prompt is close to pointless. If it
+    /// is not, the ordering work bought nothing and that is worth knowing too.
+    /// </para>
+    /// </remarks>
     private sealed record ChatUsage(
         [property: JsonPropertyName("prompt_tokens")] int PromptTokens,
-        [property: JsonPropertyName("completion_tokens")] int CompletionTokens);
+        [property: JsonPropertyName("completion_tokens")] int CompletionTokens,
+        [property: JsonPropertyName("prompt_cache_hit_tokens")] int? PromptCacheHitTokens = null,
+        [property: JsonPropertyName("prompt_tokens_details")] ChatPromptTokensDetails? PromptTokensDetails = null)
+    {
+        /// <summary>
+        /// The cached prefix in whichever spelling the gateway used, or null if it said nothing.
+        /// </summary>
+        /// <remarks>
+        /// The top-level field wins when both are present. They are two names for one number, so
+        /// they cannot disagree meaningfully, and preferring the one the configured gateway actually
+        /// documents keeps the reading closest to what is billed.
+        /// </remarks>
+        public int? CachedPromptTokens =>
+            PromptCacheHitTokens ?? PromptTokensDetails?.CachedTokens;
+    }
+
+    /// <summary>OpenAI's nested spelling of the same cache figure.</summary>
+    private sealed record ChatPromptTokensDetails(
+        [property: JsonPropertyName("cached_tokens")] int? CachedTokens);
 
     // ----------------------------------------------------------------- Ollama's native shape
 
