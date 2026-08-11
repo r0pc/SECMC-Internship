@@ -1,3 +1,4 @@
+﻿using DataIntelligence.Core;
 using DataIntelligence.Core.Analytics;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
@@ -60,7 +61,7 @@ public sealed class CatalogService : ICatalogService
         source.MaxRetries = request.MaxRetries ?? source.MaxRetries;
         source.UserAgent = request.UserAgent ?? source.UserAgent;
         source.TermsOfUseUrl = request.TermsOfUseUrl ?? source.TermsOfUseUrl;
-        source.UpdatedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        source.UpdatedAtPkt = PakistanTime.Now(_timeProvider);
 
         await _db.SaveChangesAsync(cancellationToken);
 
@@ -173,7 +174,7 @@ public sealed class CatalogService : ICatalogService
                 {
                     ReferenceDate = o.ReferenceDate,
                     Value = o.IndexValue,
-                    CollectedAtUtc = o.CollectedAtUtc
+                    CollectedAtPkt = o.CollectedAtPkt
                 })
                 .FirstOrDefaultAsync(cancellationToken);
 
@@ -205,7 +206,7 @@ public sealed class CatalogService : ICatalogService
                         {
                             ReferenceDate = day.EffectiveDate,
                             Value = value,
-                            CollectedAtUtc = day.CollectedAtUtc
+                            CollectedAtPkt = day.CollectedAtPkt
                         };
                     }
                 }

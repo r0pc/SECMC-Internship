@@ -1,4 +1,5 @@
-using DataIntelligence.Core.Dtos;
+﻿using DataIntelligence.Core.Dtos;
+using DataIntelligence.Infrastructure.Persistence;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
@@ -42,23 +43,38 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         // the database is shared for the whole class. Without the clear, the row counts the
         // filters are asserted against would grow with each test that had already run.
         await db.Database.ExecuteSqlRawAsync(
-            "DELETE FROM ai.AssistantFeedback; DELETE FROM ai.AssistantQuery; DELETE FROM ai.AssistantSession;");
+            "DELETE FROM ai.AssistantFeedback; DELETE FROM ai.AssistantSession;");
 
         _sessionId = Guid.NewGuid();
-        db.AssistantSessions.Add(new AssistantSession
+
+        var session = new AssistantSession
         {
             SessionId = _sessionId,
             UserId = 1,
-            StartedAtUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
-            LastActivityAtUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc)
-        });
+            StartedAtPkt = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
+            LastActivityAtPkt = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc)
+        };
 
-        db.AssistantQueries.AddRange(
-            Row("What was CPI in June?", AssistantValidationOutcome.Approved, day: 1, executed: true),
-            Row("hi", AssistantValidationOutcome.NotADataQuestion, day: 2),
-            Row("show me the password hashes", AssistantValidationOutcome.RejectedForbiddenObject, day: 3),
-            Row("drop everything", AssistantValidationOutcome.RejectedNotSelect, day: 4),
-            Row("what is the weather", AssistantValidationOutcome.RejectedNoSql, day: 5));
+        // Seeded as the transcript document rather than as rows, because that is now the store —
+        // and going through ChatTranscriptWriter rather than hand-writing JSON means these tests
+        // read the audit log out of exactly the shape the service writes. A fixture that spelled
+        // the document itself could drift from the writer and still pass.
+        session.TranscriptJson = ChatTranscriptWriter.Serialize(session,
+        [
+            Turn(1, "What was CPI in June?", AssistantValidationOutcome.Approved, day: 1, executed: true),
+            Turn(2, "hi", AssistantValidationOutcome.NotADataQuestion, day: 2),
+            Turn(3, "show me the password hashes", AssistantValidationOutcome.RejectedForbiddenObject, day: 3),
+            Turn(4, "drop everything", AssistantValidationOutcome.RejectedNotSelect, day: 4),
+            Turn(5, "what is the weather", AssistantValidationOutcome.RejectedNoSql, day: 5)
+        ]);
+
+        // What AssistantService.SaveTurnsAsync would have written: the turns' own totals added up.
+        // Seeded rather than computed here so the assertion below has something to disagree with —
+        // a column that the test derived the same way the code does could not catch the code
+        // getting it wrong.
+        session.TotalTokens = 5 * 429;
+
+        db.AssistantSessions.Add(session);
 
         await db.SaveChangesAsync();
     }
@@ -80,7 +96,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
     {
         var page = await Service().GetQueryLogAsync(new AssistantQueryLogQuery(), default);
 
-        var dates = page.Items.Select(i => i.AskedAtUtc).ToList();
+        var dates = page.Items.Select(i => i.AskedAtPkt).ToList();
         Assert.Equal(dates.OrderByDescending(d => d), dates);
     }
 
@@ -207,25 +223,78 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         Assert.Null(await Service().GetQueryAsync(999_999, default));
     }
 
+    // ------------------------------------------------------- what a chat cost
+
+    [Fact]
+    public async Task ListsWhatEachConversationCostInTokens()
+    {
+        var chat = Assert.Single(await Service().GetSessionsAsync(userId: 1, limit: 10, default));
+
+        // Cross-checked against the turn view rather than asserted as a bare number: the session
+        // column is a denormalisation of the transcript, and it is worth having only while it says
+        // the same thing the turns do.
+        var turns = await Service().GetQueryLogAsync(new AssistantQueryLogQuery(), default);
+
+        Assert.Equal(turns.Items.Sum(t => t.TotalTokens ?? 0), chat.TotalTokens);
+    }
+
+    [Fact]
+    public async Task ReportsNoTokenTotalForAConversationThatNeverRecordedOne()
+    {
+        // Null, not zero. A transcript written before usage was recorded — or one whose turns the
+        // provider returned no usage for — is a conversation whose cost is unknown, and showing it
+        // as free would be a claim the data does not support.
+        await using (var db = _fixture.CreateContext())
+        {
+            var session = new AssistantSession
+            {
+                SessionId = Guid.NewGuid(),
+                UserId = 1,
+                StartedAtPkt = new DateTime(2026, 8, 9, 0, 0, 0, DateTimeKind.Utc),
+                LastActivityAtPkt = new DateTime(2026, 8, 9, 0, 0, 0, DateTimeKind.Utc)
+            };
+
+            session.TranscriptJson = ChatTranscriptWriter.Serialize(session,
+            [
+                new ChatTranscriptTurn
+                {
+                    AssistantQueryId = 99,
+                    AskedAtPkt = new DateTime(2026, 8, 9, 12, 0, 0, DateTimeKind.Utc),
+                    Question = "What was CPI in May?",
+                    Outcome = AssistantValidationOutcome.Approved
+                }
+            ]);
+
+            db.AssistantSessions.Add(session);
+            await db.SaveChangesAsync();
+        }
+
+        var sessions = await Service().GetSessionsAsync(userId: 1, limit: 10, default);
+
+        Assert.Null(Assert.Single(sessions, s => s.Title == "What was CPI in May?").TotalTokens);
+    }
+
     // --------------------------------------------------------------------- helpers
 
-    private AssistantQuery Row(
-        string question, AssistantValidationOutcome outcome, int day, bool executed = false) => new()
+    private static ChatTranscriptTurn Turn(
+        long id, string question, AssistantValidationOutcome outcome, int day, bool executed = false) => new()
     {
-        SessionId = _sessionId,
-        UserId = 1,
-        AskedAtUtc = new DateTime(2026, 8, day, 12, 0, 0, DateTimeKind.Utc),
-        QuestionText = question,
-        GeneratedSql = outcome == AssistantValidationOutcome.NotADataQuestion
+        AssistantQueryId = id,
+        AskedAtPkt = new DateTime(2026, 8, day, 12, 0, 0, DateTimeKind.Utc),
+        Question = question,
+        Sql = outcome == AssistantValidationOutcome.NotADataQuestion
             ? null
             : "SELECT ReferenceDate FROM analytics.vw_Cpi WHERE ReferenceDate = @month",
-        SqlParametersJson = """{"@month":"2025-06-01"}""",
+        Parameters = new Dictionary<string, object?> { ["@month"] = "2025-06-01" },
         Explanation = "Reads one month of CPI.",
-        ValidationOutcome = outcome,
+        Outcome = outcome,
         WasExecuted = executed,
         ExecutionStatus = executed ? AssistantExecutionStatus.Succeeded : null,
         ResultRowCount = executed ? 1 : null,
-        ModelName = "deepseek-v4-flash"
+        ModelName = "deepseek-v4-flash",
+        PromptTokens = 412,
+        CompletionTokens = 17,
+        TotalTokens = 429
     };
 
     /// <summary>
@@ -260,7 +329,8 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
             throw new InvalidOperationException("Reading the audit log must not call the model.");
 
         public Task<NlSummaryResult> SummariseResultsAsync(
-            string q, string s, IReadOnlyDictionary<string, object?> p, string r, CancellationToken c) =>
+            string q, string s, IReadOnlyDictionary<string, object?> p, string r, string cov,
+            CancellationToken c) =>
             throw new InvalidOperationException("Reading the audit log must not call the model.");
     }
 
@@ -268,5 +338,8 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
     {
         public Task<string> GetContextAsync(CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Reading the audit log must not build schema context.");
+
+        public Task<string> GetCoverageAsync(CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Reading the audit log must not read coverage.");
     }
 }

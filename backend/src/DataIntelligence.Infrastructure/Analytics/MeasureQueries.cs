@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Analytics;
+﻿using DataIntelligence.Core.Analytics;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Infrastructure.Persistence;
@@ -52,9 +52,9 @@ internal static class MeasureQueries
                     Value = o.IndexValue,
                     RevisionNumber = o.RevisionNumber,
                     IsCurrent = o.IsCurrent,
-                    SupersededAtUtc = o.SupersededAtUtc,
+                    SupersededAtPkt = o.SupersededAtPkt,
                     Annotation = o.Footnotes,
-                    CollectedAtUtc = o.CollectedAtUtc,
+                    CollectedAtPkt = o.CollectedAtPkt,
                     CollectionRunId = o.CollectionRunId
                 });
         }
@@ -72,9 +72,9 @@ internal static class MeasureQueries
                 r.EffectiveDate,
                 r.RevisionNumber,
                 r.IsCurrent,
-                r.SupersededAtUtc,
+                r.SupersededAtPkt,
                 r.RevisionIndicator,
-                r.CollectedAtUtc,
+                r.CollectedAtPkt,
                 r.CollectionRunId,
                 Value =
                     measure == SofrMeasure.Percentile1 ? r.Percentile1Percent :
@@ -96,9 +96,9 @@ internal static class MeasureQueries
                 Value = x.Value!.Value,
                 RevisionNumber = x.RevisionNumber,
                 IsCurrent = x.IsCurrent,
-                SupersededAtUtc = x.SupersededAtUtc,
+                SupersededAtPkt = x.SupersededAtPkt,
                 Annotation = x.RevisionIndicator,
-                CollectedAtUtc = x.CollectedAtUtc,
+                CollectedAtPkt = x.CollectedAtPkt,
                 CollectionRunId = x.CollectionRunId
             });
     }
@@ -144,7 +144,7 @@ internal sealed record MeasureRow
     public required decimal Value { get; init; }
     public required short RevisionNumber { get; init; }
     public required bool IsCurrent { get; init; }
-    public DateTime? SupersededAtUtc { get; init; }
+    public DateTime? SupersededAtPkt { get; init; }
 
     /// <summary>
     /// Whatever the publisher said about the row, verbatim: BLS footnote codes, or the NY Fed's
@@ -152,6 +152,6 @@ internal sealed record MeasureRow
     /// </summary>
     public string? Annotation { get; init; }
 
-    public required DateTime CollectedAtUtc { get; init; }
+    public required DateTime CollectedAtPkt { get; init; }
     public required long CollectionRunId { get; init; }
 }

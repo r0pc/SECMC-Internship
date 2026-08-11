@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Entities;
 
@@ -16,7 +16,7 @@ public class RejectedObservation
     /// <summary>The period as published. Often it is the reason the row was rejected.</summary>
     public string? ReferenceDateText { get; set; }
 
-    public DateTime RejectedAtUtc { get; set; }
+    public DateTime RejectedAtPkt { get; set; }
     public RejectionReason Reason { get; set; }
     public string? ReasonDetail { get; set; }
     public string? RawFragment { get; set; }

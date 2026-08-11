@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Entities;
 
@@ -44,9 +44,9 @@ public class DataSource
     /// <summary>Compliance evidence (SOW 3), so the claim is auditable rather than assumed.</summary>
     public string? TermsOfUseUrl { get; set; }
 
-    public DateTime? RobotsTxtCheckedAtUtc { get; set; }
+    public DateTime? RobotsTxtCheckedAtPkt { get; set; }
 
     public bool IsEnabled { get; set; } = true;
-    public DateTime CreatedAtUtc { get; set; }
-    public DateTime? UpdatedAtUtc { get; set; }
+    public DateTime CreatedAtPkt { get; set; }
+    public DateTime? UpdatedAtPkt { get; set; }
 }

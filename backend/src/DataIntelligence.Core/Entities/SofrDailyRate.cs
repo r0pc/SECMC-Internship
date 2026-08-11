@@ -1,4 +1,4 @@
-namespace DataIntelligence.Core.Entities;
+﻿namespace DataIntelligence.Core.Entities;
 
 /// <summary>
 /// The Secured Overnight Financing Rate for one business day. Append-only, like
@@ -28,7 +28,7 @@ public class SofrDailyRate
 
     /// <summary>
     /// The business day the rate covers. Published the following business morning, ~08:00 ET,
-    /// which is why this and <see cref="CollectedAtUtc"/> are never the same instant.
+    /// which is why this and <see cref="CollectedAtPkt"/> are never the same instant.
     /// </summary>
     public DateOnly EffectiveDate { get; set; }
 
@@ -80,10 +80,10 @@ public class SofrDailyRate
     public short RevisionNumber { get; set; }
 
     public bool IsCurrent { get; set; } = true;
-    public DateTime? SupersededAtUtc { get; set; }
+    public DateTime? SupersededAtPkt { get; set; }
 
     public long CollectionRunId { get; set; }
-    public DateTime CollectedAtUtc { get; set; }
+    public DateTime CollectedAtPkt { get; set; }
 
     /// <summary>SHA-256 over the measures, so an unchanged day writes no row (FR-3).</summary>
     public byte[] RowHash { get; set; } = [];

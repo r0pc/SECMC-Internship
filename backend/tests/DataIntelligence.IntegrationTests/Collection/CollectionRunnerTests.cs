@@ -1,3 +1,4 @@
+﻿using DataIntelligence.Core;
 using DataIntelligence.Core.Collection;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
@@ -129,15 +130,17 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
         Assert.Equal(3.65m, row.RatePercent);
         Assert.Equal(0, row.RevisionNumber);
         Assert.True(row.IsCurrent);
-        Assert.Null(row.SupersededAtUtc);
+        Assert.Null(row.SupersededAtPkt);
 
         // The measures land as columns of that one row, not as separate rows.
         Assert.Equal(3.60m, row.Percentile1Percent);
         Assert.Equal(3.70m, row.Percentile99Percent);
         Assert.Equal(3000m, row.VolumeUsdBillions);
 
-        // FR-6: the collection timestamp, distinct from the day the rate describes.
-        Assert.Equal(_cycle1, row.CollectedAtUtc);
+        // FR-6: the collection timestamp, distinct from the day the rate describes. Stored on the
+        // Pakistan wall clock, so it is the cycle instant plus the UTC+5 offset — the same moment,
+        // written the way every ...AtPkt column in the schema writes it.
+        Assert.Equal(_cycle1.Add(PakistanTime.Offset), row.CollectedAtPkt);
     }
 
     [Fact]
@@ -177,7 +180,7 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
 
         Assert.Equal(3.65m, vintages[0].RatePercent);
         Assert.False(vintages[0].IsCurrent);
-        Assert.NotNull(vintages[0].SupersededAtUtc);
+        Assert.NotNull(vintages[0].SupersededAtPkt);
 
         Assert.Equal(3.68m, vintages[1].RatePercent);
         Assert.Equal(1, vintages[1].RevisionNumber);
@@ -312,7 +315,7 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
         var run = await verify.CollectionRuns.SingleAsync(r => r.CollectionRunId == summary.CollectionRunId);
 
         Assert.Equal(CollectionFailureCategory.Timeout, run.FailureCategory);
-        Assert.NotNull(run.CompletedAtUtc);
+        Assert.NotNull(run.CompletedAtPkt);
     }
 
     [Fact]
@@ -400,7 +403,7 @@ public class CollectionRunnerTests : IClassFixture<CollectionDatabaseFixture>
 
         await using var verify = _fixture.CreateContext();
         var attempts = await verify.CollectionRuns
-            .Where(r => r.DataSourceId == DataSource.NyFedSofrId && r.ScheduledForUtc == _cycle1)
+            .Where(r => r.DataSourceId == DataSource.NyFedSofrId && r.ScheduledForPkt == _cycle1)
             .Select(r => r.Attempt)
             .OrderBy(a => a)
             .ToListAsync();

@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Dtos;
+﻿using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Persistence;
@@ -29,7 +29,7 @@ public sealed class SofrDailyRateWriter : IDatasetWriter
     public async Task<DatasetWriteSummary> WriteAsync(
         CollectionRun run,
         IReadOnlyList<ObservationRecord> records,
-        DateTime collectedAtUtc,
+        DateTime collectedAtPkt,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -59,7 +59,7 @@ public sealed class SofrDailyRateWriter : IDatasetWriter
 
             if (!currentVintages.TryGetValue(record.EffectiveDate, out var current))
             {
-                _db.SofrDailyRates.Add(NewRate(record, run, collectedAtUtc, rowHash, 0));
+                _db.SofrDailyRates.Add(NewRate(record, run, collectedAtPkt, rowHash, 0));
                 inserted++;
                 continue;
             }
@@ -71,10 +71,10 @@ public sealed class SofrDailyRateWriter : IDatasetWriter
             }
 
             current.IsCurrent = false;
-            current.SupersededAtUtc = collectedAtUtc;
+            current.SupersededAtPkt = collectedAtPkt;
 
             _db.SofrDailyRates.Add(NewRate(
-                record, run, collectedAtUtc, rowHash, (short)(current.RevisionNumber + 1)));
+                record, run, collectedAtPkt, rowHash, (short)(current.RevisionNumber + 1)));
 
             revised++;
 
@@ -90,7 +90,7 @@ public sealed class SofrDailyRateWriter : IDatasetWriter
 
     private static SofrDailyRate NewRate(
         SofrDailyRateRecord record, CollectionRun run,
-        DateTime collectedAtUtc, byte[] rowHash, short revisionNumber) =>
+        DateTime collectedAtPkt, byte[] rowHash, short revisionNumber) =>
         new()
         {
             RateType = SofrDailyRate.RateTypeValue,
@@ -106,7 +106,7 @@ public sealed class SofrDailyRateWriter : IDatasetWriter
             RevisionNumber = revisionNumber,
             IsCurrent = true,
             CollectionRunId = run.CollectionRunId,
-            CollectedAtUtc = collectedAtUtc,
+            CollectedAtPkt = collectedAtPkt,
             RowHash = rowHash
         };
 }

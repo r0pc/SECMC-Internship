@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using DataIntelligence.Core.Collection;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
@@ -92,7 +92,7 @@ public class DashboardApiTests
 
         Assert.Equal(DashboardApiFixture.RevisedOriginalValue, superseded.Value);
         Assert.Equal(0, superseded.RevisionNumber);
-        Assert.NotNull(superseded.SupersededAtUtc);
+        Assert.NotNull(superseded.SupersededAtPkt);
 
         var current = page.Items.Single(o => o.IsCurrent);
 
@@ -384,7 +384,7 @@ public class DashboardApiTests
         Assert.Equal(DashboardApiFixture.DailyPoints[0].Date, summary.EarliestSofrDate);
         Assert.Equal(DashboardApiFixture.DailyPoints[^1].Date, summary.LatestSofrDate);
 
-        Assert.NotNull(summary.LastCollectionAtUtc);
+        Assert.NotNull(summary.LastCollectionAtPkt);
         Assert.Equal(2, summary.Sources.Count);
     }
 
@@ -404,7 +404,7 @@ public class DashboardApiTests
         Assert.Equal(CollectionRunStatus.Failed, bls.LastRunStatus);
         Assert.Equal(CollectionFailureCategory.HttpError, bls.LastFailureCategory);
         Assert.Equal(1, bls.ConsecutiveFailures);
-        Assert.NotNull(bls.LastSuccessAtUtc);
+        Assert.NotNull(bls.LastSuccessAtPkt);
 
         var sofr = health.Single(h => h.SourceCode == DataSource.NyFedSofrCode);
 

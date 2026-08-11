@@ -1,4 +1,5 @@
-// backend/src/DataIntelligence.Infrastructure/Ai/SchemaContextProvider.cs
+﻿// backend/src/DataIntelligence.Infrastructure/Ai/SchemaContextProvider.cs
+using DataIntelligence.Core;
 using System.Text;
 using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Core.Interfaces;
@@ -69,6 +70,28 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         return structure + temporal;
     }
 
+    public async Task<string> GetCoverageAsync(CancellationToken cancellationToken)
+    {
+        var coverage = await ReadCoverageAsync(cancellationToken);
+
+        if (coverage.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder();
+        builder.AppendLine("What this platform holds:");
+
+        foreach (var (label, earliest, latest) in coverage)
+        {
+            builder.Append("- ").Append(label).Append(": ")
+                .Append(earliest.ToString("yyyy-MM-dd")).Append(" to ")
+                .Append(latest.ToString("yyyy-MM-dd")).AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
     private async Task<string> GetStructureAsync(CancellationToken cancellationToken)
     {
         if (_structure is not null)
@@ -109,18 +132,26 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
     /// </remarks>
     private async Task<string> BuildTemporalAsync(CancellationToken cancellationToken)
     {
-        var today = DateOnly.FromDateTime(_timeProvider.GetUtcNow().UtcDateTime);
+        var today = DateOnly.FromDateTime(PakistanTime.Now(_timeProvider));
 
         var coverage = await ReadCoverageAsync(cancellationToken);
 
         var builder = new StringBuilder();
         builder.AppendLine();
         builder.AppendLine();
-        builder.Append("Today's date is ").Append(today.ToString("yyyy-MM-dd")).AppendLine(" (UTC).");
+        builder.Append("Today's date is ").Append(today.ToString("yyyy-MM-dd")).AppendLine(" (Pakistan Standard Time, UTC+05:00).");
         builder.AppendLine(
             "Resolve every relative date against it — \"last month\", \"this year\", \"the last 6 "
             + "months\", \"year to date\" — and write the resulting dates into the query as "
             + "parameters. Never ask the user which dates they meant.");
+        builder.AppendLine();
+        builder.AppendLine(
+            "Weeks have no agreed start, so use these definitions rather than deliberating: "
+            + "\"this week\" and \"the past week\" mean the 7 days ending today, inclusive; "
+            + "\"last week\" means the 7 days before those. A rolling window is what someone "
+            + "asking \"did anything fail this week\" wants, and it avoids a Monday-or-Sunday "
+            + "judgement the data cannot settle. Apply the same rule to \"this fortnight\" and "
+            + "\"the last N weeks\": N*7 days ending today.");
         builder.AppendLine();
 
         if (coverage.Count > 0)
@@ -363,8 +394,55 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
           question of your own: the shape above is the only reply that can be read, so a request for
           clarification is received as a malfunction rather than as the reasonable question it is.
 
+        Questions about two datasets at once — "how do CPI and SOFR compare", "what is the
+        relation between inflation and interest rates in 2025", "did they move together" — are
+        answerable and must not be refused. Nothing forbids reading more than one view: join them
+        on a shared period. They are on different clocks, so the join needs a common grain, and
+        the month is the one that works — CPI has one row a month, SOFR has one per business day,
+        so SOFR must be averaged up to the month rather than CPI stretched down to the day.
+
+        Example — "What is the relation between CPI and SOFR for the year 2025?":
+        {"sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
+         "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
+         "explanation": "Puts year-over-year CPI change beside the monthly average SOFR rate for each month of 2025, by averaging SOFR to month starts and joining on the CPI reference month.",
+         "refusal": null}
+
+        Return the two series side by side per period and let the answer describe how they move.
+        Do not try to compute a correlation coefficient in SQL, and do not assert that one causes
+        the other — the data shows what they did, not why.
+
+        Questions about how a series CHANGED, rather than what it was, are answerable too — "which
+        month rose the most", "between which months did SOFR move the fastest", "when did CPI peak",
+        "biggest jump", "steepest fall". These need each period compared with the one before it,
+        which is what LAG does:
+
+            LAG(x) OVER (ORDER BY period)
+
+        Build them in layers, innermost first: aggregate to the grain you want, then LAG over that,
+        then order by the change and take the top row. SOFR is daily, so a question about months
+        needs the daily rows averaged to months before anything is compared.
+
+        Example — "Between which months is the rate of change of SOFR the greatest in 2025?":
+        {"sql": "SELECT TOP (1) DATEADD(month, -1, m.MonthStart) AS FromMonth, m.MonthStart AS ToMonth, m.PrevAvgRate, m.AvgRate, m.AvgRate - m.PrevAvgRate AS ChangeInPercentagePoints FROM (SELECT MonthStart, AvgRate, LAG(AvgRate) OVER (ORDER BY MonthStart) AS PrevAvgRate FROM (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRate FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS monthly) AS m WHERE m.PrevAvgRate IS NOT NULL ORDER BY ABS(m.AvgRate - m.PrevAvgRate) DESC",
+         "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
+         "explanation": "Averages SOFR to each month of 2025, compares each month with the one before it, and returns the single largest move together with both months and both rates.",
+         "refusal": null}
+
+        Note three things it does. It returns BOTH months and BOTH rates, not just the size of the
+        change — "between which months" is asking which two. It orders by ABS(...) because the
+        greatest change means the largest move in either direction; use a signed ORDER BY only when
+        the question says rise or fall specifically. And it drops the row where the previous value
+        is NULL, which is the first period in range and has nothing to be compared with.
+
         Rules:
         - Write exactly one SELECT statement. No comments, no semicolons, no other statement type.
+        - Never use a CTE. `WITH x AS (...) SELECT ...` is rejected before it runs: a statement has
+          to begin with SELECT, and the CTE's own name is not one of the views above. Nest the
+          query as a derived table — `FROM (SELECT ...) AS x` — which expresses exactly the same
+          thing and is accepted. Window functions (LAG, LEAD, ROW_NUMBER, SUM OVER) are fine
+          anywhere, including inside a derived table.
+        - Prefer TOP (n) with ORDER BY when the question asks for one period — "which month",
+          "when was it highest" — rather than returning every period and describing the winner.
         - Never reference any table or view not listed above.
         - If the question cannot be answered from these views, respond with SQL: null.
 

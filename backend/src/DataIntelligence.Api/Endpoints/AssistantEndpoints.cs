@@ -1,4 +1,4 @@
-// backend/src/DataIntelligence.Api/Endpoints/AssistantEndpoints.cs
+﻿// backend/src/DataIntelligence.Api/Endpoints/AssistantEndpoints.cs
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Exceptions;
@@ -81,9 +81,68 @@ public static class AssistantEndpoints
             .Produces(StatusCodes.Status204NoContent)
             .ProducesProblem(StatusCodes.Status404NotFound);
 
+        MapSessionEndpoints(group);
         MapReviewEndpoints(group);
 
         return group;
+    }
+
+    /// <summary>
+    /// Listing and reopening a user's own conversations.
+    /// </summary>
+    /// <remarks>
+    /// The user id is hard-coded to 1 here exactly as it is on /ask, and every one of these calls
+    /// is scoped by it. That scoping does nothing today — one placeholder user owns everything —
+    /// and is written now rather than later because the day FR-9 makes it real is the day it has
+    /// to already be right: an endpoint that returns a conversation by GUID alone hands one user
+    /// another's chat history the moment there is more than one user.
+    /// </remarks>
+    private static void MapSessionEndpoints(RouteGroupBuilder group)
+    {
+        group.MapGet("/sessions", async (
+                int? limit,
+                IAssistantService assistant,
+                CancellationToken cancellationToken) =>
+            {
+                // Clamped rather than rejected: a caller asking for 10,000 conversations means
+                // "all of them", and a 400 helps nobody.
+                var take = Math.Clamp(limit ?? 20, 1, 100);
+
+                return Results.Ok(
+                    await assistant.GetSessionsAsync(userId: 1, take, cancellationToken));
+            })
+            .WithName("GetAssistantSessions")
+            .WithSummary("The caller's past conversations, most recently used first.")
+            .WithDescription(
+                "Enough to draw a 'resume a chat' list and no more: when the conversation started, "
+                + "when it was last used, how many exchanges it holds, and its first question as a "
+                + "title. Conversations that never got an answer are omitted. Fetch the turns "
+                + "themselves from /assistant/sessions/{sessionId}.")
+            .Produces<IReadOnlyList<AssistantSessionSummaryDto>>();
+
+        group.MapGet("/sessions/{sessionId:guid}", async (
+                Guid sessionId,
+                IAssistantService assistant,
+                CancellationToken cancellationToken) =>
+            {
+                var transcript = await assistant.GetTranscriptAsync(
+                    userId: 1, sessionId, cancellationToken);
+
+                // A conversation belonging to someone else is reported as missing, not as
+                // forbidden. Telling a caller that a session exists but is not theirs is telling
+                // them a session exists.
+                return transcript is null
+                    ? ApiEndpoints.NotFound($"No conversation with id {sessionId}.")
+                    : Results.Ok(transcript);
+            })
+            .WithName("GetAssistantTranscript")
+            .WithSummary("One past conversation, in full, for replaying into the chat.")
+            .WithDescription(
+                "Every turn in order — question, answer, outcome, and for approved turns the SQL "
+                + "and its parameters. Result rows are not included: they were never stored, and "
+                + "the answer text is what the user was actually shown.")
+            .Produces<AssistantTranscriptDto>()
+            .ProducesProblem(StatusCodes.Status404NotFound);
     }
 
     /// <summary>

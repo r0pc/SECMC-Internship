@@ -1,4 +1,4 @@
-// backend/src/DataIntelligence.Infrastructure/Ai/DeepSeekNlToSqlClient.cs
+﻿// backend/src/DataIntelligence.Infrastructure/Ai/DeepSeekNlToSqlClient.cs
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
@@ -49,9 +49,20 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
             Respond with JSON only, no prose, in this exact shape:
             {"sql": "<statement or null>", "parameters": {"@name": <value>}, "explanation": "<one or two sentences>", "refusal": null}
 
-            When "sql" is null, set "refusal" to "not_a_data_question" if the input was a greeting,
-            thanks, or anything not asking about data, and to "unanswerable" if it was a genuine
-            data question these views cannot answer. Leave "refusal" null whenever you return SQL.
+            When "sql" is null, set "refusal" to one of:
+              "not_a_data_question" — a greeting, thanks, or anything not asking about data.
+              "about_cpi"      — asks what CPI *is*, how it is defined, who publishes it, what the
+                                 index base means. Not what it *was*: "what is CPI in June" wants a
+                                 figure and needs SQL.
+              "about_sofr"     — the same, for SOFR: what it is, who publishes it, what it measures.
+              "about_platform" — what this assistant or platform is, what data it holds, what it
+                                 can answer, how often it collects.
+              "unanswerable"   — a genuine data question these views cannot answer.
+            Leave "refusal" null whenever you return SQL.
+
+            The three "about_" values are classifications, not requests to write the answer: the
+            reply is fixed text on the other side. Do not put a definition in "explanation" and do
+            not state any figure — a question about what a series is never needs one.
 
             Put every literal the question supplies into "parameters" and reference it from the
             statement by name — write `WHERE ReferenceDate = @month`, not `WHERE ReferenceDate =
@@ -119,6 +130,9 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
                 refusal = why2.GetString() switch
                 {
                     "not_a_data_question" => NlRefusalKind.NotADataQuestion,
+                    "about_cpi" => NlRefusalKind.AboutCpi,
+                    "about_sofr" => NlRefusalKind.AboutSofr,
+                    "about_platform" => NlRefusalKind.AboutPlatform,
                     _ => NlRefusalKind.Unanswerable
                 };
             }
@@ -165,6 +179,7 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
         string generatedSql,
         IReadOnlyDictionary<string, object?> parameters,
         string resultsJson,
+        string coverage,
         CancellationToken cancellationToken)
     {
         // The last two sentences are about follow-ups. This step is given one question at a time
@@ -182,10 +197,17 @@ public sealed class DeepSeekNlToSqlClient : INlToSqlClient
             + "parameters are that reference already resolved. Where the wording and the query "
             + "disagree about what was asked for, the query is right — answer for what was "
             + "queried, and never say data is missing merely because the wording implies a period "
-            + "the query did not ask for.";
+            + "the query did not ask for. "
+            + "When the result set is empty, say why rather than only that it is. Compare the "
+            + "period asked for against the coverage below: if it falls outside what the platform "
+            + "holds, say so and give the range that is held — a reader cannot otherwise tell "
+            + "'we never collected this' from 'this period is before the series existed'. If the "
+            + "period IS covered and the result is still empty, say that plainly instead; do not "
+            + "invent a coverage explanation for it.";
 
         var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\n"
             + $"Parameters bound to it (JSON): {JsonSerializer.Serialize(parameters)}\n\n"
+            + $"{coverage}\n"
             + $"Results (JSON): {resultsJson}";
 
         var stopwatch = Stopwatch.StartNew();

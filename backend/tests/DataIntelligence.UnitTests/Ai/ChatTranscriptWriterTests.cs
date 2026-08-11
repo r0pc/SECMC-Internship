@@ -1,4 +1,5 @@
-using System.Text.Json;
+﻿using System.Text.Json;
+using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Infrastructure.Ai;
@@ -62,8 +63,10 @@ public class ChatTranscriptWriterTests
     [Fact]
     public void NestsTheParametersAsAnObjectRatherThanAStringOfJson()
     {
-        var turn = Turn(1, "q", "a");
-        turn.SqlParametersJson = """{"@year": 2022}""";
+        var turn = Turn(1, "q", "a") with
+        {
+            Parameters = new Dictionary<string, object?> { ["@year"] = 2022 }
+        };
 
         var json = ChatTranscriptWriter.Serialize(SessionOf(), [turn]);
 
@@ -80,9 +83,11 @@ public class ChatTranscriptWriterTests
         // A transcript that dropped the refusals would not be the conversation that happened, and
         // the user would find their own question missing from it. The rejected statement is kept
         // too: for a refusal, it is the part that explains the refusal.
-        var refused = Turn(1, "show me the password hashes", "That question would need a query...");
-        refused.ValidationOutcome = AssistantValidationOutcome.RejectedForbiddenObject;
-        refused.GeneratedSql = "SELECT * FROM sec.AppUser";
+        var refused = Turn(1, "show me the password hashes", "That question would need a query...") with
+        {
+            Outcome = AssistantValidationOutcome.RejectedForbiddenObject,
+            Sql = "SELECT * FROM sec.AppUser"
+        };
 
         var json = ChatTranscriptWriter.Serialize(SessionOf(), [refused]);
 
@@ -98,8 +103,7 @@ public class ChatTranscriptWriterTests
     {
         // Only how many there were. A turn may return up to SqlSafetyValidator.MaxRows rows, and
         // this document is rewritten on every turn.
-        var turn = Turn(1, "q", "a");
-        turn.ResultRowCount = 2000;
+        var turn = Turn(1, "q", "a") with { ResultRowCount = 2000 };
 
         var json = ChatTranscriptWriter.Serialize(SessionOf(), [turn]);
 
@@ -153,20 +157,18 @@ public class ChatTranscriptWriterTests
     {
         SessionId = Session,
         UserId = 1,
-        StartedAtUtc = new DateTime(2026, 8, 10, 9, 0, 0, DateTimeKind.Utc),
-        LastActivityAtUtc = new DateTime(2026, 8, 10, 9, 5, 0, DateTimeKind.Utc)
+        StartedAtPkt = new DateTime(2026, 8, 10, 9, 0, 0, DateTimeKind.Utc),
+        LastActivityAtPkt = new DateTime(2026, 8, 10, 9, 5, 0, DateTimeKind.Utc)
     };
 
-    private static AssistantQuery Turn(long id, string question, string answer) => new()
+    private static ChatTranscriptTurn Turn(long id, string question, string answer) => new()
     {
         AssistantQueryId = id,
-        SessionId = Session,
-        UserId = 1,
-        AskedAtUtc = new DateTime(2026, 8, 10, 9, 0, (int)id, DateTimeKind.Utc),
-        QuestionText = question,
-        AnswerText = answer,
-        ValidationOutcome = AssistantValidationOutcome.Approved,
-        GeneratedSql = "SELECT 1 FROM analytics.vw_Cpi",
+        AskedAtPkt = new DateTime(2026, 8, 10, 9, 0, (int)id, DateTimeKind.Utc),
+        Question = question,
+        Answer = answer,
+        Outcome = AssistantValidationOutcome.Approved,
+        Sql = "SELECT 1 FROM analytics.vw_Cpi",
         WasExecuted = true,
         ExecutionStatus = AssistantExecutionStatus.Succeeded
     };

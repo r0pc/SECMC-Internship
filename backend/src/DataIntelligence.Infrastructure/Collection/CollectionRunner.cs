@@ -1,3 +1,4 @@
+﻿using DataIntelligence.Core;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -55,7 +56,7 @@ public sealed class CollectionRunner : ICollectionRunner
 
     public async Task<CollectionSummary> RunAsync(
         string sourceCode,
-        DateTime scheduledForUtc,
+        DateTime scheduledForPkt,
         CollectionTriggerType trigger,
         CollectionWindow? window,
         CancellationToken cancellationToken)
@@ -96,7 +97,7 @@ public sealed class CollectionRunner : ICollectionRunner
             return Skipped(sourceCode, $"No dataset writer registered for '{sourceCode}'.");
         }
 
-        var run = await StartRunAsync(source, scheduledForUtc, trigger, cancellationToken);
+        var run = await StartRunAsync(source, scheduledForPkt, trigger, cancellationToken);
 
         try
         {
@@ -154,12 +155,12 @@ public sealed class CollectionRunner : ICollectionRunner
                 return Summarise(source.Code, run);
             }
 
-            source.RobotsTxtCheckedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
+            source.RobotsTxtCheckedAtPkt = PakistanTime.Now(_timeProvider);
         }
 
         // 2. Build and send the request.
         var request = adapter.BuildRequest(
-            new SourceRequestContext(source, _timeProvider.GetUtcNow().UtcDateTime, window));
+            new SourceRequestContext(source, PakistanTime.Now(_timeProvider), window));
 
         run.RequestUrl = request.Url;
 
@@ -206,18 +207,18 @@ public sealed class CollectionRunner : ICollectionRunner
         }
 
         // 5. Validate.
-        var collectedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var collectedAtPkt = PakistanTime.Now(_timeProvider);
         var accepted = new List<ObservationRecord>(parsed.Records.Count);
 
         foreach (var fragment in parsed.Rejections)
         {
             AddRejection(run, fragment.SeriesCode, fragment.ReferenceDateText,
-                fragment.Reason, fragment.Detail, fragment.Fragment, collectedAtUtc);
+                fragment.Reason, fragment.Detail, fragment.Fragment, collectedAtPkt);
         }
 
         foreach (var record in parsed.Records)
         {
-            var failure = ObservationValidator.Validate(record, collectedAtUtc);
+            var failure = ObservationValidator.Validate(record, collectedAtPkt);
             if (failure is null)
             {
                 accepted.Add(record);
@@ -225,7 +226,7 @@ public sealed class CollectionRunner : ICollectionRunner
             }
 
             AddRejection(run, record.SeriesCode, record.ReferenceLabel,
-                failure.Reason, failure.Detail, null, collectedAtUtc);
+                failure.Reason, failure.Detail, null, collectedAtPkt);
         }
 
         run.ObservationsRejected = parsed.Rejections.Count + (parsed.Records.Count - accepted.Count);
@@ -239,7 +240,7 @@ public sealed class CollectionRunner : ICollectionRunner
         }
 
         // 6. Persist, in whichever table this dataset owns.
-        var written = await writer.WriteAsync(run, accepted, collectedAtUtc, cancellationToken);
+        var written = await writer.WriteAsync(run, accepted, collectedAtPkt, cancellationToken);
 
         run.ObservationsInserted = written.Inserted;
         run.ObservationsRevised = written.Revised;
@@ -279,7 +280,7 @@ public sealed class CollectionRunner : ICollectionRunner
         var previousHash = await _db.RawPayloads
             .Where(p => p.Run!.DataSourceId == source.DataSourceId
                      && p.CollectionRunId != run.CollectionRunId)
-            .OrderByDescending(p => p.FetchedAtUtc)
+            .OrderByDescending(p => p.FetchedAtPkt)
             .Select(p => p.ContentHash)
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -287,22 +288,22 @@ public sealed class CollectionRunner : ICollectionRunner
     }
 
     private async Task<CollectionRun> StartRunAsync(
-        DataSource source, DateTime scheduledForUtc, CollectionTriggerType trigger,
+        DataSource source, DateTime scheduledForPkt, CollectionTriggerType trigger,
         CancellationToken cancellationToken)
     {
         // Attempt numbering keeps a retry distinguishable from the run it retries under
         // UQ_CollectionRun_Cycle, which is scoped per source.
         var priorAttempts = await _db.CollectionRuns
             .CountAsync(r => r.DataSourceId == source.DataSourceId
-                          && r.ScheduledForUtc == scheduledForUtc, cancellationToken);
+                          && r.ScheduledForPkt == scheduledForPkt, cancellationToken);
 
         var run = new CollectionRun
         {
             DataSourceId = source.DataSourceId,
-            ScheduledForUtc = scheduledForUtc,
+            ScheduledForPkt = scheduledForPkt,
             Attempt = (byte)Math.Min(priorAttempts + 1, byte.MaxValue),
             TriggerType = trigger,
-            StartedAtUtc = _timeProvider.GetUtcNow().UtcDateTime,
+            StartedAtPkt = PakistanTime.Now(_timeProvider),
             Status = CollectionRunStatus.Running,
             RequestUrl = source.ApiEndpoint
         };
@@ -324,7 +325,7 @@ public sealed class CollectionRunner : ICollectionRunner
         CancellationToken cancellationToken)
     {
         run.Status = status;
-        run.CompletedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        run.CompletedAtPkt = PakistanTime.Now(_timeProvider);
         run.FailureCategory = failureCategory;
         run.ErrorMessage = Truncate(errorMessage, 1000);
         run.ErrorDetail = errorDetail;
@@ -354,7 +355,7 @@ public sealed class CollectionRunner : ICollectionRunner
         _db.RawPayloads.Add(new RawPayload
         {
             CollectionRunId = run.CollectionRunId,
-            FetchedAtUtc = _timeProvider.GetUtcNow().UtcDateTime,
+            FetchedAtPkt = PakistanTime.Now(_timeProvider),
             ContentType = Truncate(contentType, 100),
             ContentHash = contentHash,
             SizeBytes = bytes.Length,
@@ -364,14 +365,14 @@ public sealed class CollectionRunner : ICollectionRunner
 
     private void AddRejection(
         CollectionRun run, string? seriesCode, string? referenceDateText,
-        RejectionReason reason, string detail, string? fragment, DateTime rejectedAtUtc)
+        RejectionReason reason, string detail, string? fragment, DateTime rejectedAtPkt)
     {
         _db.RejectedObservations.Add(new RejectedObservation
         {
             CollectionRunId = run.CollectionRunId,
             SeriesCode = Truncate(seriesCode, 100),
             ReferenceDateText = Truncate(referenceDateText, 50),
-            RejectedAtUtc = rejectedAtUtc,
+            RejectedAtPkt = rejectedAtPkt,
             Reason = reason,
             ReasonDetail = Truncate(detail, 1000),
             RawFragment = fragment

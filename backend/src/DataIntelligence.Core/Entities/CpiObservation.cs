@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Entities;
 
@@ -15,7 +15,7 @@ namespace DataIntelligence.Core.Entities;
 /// filtering would count the same numbers three times.
 /// <para>
 /// Two independent dates, both required. <see cref="ReferenceDate"/> is the period the number
-/// describes; <see cref="CollectedAtUtc"/> is when this platform learned it (FR-6). Answering
+/// describes; <see cref="CollectedAtPkt"/> is when this platform learned it (FR-6). Answering
 /// "what did we believe CPI for June was, on 15 July?" needs both.
 /// </para>
 /// </remarks>
@@ -64,10 +64,10 @@ public class CpiObservation
     public short RevisionNumber { get; set; }
 
     public bool IsCurrent { get; set; } = true;
-    public DateTime? SupersededAtUtc { get; set; }
+    public DateTime? SupersededAtPkt { get; set; }
 
     public long CollectionRunId { get; set; }
-    public DateTime CollectedAtUtc { get; set; }
+    public DateTime CollectedAtPkt { get; set; }
 
     /// <summary>
     /// SHA-256 over the value tuple. Equal to the current vintage's hash means BLS reissued the

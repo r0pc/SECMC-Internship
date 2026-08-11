@@ -1,4 +1,4 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Dtos;
@@ -109,5 +109,5 @@ public sealed record SeriesLatestPointDto
     public required decimal Value { get; init; }
 
     /// <summary>When the platform learned this value (FR-6), not when it was published.</summary>
-    public required DateTime CollectedAtUtc { get; init; }
+    public required DateTime CollectedAtPkt { get; init; }
 }

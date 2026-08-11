@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Entities;
 
@@ -16,12 +16,12 @@ public class CollectionRun
     /// The scheduled cycle this run satisfies. With <see cref="Attempt"/> this is the run's
     /// idempotency key, scoped per source so the two publishers can share a cycle time.
     /// </summary>
-    public DateTime ScheduledForUtc { get; set; }
+    public DateTime ScheduledForPkt { get; set; }
 
     public byte Attempt { get; set; } = 1;
     public CollectionTriggerType TriggerType { get; set; } = CollectionTriggerType.Scheduled;
-    public DateTime StartedAtUtc { get; set; }
-    public DateTime? CompletedAtUtc { get; set; }
+    public DateTime StartedAtPkt { get; set; }
+    public DateTime? CompletedAtPkt { get; set; }
 
     /// <summary>Computed by SQL Server from the two timestamps; never set in code.</summary>
     public long? DurationMs { get; private set; }
@@ -42,7 +42,7 @@ public class CollectionRun
     public CollectionFailureCategory? FailureCategory { get; set; }
     public string? ErrorMessage { get; set; }
     public string? ErrorDetail { get; set; }
-    public DateTime? AlertSentAtUtc { get; set; }
+    public DateTime? AlertSentAtPkt { get; set; }
 
     public DataSource? DataSource { get; set; }
     public ICollection<RawPayload> RawPayloads { get; set; } = [];

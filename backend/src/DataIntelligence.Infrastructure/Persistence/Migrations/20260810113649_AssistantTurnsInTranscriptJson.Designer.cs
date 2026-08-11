@@ -4,6 +4,7 @@ using DataIntelligence.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DataIntelligence.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(DataIntelligenceDbContext))]
-    partial class DataIntelligenceDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260810113649_AssistantTurnsInTranscriptJson")]
+    partial class AssistantTurnsInTranscriptJson
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -36,15 +39,131 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.Property<bool>("IsHelpful")
                         .HasColumnType("bit");
 
-                    b.Property<DateTime>("SubmittedAtPkt")
+                    b.Property<DateTime>("SubmittedAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
                     b.HasKey("AssistantQueryId");
 
                     b.ToTable("AssistantFeedback", "ai");
+                });
+
+            modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantQuery", b =>
+                {
+                    b.Property<long>("AssistantQueryId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("AssistantQueryId"));
+
+                    b.Property<string>("AnswerText")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("AskedAtUtc")
+                        .ValueGeneratedOnAdd()
+                        .HasPrecision(3)
+                        .HasColumnType("datetime2(3)")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<byte[]>("ClientIpHash")
+                        .HasColumnType("binary(32)");
+
+                    b.Property<int?>("CompletionTokens")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ExecutionError")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<int?>("ExecutionMs")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ExecutionStatus")
+                        .HasMaxLength(20)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(20)");
+
+                    b.Property<string>("Explanation")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("GeneratedSql")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ModelName")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int?>("PromptTokens")
+                        .HasColumnType("int");
+
+                    b.Property<string>("QuestionText")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<int?>("ResultRowCount")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SqlParametersJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("TotalLatencyMs")
+                        .HasColumnType("int");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ValidationDetail")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<string>("ValidationOutcome")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(30)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("VisualizationJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("WasExecuted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
+                    b.HasKey("AssistantQueryId");
+
+                    b.HasIndex(new[] { "AskedAtUtc" }, "IX_AssistantQuery_AskedAtUtc")
+                        .IsDescending();
+
+                    b.HasIndex(new[] { "AskedAtUtc" }, "IX_AssistantQuery_Rejected")
+                        .IsDescending()
+                        .HasFilter("[ValidationOutcome] <> 'Approved' AND [ValidationOutcome] <> 'Pending' AND [ValidationOutcome] <> 'NotADataQuestion'");
+
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex(new[] { "AskedAtUtc" }, "IX_AssistantQuery_Rejected"), new[] { "QuestionText", "ValidationOutcome", "ValidationDetail" });
+
+                    b.HasIndex(new[] { "SessionId", "AskedAtUtc" }, "IX_AssistantQuery_Session")
+                        .IsDescending(false, true);
+
+                    b.HasIndex(new[] { "UserId", "AskedAtUtc" }, "IX_AssistantQuery_User")
+                        .IsDescending(false, true);
+
+                    b.ToTable("AssistantQuery", "ai", t =>
+                        {
+                            t.HasCheckConstraint("CK_AssistantQuery_Execution", "[ExecutionStatus] IS NULL OR [ExecutionStatus] IN ('Succeeded','Failed','Timeout','Cancelled')");
+
+                            t.HasCheckConstraint("CK_AssistantQuery_NoUnvalidatedRun", "[WasExecuted] = 0 OR [ValidationOutcome] = 'Approved'");
+
+                            t.HasCheckConstraint("CK_AssistantQuery_Validation", "[ValidationOutcome] IN ('Pending','Approved','RejectedNotSelect','RejectedForbiddenObject','RejectedSyntax','RejectedComplexity','RejectedNoSql','NotADataQuestion','RejectedUnreadableResponse')");
+                        });
                 });
 
             modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantSession", b =>
@@ -52,20 +171,17 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("SessionId")
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<DateTime>("LastActivityAtPkt")
+                    b.Property<DateTime>("LastActivityAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
-                    b.Property<DateTime>("StartedAtPkt")
+                    b.Property<DateTime>("StartedAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
-
-                    b.Property<int?>("TotalTokens")
-                        .HasColumnType("int");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
                     b.Property<string>("TranscriptJson")
                         .HasColumnType("nvarchar(max)");
@@ -75,7 +191,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                     b.HasKey("SessionId");
 
-                    b.HasIndex("UserId", "StartedAtPkt")
+                    b.HasIndex("UserId", "StartedAtUtc")
                         .IsDescending(false, true)
                         .HasDatabaseName("IX_AssistantSession_User");
 
@@ -85,45 +201,12 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         });
                 });
 
-            modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantSessionSummary", b =>
-                {
-                    b.Property<DateTime>("LastActivityAtPkt")
-                        .HasPrecision(3)
-                        .HasColumnType("datetime2(3)");
-
-                    b.Property<Guid>("SessionId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("StartedAtPkt")
-                        .HasPrecision(3)
-                        .HasColumnType("datetime2(3)");
-
-                    b.Property<string>("Title")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<int?>("TotalTokens")
-                        .HasColumnType("int");
-
-                    b.Property<int>("TurnCount")
-                        .HasColumnType("int");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("int");
-
-                    b.ToTable("AssistantSessionSummaries", "ai", t =>
-                        {
-                            t.ExcludeFromMigrations();
-                        });
-
-                    b.ToSqlQuery("SELECT  s.SessionId,\n        s.UserId,\n        s.StartedAtPkt,\n        s.LastActivityAtPkt,\n        ISNULL(TRY_CAST(JSON_VALUE(s.TranscriptJson, '$.turnCount') AS INT), 0) AS TurnCount,\n        JSON_VALUE(s.TranscriptJson, '$.turns[0].question') AS Title,\n\n        -- The column, not a SUM over the turns. Deriving it here would shred every one\n        -- of a user's transcripts to add up one integer per conversation, which is the\n        -- cost this list exists to avoid. AssistantService keeps the column current.\n        s.TotalTokens\nFROM    ai.AssistantSession AS s\nWHERE   s.TranscriptJson IS NOT NULL");
-                });
-
             modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantTurn", b =>
                 {
                     b.Property<string>("AnswerText")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<DateTime>("AskedAtPkt")
+                    b.Property<DateTime>("AskedAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -191,7 +274,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                             t.ExcludeFromMigrations();
                         });
 
-                    b.ToSqlQuery("SELECT  t.AssistantQueryId,\n        s.SessionId,\n        s.UserId,\n        -- Documents written before the clock moved to PKT carry askedAtUtc and a UTC\n        -- reading. Shifted rather than merely coalesced: taking the old value as-is\n        -- would file those turns five hours early and sort them among the wrong ones,\n        -- which is a subtler failure than the NULL it would otherwise be.\n        ISNULL(t.AskedAtPkt, DATEADD(hour, 5, t.AskedAtLegacyUtc)) AS AskedAtPkt,\n        t.QuestionText,\n        t.AnswerText,\n        t.ValidationOutcome,\n        t.ValidationDetail,\n        t.GeneratedSql,\n        t.SqlParametersJson,\n        t.Explanation,\n\n        -- Backfilled, not read straight through. A JSON store has no migration step:\n        -- documents written before a field existed simply lack it, OPENJSON returns\n        -- NULL, and a NULL into a non-nullable bool throws rather than degrading. Turns\n        -- written before wasExecuted was recorded still carry an execution status, and\n        -- having one is exactly what being executed means — so the older shape can be\n        -- answered accurately instead of merely defaulted.\n        --\n        -- Every reader of this column has to keep tolerating shapes it did not write.\n        -- That is the standing cost of the store being a document.\n        ISNULL(t.WasExecuted,\n               CASE WHEN t.ExecutionStatus IS NOT NULL THEN 1 ELSE 0 END) AS WasExecuted,\n        t.ExecutionStatus,\n        t.ExecutionError,\n        t.ExecutionMs,\n        t.ResultRowCount,\n        t.ModelName,\n        t.PromptTokens,\n        t.CompletionTokens,\n        t.TotalTokens,\n        t.TotalLatencyMs\nFROM    ai.AssistantSession AS s\nCROSS APPLY OPENJSON(s.TranscriptJson, '$.turns')\nWITH (\n        AssistantQueryId    BIGINT          '$.assistantQueryId',\n        AskedAtPkt          DATETIME2(3)    '$.askedAtPkt',\n        AskedAtLegacyUtc    DATETIME2(3)    '$.askedAtUtc',\n        QuestionText        NVARCHAR(2000)  '$.question',\n        AnswerText          NVARCHAR(MAX)   '$.answer',\n        ValidationOutcome   VARCHAR(30)     '$.outcome',\n        ValidationDetail    NVARCHAR(1000)  '$.validationDetail',\n        GeneratedSql        NVARCHAR(MAX)   '$.sql',\n        SqlParametersJson   NVARCHAR(MAX)   '$.parameters' AS JSON,\n        Explanation         NVARCHAR(2000)  '$.explanation',\n        WasExecuted         BIT             '$.wasExecuted',\n        ExecutionStatus     VARCHAR(20)     '$.executionStatus',\n        ExecutionError      NVARCHAR(1000)  '$.executionError',\n        ExecutionMs         INT             '$.executionMs',\n        ResultRowCount      INT             '$.resultRowCount',\n        ModelName           NVARCHAR(100)   '$.modelName',\n        PromptTokens        INT             '$.promptTokens',\n        CompletionTokens    INT             '$.completionTokens',\n        TotalTokens         INT             '$.totalTokens',\n        TotalLatencyMs      INT             '$.totalLatencyMs'\n) AS t");
+                    b.ToSqlQuery("SELECT  t.AssistantQueryId,\n        s.SessionId,\n        s.UserId,\n        t.AskedAtUtc,\n        t.QuestionText,\n        t.AnswerText,\n        t.ValidationOutcome,\n        t.ValidationDetail,\n        t.GeneratedSql,\n        t.SqlParametersJson,\n        t.Explanation,\n        t.WasExecuted,\n        t.ExecutionStatus,\n        t.ExecutionError,\n        t.ExecutionMs,\n        t.ResultRowCount,\n        t.ModelName,\n        t.PromptTokens,\n        t.CompletionTokens,\n        t.TotalTokens,\n        t.TotalLatencyMs\nFROM    ai.AssistantSession AS s\nCROSS APPLY OPENJSON(s.TranscriptJson, '$.turns')\nWITH (\n        AssistantQueryId    BIGINT          '$.assistantQueryId',\n        AskedAtUtc          DATETIME2(3)    '$.askedAtPkt',\n        QuestionText        NVARCHAR(2000)  '$.question',\n        AnswerText          NVARCHAR(MAX)   '$.answer',\n        ValidationOutcome   VARCHAR(30)     '$.outcome',\n        ValidationDetail    NVARCHAR(1000)  '$.validationDetail',\n        GeneratedSql        NVARCHAR(MAX)   '$.sql',\n        SqlParametersJson   NVARCHAR(MAX)   '$.parameters' AS JSON,\n        Explanation         NVARCHAR(2000)  '$.explanation',\n        WasExecuted         BIT             '$.wasExecuted',\n        ExecutionStatus     VARCHAR(20)     '$.executionStatus',\n        ExecutionError      NVARCHAR(1000)  '$.executionError',\n        ExecutionMs         INT             '$.executionMs',\n        ResultRowCount      INT             '$.resultRowCount',\n        ModelName           NVARCHAR(100)   '$.modelName',\n        PromptTokens        INT             '$.promptTokens',\n        CompletionTokens    INT             '$.completionTokens',\n        TotalTokens         INT             '$.totalTokens',\n        TotalLatencyMs      INT             '$.totalLatencyMs'\n) AS t");
                 });
 
             modelBuilder.Entity("DataIntelligence.Core.Entities.CollectionRun", b =>
@@ -202,7 +285,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("CollectionRunId"));
 
-                    b.Property<DateTime?>("AlertSentAtPkt")
+                    b.Property<DateTime?>("AlertSentAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -211,7 +294,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasColumnType("tinyint")
                         .HasDefaultValue((byte)1);
 
-                    b.Property<DateTime?>("CompletedAtPkt")
+                    b.Property<DateTime?>("CompletedAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -221,7 +304,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.Property<long?>("DurationMs")
                         .ValueGeneratedOnAddOrUpdate()
                         .HasColumnType("bigint")
-                        .HasComputedColumnSql("DATEDIFF_BIG(MILLISECOND, [StartedAtPkt], [CompletedAtPkt])");
+                        .HasComputedColumnSql("DATEDIFF_BIG(MILLISECOND, [StartedAtUtc], [CompletedAtUtc])");
 
                     b.Property<string>("ErrorDetail")
                         .HasColumnType("nvarchar(max)");
@@ -268,15 +351,15 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
-                    b.Property<DateTime>("ScheduledForPkt")
+                    b.Property<DateTime>("ScheduledForUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(0)");
 
-                    b.Property<DateTime>("StartedAtPkt")
+                    b.Property<DateTime>("StartedAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -296,24 +379,24 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                     b.HasKey("CollectionRunId");
 
-                    b.HasIndex("DataSourceId", "ScheduledForPkt", "Attempt")
+                    b.HasIndex("DataSourceId", "ScheduledForUtc", "Attempt")
                         .IsUnique()
                         .HasDatabaseName("UQ_CollectionRun_Cycle");
 
-                    b.HasIndex(new[] { "StartedAtPkt" }, "IX_CollectionRun_Failures")
+                    b.HasIndex(new[] { "StartedAtUtc" }, "IX_CollectionRun_Failures")
                         .IsDescending()
                         .HasFilter("[Status] IN ('Failed','PartialSuccess')");
 
-                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex(new[] { "StartedAtPkt" }, "IX_CollectionRun_Failures"), new[] { "DataSourceId", "FailureCategory", "ErrorMessage", "AlertSentAtPkt" });
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex(new[] { "StartedAtUtc" }, "IX_CollectionRun_Failures"), new[] { "DataSourceId", "FailureCategory", "ErrorMessage", "AlertSentAtUtc" });
 
-                    b.HasIndex(new[] { "StartedAtPkt" }, "IX_CollectionRun_StartedAtPkt")
+                    b.HasIndex(new[] { "StartedAtUtc" }, "IX_CollectionRun_StartedAtUtc")
                         .IsDescending();
 
-                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex(new[] { "StartedAtPkt" }, "IX_CollectionRun_StartedAtPkt"), new[] { "DataSourceId", "Status", "ObservationsInserted" });
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex(new[] { "StartedAtUtc" }, "IX_CollectionRun_StartedAtUtc"), new[] { "DataSourceId", "Status", "ObservationsInserted" });
 
                     b.ToTable("CollectionRun", "collect", t =>
                         {
-                            t.HasCheckConstraint("CK_CollectionRun_Completed", "[CompletedAtPkt] IS NULL OR [CompletedAtPkt] >= [StartedAtPkt]");
+                            t.HasCheckConstraint("CK_CollectionRun_Completed", "[CompletedAtUtc] IS NULL OR [CompletedAtUtc] >= [StartedAtUtc]");
 
                             t.HasCheckConstraint("CK_CollectionRun_Failure", "[FailureCategory] IS NULL OR [FailureCategory] IN ('Unreachable','Timeout','HttpError','RateLimited','ParseError','SchemaChanged','Validation','Persistence','Unknown')");
 
@@ -333,7 +416,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("CpiObservationId"));
 
-                    b.Property<DateTime>("CollectedAtPkt")
+                    b.Property<DateTime>("CollectedAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -388,7 +471,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasColumnType("varchar(20)")
                         .HasDefaultValue("CUUR0000SA0");
 
-                    b.Property<DateTime?>("SupersededAtPkt")
+                    b.Property<DateTime?>("SupersededAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -432,7 +515,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_Cpi_SeriesCode", "[SeriesCode] = 'CUUR0000SA0'");
 
-                            t.HasCheckConstraint("CK_Cpi_Superseded", "([IsCurrent] = 1 AND [SupersededAtPkt] IS NULL) OR ([IsCurrent] = 0 AND [SupersededAtPkt] IS NOT NULL)");
+                            t.HasCheckConstraint("CK_Cpi_Superseded", "([IsCurrent] = 1 AND [SupersededAtUtc] IS NULL) OR ([IsCurrent] = 0 AND [SupersededAtUtc] IS NOT NULL)");
                         });
                 });
 
@@ -465,11 +548,11 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasColumnType("smallint")
                         .HasDefaultValue((short)60);
 
-                    b.Property<DateTime>("CreatedAtPkt")
+                    b.Property<DateTime>("CreatedAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
                     b.Property<string>("HttpMethod")
                         .IsRequired()
@@ -520,7 +603,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasColumnType("bit")
                         .HasDefaultValue(false);
 
-                    b.Property<DateTime?>("RobotsTxtCheckedAtPkt")
+                    b.Property<DateTime?>("RobotsTxtCheckedAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -528,7 +611,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
-                    b.Property<DateTime?>("UpdatedAtPkt")
+                    b.Property<DateTime?>("UpdatedAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -563,7 +646,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                             ApiEndpoint = "https://api.bls.gov/publicAPI/v2/timeseries/data/",
                             Code = "BLS_CPI",
                             CollectionIntervalMinutes = (short)60,
-                            CreatedAtPkt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
+                            CreatedAtUtc = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
                             HttpMethod = "POST",
                             IsEnabled = true,
                             LandingPageUrl = "https://www.bls.gov/data/home.htm",
@@ -582,7 +665,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                             ApiEndpoint = "https://markets.newyorkfed.org/api/rates/secured/sofr/search.json",
                             Code = "NYFED_SOFR",
                             CollectionIntervalMinutes = (short)60,
-                            CreatedAtPkt = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
+                            CreatedAtUtc = new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc),
                             HttpMethod = "GET",
                             IsEnabled = true,
                             LandingPageUrl = "https://www.newyorkfed.org/markets/reference-rates/sofr",
@@ -619,11 +702,11 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
-                    b.Property<DateTime>("FetchedAtPkt")
+                    b.Property<DateTime>("FetchedAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
                     b.Property<int>("SizeBytes")
                         .HasColumnType("int");
@@ -633,7 +716,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.HasIndex("CollectionRunId")
                         .HasDatabaseName("IX_RawPayload_Run");
 
-                    b.HasIndex("ContentHash", "FetchedAtPkt")
+                    b.HasIndex("ContentHash", "FetchedAtUtc")
                         .IsDescending(false, true)
                         .HasDatabaseName("IX_RawPayload_Hash");
 
@@ -671,11 +754,11 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
-                    b.Property<DateTime>("RejectedAtPkt")
+                    b.Property<DateTime>("RejectedAtUtc")
                         .ValueGeneratedOnAdd()
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)")
-                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
 
                     b.Property<string>("SeriesCode")
                         .HasMaxLength(100)
@@ -683,7 +766,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                     b.HasKey("RejectedObservationId");
 
-                    b.HasIndex("CollectionRunId", "RejectedAtPkt")
+                    b.HasIndex("CollectionRunId", "RejectedAtUtc")
                         .IsDescending(false, true)
                         .HasDatabaseName("IX_RejectedObservation_Run");
 
@@ -710,7 +793,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.Property<decimal?>("Average90DayPercent")
                         .HasColumnType("decimal(9,5)");
 
-                    b.Property<DateTime>("CollectedAtPkt")
+                    b.Property<DateTime>("CollectedAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -769,7 +852,7 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.Property<decimal?>("SofrIndexValue")
                         .HasColumnType("decimal(20,8)");
 
-                    b.Property<DateTime?>("SupersededAtPkt")
+                    b.Property<DateTime?>("SupersededAtUtc")
                         .HasPrecision(3)
                         .HasColumnType("datetime2(3)");
 
@@ -807,10 +890,21 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_Sofr_RevisionIndicator", "[RevisionIndicator] IS NULL OR [RevisionIndicator] IN ('Y','N')");
 
-                            t.HasCheckConstraint("CK_Sofr_Superseded", "([IsCurrent] = 1 AND [SupersededAtPkt] IS NULL) OR ([IsCurrent] = 0 AND [SupersededAtPkt] IS NOT NULL)");
+                            t.HasCheckConstraint("CK_Sofr_Superseded", "([IsCurrent] = 1 AND [SupersededAtUtc] IS NULL) OR ([IsCurrent] = 0 AND [SupersededAtUtc] IS NOT NULL)");
 
                             t.HasCheckConstraint("CK_Sofr_Volume", "[VolumeUsdBillions] IS NULL OR [VolumeUsdBillions] >= 0");
                         });
+                });
+
+            modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantQuery", b =>
+                {
+                    b.HasOne("DataIntelligence.Core.Entities.AssistantSession", "Session")
+                        .WithMany("Queries")
+                        .HasForeignKey("SessionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Session");
                 });
 
             modelBuilder.Entity("DataIntelligence.Core.Entities.CollectionRun", b =>
@@ -866,6 +960,11 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Run");
+                });
+
+            modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantSession", b =>
+                {
+                    b.Navigation("Queries");
                 });
 
             modelBuilder.Entity("DataIntelligence.Core.Entities.CollectionRun", b =>

@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 using DataIntelligence.Core.Exceptions;
@@ -23,6 +23,9 @@ public class DeepSeekNlToSqlClientTests
 
     private static readonly IReadOnlyDictionary<string, object?> NoParameters =
         new Dictionary<string, object?>();
+
+    /// <summary>No coverage line, for tests that are not about explaining an empty result.</summary>
+    private const string NoCoverage = "";
 
     // ------------------------------------------------------------ response parsing
 
@@ -174,6 +177,12 @@ public class DeepSeekNlToSqlClientTests
     [Theory]
     [InlineData("not_a_data_question", NlRefusalKind.NotADataQuestion)]
     [InlineData("unanswerable", NlRefusalKind.Unanswerable)]
+    // "What is SOFR?" is neither chatter nor unanswerable, and answering it with a greeting reads
+    // as the assistant having misheard. The model only classifies — the text is fixed on the
+    // service side, so this path still cannot produce a figure.
+    [InlineData("about_cpi", NlRefusalKind.AboutCpi)]
+    [InlineData("about_sofr", NlRefusalKind.AboutSofr)]
+    [InlineData("about_platform", NlRefusalKind.AboutPlatform)]
     public async Task ClassifiesWhyItRefused(string refusal, NlRefusalKind expected)
     {
         var client = ClientReturning(Completion($$"""{"sql": null, "refusal": "{{refusal}}"}"""));
@@ -396,7 +405,7 @@ public class DeepSeekNlToSqlClientTests
         var handler = new CapturingHandler(Completion("CPI stood at 320.3 in June."));
         var client = ClientOver(handler);
 
-        await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", default);
+        await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", NoCoverage, default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
 
@@ -412,7 +421,7 @@ public class DeepSeekNlToSqlClientTests
 
         await client.SummariseResultsAsync(
             "What was CPI in June?", "SELECT IndexValue FROM analytics.vw_Cpi", NoParameters,
-            "[{\"IndexValue\":320.3}]", default);
+            "[{\"IndexValue\":320.3}]", NoCoverage, default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
         var user = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
@@ -420,6 +429,31 @@ public class DeepSeekNlToSqlClientTests
         Assert.Contains("What was CPI in June?", user);
         Assert.Contains("SELECT IndexValue FROM analytics.vw_Cpi", user);
         Assert.Contains("320.3", user);
+    }
+
+    [Fact]
+    public async Task SendsTheCoverageWindowToTheSummariser()
+    {
+        // Without it an empty result is a dead end: "no rows" and "that period is before the
+        // series begins" are the same JSON, and only the coverage tells them apart.
+        var handler = new CapturingHandler(Completion("SOFR begins in April 2018."));
+        var client = ClientOver(handler);
+
+        await client.SummariseResultsAsync(
+            "give sofr of may 2001",
+            "SELECT RatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from",
+            new Dictionary<string, object?> { ["@from"] = "2001-05-01" },
+            "[]",
+            """
+            What this platform holds:
+            - SOFR (analytics.vw_Sofr, EffectiveDate): 2018-04-02 to 2026-08-10
+            """,
+            default);
+
+        using var doc = JsonDocument.Parse(handler.LastRequestBody!);
+        var user = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+
+        Assert.Contains("2018-04-02", user);
     }
 
     [Fact]
@@ -437,6 +471,7 @@ public class DeepSeekNlToSqlClientTests
             "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
             new Dictionary<string, object?> { ["@year"] = 2021L },
             "[{\"AnnualValue\":270.97}]",
+            NoCoverage,
             default);
 
         using var doc = JsonDocument.Parse(handler.LastRequestBody!);
@@ -451,7 +486,7 @@ public class DeepSeekNlToSqlClientTests
     {
         var client = ClientReturning(Completion("  CPI stood at 320.3 in June.\n"));
 
-        var result = await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", default);
+        var result = await client.SummariseResultsAsync("q", "SELECT 1", NoParameters, "[]", NoCoverage, default);
 
         Assert.Equal("CPI stood at 320.3 in June.", result.AnswerText);
     }

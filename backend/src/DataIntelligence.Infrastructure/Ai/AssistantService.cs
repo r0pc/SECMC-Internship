@@ -1,4 +1,5 @@
 ﻿// backend/src/DataIntelligence.Infrastructure/Ai/AssistantService.cs
+using DataIntelligence.Core;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -40,6 +41,30 @@ public sealed class AssistantService : IAssistantService
         + "rate in 2025?\", or \"Which sources failed to collect this week?\"";
 
     /// <summary>
+    /// What the assistant says to a greeting or a pleasantry.
+    /// </summary>
+    /// <remarks>
+    /// Split from <see cref="CannotAnswer"/> because they answer different things. "Hi, how are
+    /// you" is not a failed data question, and replying to it with "I couldn't turn that into a
+    /// query" is both cold and untrue — it reads as a malfunction to someone who was being
+    /// friendly.
+    /// <para>
+    /// Still fixed text, and still no second call to the model, for the reason the whole design
+    /// rests on: a model invited to be conversational with no result set in front of it will
+    /// answer "so how much has CPI risen?" from memory, and a figure recalled from training data is
+    /// indistinguishable in the UI from one this platform collected. Warmth is free; improvising is
+    /// not. This is the only reply on the whole path that is not derived from data, which is
+    /// exactly why it must never contain any.
+    /// </para>
+    /// </remarks>
+    internal const string Greeting =
+        "Hello — I'm well, thank you for asking. I'm the assistant for this platform's collected "
+        + "data: US consumer price index (CPI) figures, SOFR daily rates, and the collection log. "
+        + "Ask me something like \"What was CPI in June 2025?\", \"What is the average SOFR rate "
+        + "in 2025?\", \"How did CPI and SOFR move together in 2025?\", or \"Which sources failed "
+        + "to collect this week?\"";
+
+    /// <summary>
     /// What the assistant says when the model's reply could not be read at all.
     /// </summary>
     /// <remarks>
@@ -53,6 +78,50 @@ public sealed class AssistantService : IAssistantService
         "Something went wrong turning that into a query — the answer came back in a form I "
         + "couldn't read. This is a fault on our side, not a problem with your question. Please "
         + "try asking it again.";
+
+    /// <summary>
+    /// What CPI, SOFR and this platform are — the answers to "what is X", as opposed to "what was
+    /// X".
+    /// </summary>
+    /// <remarks>
+    /// Fixed text on this side, for the same reason as <see cref="Greeting"/> and no other: this is
+    /// a reply produced without running a query, and the one rule the design cannot bend is that
+    /// such a reply contains no figures. Every number here would be a number nobody collected.
+    /// <para>
+    /// What each says is drawn from what the platform actually holds — the series it collects, the
+    /// publisher, the cadence — so the description and the data cannot disagree. Anything a
+    /// definition would want that changes over time ("the latest rate is…") is deliberately absent;
+    /// that is a question, and it has a query behind it.
+    /// </para>
+    /// </remarks>
+    internal const string AboutCpi =
+        "The Consumer Price Index measures the average change over time in the prices paid by "
+        + "urban consumers for a basket of goods and services. This platform collects one series "
+        + "from the US Bureau of Labor Statistics — CUUR0000SA0, \"All items in U.S. city average, "
+        + "all urban consumers, not seasonally adjusted\" — published monthly, with the annual and "
+        + "semiannual averages BLS publishes alongside it. The index is not a price in dollars: it "
+        + "is a level against a 1982-84 base of 100, so what it is usually read for is the change "
+        + "between two periods. Ask \"What was CPI in June 2025?\" for a level, or \"What was the "
+        + "year over year inflation rate for the last 3 months?\" for the change.";
+
+    internal const string AboutSofr =
+        "The Secured Overnight Financing Rate is a broad measure of what it costs to borrow cash "
+        + "overnight against US Treasury securities. It is published each business day by the "
+        + "Federal Reserve Bank of New York, based on that day's actual transactions, and is the "
+        + "reference rate US markets moved to after LIBOR. This platform collects the SOFR rate "
+        + "itself along with its volume and percentile spread — one row per business day, so there "
+        + "are no weekend or holiday figures. Ask \"What is the average SOFR rate in 2025?\", or "
+        + "\"Between which months did SOFR change the most in 2025?\"";
+
+    internal const string AboutPlatform =
+        "This platform collects two published US economic series on a schedule and stores every "
+        + "version it has ever seen, so a figure that is later revised does not overwrite the one "
+        + "reported at the time. It holds US consumer price index (CPI) figures from the Bureau of "
+        + "Labor Statistics, SOFR daily rates from the Federal Reserve Bank of New York, and a log "
+        + "of every collection attempt including the ones that failed. I answer by turning your "
+        + "question into a read-only SQL query against that data and showing you the query with "
+        + "the answer — so everything I tell you is something this platform actually collected, "
+        + "and if a question falls outside it I will say so rather than guess.";
 
     private readonly DataIntelligenceDbContext _db;
     private readonly INlToSqlClient _llm;
@@ -83,46 +152,49 @@ public sealed class AssistantService : IAssistantService
     public async Task<AssistantAnswerDto> AskAsync(
         int userId, AskQuestionRequest request, string? clientIp, CancellationToken cancellationToken)
     {
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var now = PakistanTime.Now(_timeProvider);
         var session = await GetOrCreateSessionAsync(userId, request.SessionId, now, cancellationToken);
 
         // Stamped here rather than on the success path at the end, so a session stays current even
         // when every question in it is refused. It reads as "last used", and a conversation the
         // user is actively having — badly — is still one they are having.
-        session.LastActivityAtUtc = now;
+        session.LastActivityAtPkt = now;
 
-        var log = new AssistantQuery
+        // The document is the store, so the turns are read out of it, added to, and written back
+        // whole. Two questions answered against one session at the same moment would both load
+        // this list and the later save would win, dropping the other turn — see the class remarks.
+        var turns = ChatTranscriptWriter.ReadTurns(session.TranscriptJson);
+
+        var draft = new TurnDraft
         {
+            AssistantQueryId = await NextTurnIdAsync(cancellationToken),
             SessionId = session.SessionId,
-            UserId = userId,
-            AskedAtUtc = now,
-            QuestionText = request.Question,
-            ValidationOutcome = AssistantValidationOutcome.Pending,
+            AskedAtPkt = now,
+            Question = request.Question,
+            Outcome = AssistantValidationOutcome.Pending,
             ClientIpHash = HashIp(clientIp)
         };
 
-        _db.AssistantQueries.Add(log);
-        await _db.SaveChangesAsync(cancellationToken); // Logged before anything else can fail (FR-14).
+        // Logged before anything else can fail (FR-14). The turn is written as Pending and then
+        // rewritten as it progresses, which is what the row insert used to do — a question that
+        // crashes the process mid-answer is still on the record as having been asked.
+        turns.Add(draft.ToTurn());
+        await SaveTurnsAsync(session, turns, cancellationToken);
 
         var overallStopwatch = Stopwatch.StartNew();
 
         var schemaContext = await _schemaContext.GetContextAsync(cancellationToken);
-        var history = await LoadHistoryAsync(session.SessionId, log.AssistantQueryId, cancellationToken);
+        var history = BuildHistory(turns, draft.AssistantQueryId);
 
         var generation = await _llm.GenerateSqlAsync(
             request.Question, schemaContext, history, cancellationToken);
 
-        log.ModelName = generation.ModelName;
-        log.PromptTokens = generation.PromptTokens;
-        log.CompletionTokens = generation.CompletionTokens;
-        log.GeneratedSql = generation.Sql;
-        log.Explanation = generation.Explanation;
-
-        // Serialised even when empty, so a reviewer can tell "this query took no parameters" from
-        // "this row predates parameter capture".
-        log.SqlParametersJson = generation.Sql is null
-            ? null
-            : JsonSerializer.Serialize(generation.Parameters);
+        draft.ModelName = generation.ModelName;
+        draft.PromptTokens = generation.PromptTokens;
+        draft.CompletionTokens = generation.CompletionTokens;
+        draft.Sql = generation.Sql;
+        draft.Explanation = generation.Explanation;
+        draft.Parameters = generation.Sql is null ? null : generation.Parameters;
 
         if (generation.Sql is null)
         {
@@ -131,7 +203,25 @@ public sealed class AssistantService : IAssistantService
                 NlRefusalKind.NotADataQuestion => (
                     AssistantValidationOutcome.NotADataQuestion,
                     "Not a question about data.",
-                    CannotAnswer),
+                    Greeting),
+
+                // Recorded as NotADataQuestion because that is what it is in SQL terms — no query
+                // was needed — and because the review queue exists to surface refusals worth
+                // reading. "What is SOFR?" answered correctly is not one of them.
+                NlRefusalKind.AboutCpi => (
+                    AssistantValidationOutcome.NotADataQuestion,
+                    "Asked what CPI is, rather than what it was.",
+                    AboutCpi),
+
+                NlRefusalKind.AboutSofr => (
+                    AssistantValidationOutcome.NotADataQuestion,
+                    "Asked what SOFR is, rather than what it was.",
+                    AboutSofr),
+
+                NlRefusalKind.AboutPlatform => (
+                    AssistantValidationOutcome.NotADataQuestion,
+                    "Asked what this platform holds.",
+                    AboutPlatform),
 
                 NlRefusalKind.Unreadable => (
                     AssistantValidationOutcome.RejectedUnreadableResponse,
@@ -144,71 +234,89 @@ public sealed class AssistantService : IAssistantService
                     CannotAnswer)
             };
 
-            log.ValidationOutcome = outcome;
-            log.ValidationDetail = detail;
-            log.AnswerText = answer;
-            log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
+            draft.Outcome = outcome;
+            draft.ValidationDetail = detail;
+            draft.Answer = answer;
+            draft.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-            return await FinishAsync(session, log, null, cancellationToken);
+            return await FinishAsync(session, turns, draft, null, cancellationToken);
         }
 
         var validation = _validator.Validate(generation.Sql, generation.Parameters);
-        log.ValidationOutcome = validation.Outcome;
-        log.ValidationDetail = validation.Detail;
+        draft.Outcome = validation.Outcome;
+        draft.ValidationDetail = validation.Detail;
 
         if (!validation.IsApproved)
         {
-            log.AnswerText = "That question would need a query I'm not permitted to run "
+            draft.Answer = "That question would need a query I'm not permitted to run "
                 + $"({validation.Detail}). Try rephrasing it.";
-            log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
+            draft.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-            return await FinishAsync(session, log, null, cancellationToken);
+            return await FinishAsync(session, turns, draft, null, cancellationToken);
         }
 
-        // Nothing runs without CK_AssistantQuery_NoUnvalidatedRun's own agreement, but this is the
-        // point at which the app itself commits to executing — worth its own save (FR-15).
-        log.WasExecuted = true;
-        await _db.SaveChangesAsync(cancellationToken);
+        // Recorded as executed before it executes, so a statement that hangs or kills the process
+        // is not left looking as though it never ran (FR-15).
+        //
+        // This used to be backed by CK_AssistantQuery_NoUnvalidatedRun, which made it impossible
+        // for the database to accept WasExecuted = 1 against anything but an approved outcome.
+        // A CHECK constraint cannot see inside a JSON document, so that backstop is gone and the
+        // ordering below is now the only thing keeping the two in step. What still holds is the
+        // part that actually prevents harm: the validator refuses the statement, and the executor
+        // runs as a principal with SELECT on analytics.* and DENY on sec and ai.
+        draft.WasExecuted = true;
+        await SaveTurnsAsync(session, Replace(turns, draft), cancellationToken);
 
         var executionStopwatch = Stopwatch.StartNew();
         var execution = await _executor.ExecuteAsync(
             validation.NormalizedSql!, generation.Parameters, cancellationToken);
-        log.ExecutionMs = (int)executionStopwatch.ElapsedMilliseconds;
+        draft.ExecutionMs = (int)executionStopwatch.ElapsedMilliseconds;
 
         if (!execution.Succeeded)
         {
-            log.ExecutionStatus = execution.TimedOut
+            draft.ExecutionStatus = execution.TimedOut
                 ? AssistantExecutionStatus.Timeout
                 : AssistantExecutionStatus.Failed;
-            log.ExecutionError = execution.ErrorMessage;
-            log.AnswerText = execution.TimedOut
+            draft.ExecutionError = execution.ErrorMessage;
+            draft.Answer = execution.TimedOut
                 ? "That query took too long to run — try narrowing the date range."
                 : "The query didn't run successfully against the database.";
-            log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
+            draft.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
 
-            return await FinishAsync(session, log, null, cancellationToken);
+            return await FinishAsync(session, turns, draft, null, cancellationToken);
         }
 
-        log.ExecutionStatus = AssistantExecutionStatus.Succeeded;
-        log.ResultRowCount = execution.Rows!.Count;
+        draft.ExecutionStatus = AssistantExecutionStatus.Succeeded;
+        draft.ResultRowCount = execution.Rows!.Count;
 
         var resultsJson = JsonSerializer.Serialize(execution.Rows);
+        var coverage = await _schemaContext.GetCoverageAsync(cancellationToken);
+
         var summary = await _llm.SummariseResultsAsync(
             request.Question, validation.NormalizedSql!, generation.Parameters, resultsJson,
-            cancellationToken);
+            coverage, cancellationToken);
 
-        log.AnswerText = summary.AnswerText;
-        log.CompletionTokens = (log.CompletionTokens ?? 0) + (summary.CompletionTokens ?? 0);
-        log.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
+        draft.Answer = summary.AnswerText;
 
-        return await FinishAsync(session, log, execution.Rows, cancellationToken);
+        // Both model calls of the turn, added together. Left null if generation reported nothing,
+        // so an unknown count is not laundered into a confident one by the summary's arriving.
+        draft.CompletionTokens = draft.CompletionTokens is null && summary.CompletionTokens is null
+            ? null
+            : (draft.CompletionTokens ?? 0) + (summary.CompletionTokens ?? 0);
+
+        draft.TotalLatencyMs = (int)overallStopwatch.ElapsedMilliseconds;
+
+        return await FinishAsync(session, turns, draft, execution.Rows, cancellationToken);
     }
 
     public async Task RecordFeedbackAsync(
         long assistantQueryId, AssistantFeedbackRequest request, CancellationToken cancellationToken)
     {
-        var exists = await _db.AssistantQueries
-            .AnyAsync(q => q.AssistantQueryId == assistantQueryId, cancellationToken);
+        // Checked against the transcripts, since there is no longer a row per turn. This is the
+        // only thing standing between the feedback table and an orphan: the foreign key that used
+        // to guarantee it cannot point into a JSON document.
+        var exists = await _db.AssistantTurns
+            .AnyAsync(t => t.AssistantQueryId == assistantQueryId, cancellationToken);
 
         if (!exists)
         {
@@ -226,7 +334,7 @@ public sealed class AssistantService : IAssistantService
 
         feedback.IsHelpful = request.IsHelpful;
         feedback.Comment = request.Comment;
-        feedback.SubmittedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        feedback.SubmittedAtPkt = PakistanTime.Now(_timeProvider);
 
         await _db.SaveChangesAsync(cancellationToken);
     }
@@ -234,49 +342,49 @@ public sealed class AssistantService : IAssistantService
     public async Task<PagedResult<AssistantQueryLogDto>> GetQueryLogAsync(
         AssistantQueryLogQuery query, CancellationToken cancellationToken)
     {
-        var rows = _db.AssistantQueries.AsNoTracking();
+        var rows = _db.AssistantTurns.AsNoTracking();
 
         if (query.FromUtc is { } from)
         {
-            rows = rows.Where(q => q.AskedAtUtc >= from);
+            rows = rows.Where(t => t.AskedAtPkt >= from);
         }
 
         if (query.ToUtc is { } to)
         {
-            rows = rows.Where(q => q.AskedAtUtc <= to);
+            rows = rows.Where(t => t.AskedAtPkt <= to);
         }
 
         if (query.UserId is { } userId)
         {
-            rows = rows.Where(q => q.UserId == userId);
+            rows = rows.Where(t => t.UserId == userId);
         }
 
         if (query.RejectedOnly)
         {
-            // Matches IX_AssistantQuery_Rejected's filter exactly, so the review queue's default
-            // view is an index seek rather than a scan over every question ever asked.
-            rows = rows.Where(q =>
-                q.ValidationOutcome != AssistantValidationOutcome.Approved
-                && q.ValidationOutcome != AssistantValidationOutcome.Pending
-                && q.ValidationOutcome != AssistantValidationOutcome.NotADataQuestion);
+            // The same predicate as before, but no longer index-backed: IX_AssistantQuery_Rejected
+            // filtered a table, and there is no table left to filter. Every call now shreds every
+            // transcript before this can be applied.
+            rows = rows.Where(t =>
+                t.ValidationOutcome != AssistantValidationOutcome.Approved
+                && t.ValidationOutcome != AssistantValidationOutcome.Pending
+                && t.ValidationOutcome != AssistantValidationOutcome.NotADataQuestion);
         }
 
         if (query.Outcome is { } outcome)
         {
-            rows = rows.Where(q => q.ValidationOutcome == outcome);
+            rows = rows.Where(t => t.ValidationOutcome == outcome);
         }
 
         var totalCount = await rows.CountAsync(cancellationToken);
 
         var page = await rows
-            .OrderByDescending(q => q.AskedAtUtc)
-            .ThenByDescending(q => q.AssistantQueryId)
+            .OrderByDescending(t => t.AskedAtPkt)
+            .ThenByDescending(t => t.AssistantQueryId)
             .Skip(query.Page.Skip)
             .Take(query.Page.PageSize)
-            .Select(q => new { Query = q, q.Feedback })
             .ToListAsync(cancellationToken);
 
-        var items = page.Select(r => ToLogDto(r.Query, r.Feedback)).ToList();
+        var items = await AttachFeedbackAsync(page, cancellationToken);
 
         return PagedResult<AssistantQueryLogDto>.From(items, query.Page, totalCount);
     }
@@ -284,127 +392,301 @@ public sealed class AssistantService : IAssistantService
     public async Task<AssistantQueryLogDto?> GetQueryAsync(
         long assistantQueryId, CancellationToken cancellationToken)
     {
-        var row = await _db.AssistantQueries
+        var turn = await _db.AssistantTurns
             .AsNoTracking()
-            .Where(q => q.AssistantQueryId == assistantQueryId)
-            .Select(q => new { Query = q, q.Feedback })
-            .FirstOrDefaultAsync(cancellationToken);
+            .FirstOrDefaultAsync(t => t.AssistantQueryId == assistantQueryId, cancellationToken);
 
-        return row is null ? null : ToLogDto(row.Query, row.Feedback);
+        if (turn is null)
+        {
+            return null;
+        }
+
+        var withFeedback = await AttachFeedbackAsync([turn], cancellationToken);
+
+        return withFeedback[0];
     }
 
-    private static AssistantQueryLogDto ToLogDto(AssistantQuery q, AssistantFeedback? feedback) => new()
+    public async Task<IReadOnlyList<AssistantSessionSummaryDto>> GetSessionsAsync(
+        int userId, int limit, CancellationToken cancellationToken)
     {
-        AssistantQueryId = q.AssistantQueryId,
-        SessionId = q.SessionId,
-        UserId = q.UserId,
-        AskedAtUtc = q.AskedAtUtc,
-        QuestionText = q.QuestionText,
+        // Ordered by last activity rather than by when the conversation started: the one someone
+        // wants back is almost always the one they were last in, which may be an old thread they
+        // returned to this morning.
+        var sessions = await _db.AssistantSessionSummaries
+            .AsNoTracking()
+            .Where(s => s.UserId == userId && s.TurnCount > 0)
+            .OrderByDescending(s => s.LastActivityAtPkt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        return sessions
+            .Select(s => new AssistantSessionSummaryDto
+            {
+                SessionId = s.SessionId,
+                StartedAtPkt = s.StartedAtPkt,
+                LastActivityAtPkt = s.LastActivityAtPkt,
+                TurnCount = s.TurnCount,
+                Title = s.Title,
+                TotalTokens = s.TotalTokens
+            })
+            .ToList();
+    }
+
+    public async Task<AssistantTranscriptDto?> GetTranscriptAsync(
+        int userId, Guid sessionId, CancellationToken cancellationToken)
+    {
+        // The user id is part of the lookup, not a filter applied afterwards. A session id is a
+        // bare GUID in a URL, and matching on it alone would hand any holder of one somebody
+        // else's conversation.
+        var session = await _db.AssistantSessions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                s => s.SessionId == sessionId && s.UserId == userId, cancellationToken);
+
+        if (session?.TranscriptJson is null)
+        {
+            return null;
+        }
+
+        var transcript = ChatTranscriptWriter.Deserialize(session.TranscriptJson);
+
+        if (transcript is null)
+        {
+            return null;
+        }
+
+        return new AssistantTranscriptDto
+        {
+            SessionId = session.SessionId,
+
+            // Read off the session row, not the document. The header inside a transcript written
+            // before the clock moved to PKT still holds a UTC reading under a legacy key, and the
+            // columns beside it were shifted when the rest of the schema was.
+            StartedAtPkt = session.StartedAtPkt,
+            LastActivityAtPkt = session.LastActivityAtPkt,
+
+            Turns = transcript.Turns.Select(ToTranscriptTurn).ToList()
+        };
+    }
+
+    /// <summary>
+    /// Narrows a stored turn to what the browser may see.
+    /// </summary>
+    /// <remarks>
+    /// Written as an explicit projection rather than by returning the stored record, so that a
+    /// field added to the audit document later does not silently start being served to clients.
+    /// The client IP hash is the one that matters today.
+    /// </remarks>
+    private static AssistantTranscriptTurnDto ToTranscriptTurn(ChatTranscriptTurn t) => new()
+    {
+        AssistantQueryId = t.AssistantQueryId,
+        AskedAtPkt = t.AskedAtPkt,
+        Question = t.Question,
+        Answer = t.Answer,
+        Outcome = t.Outcome,
+
+        // Hidden unless approved, matching what AskAsync returns live. A resumed conversation
+        // should read exactly as it did when it was had.
+        GeneratedSql = t.Outcome == AssistantValidationOutcome.Approved ? t.Sql : null,
+        SqlParameters = t.Outcome == AssistantValidationOutcome.Approved ? t.Parameters : null,
+
+        Explanation = t.Explanation,
+        WasExecuted = t.WasExecuted,
+        ResultRowCount = t.ResultRowCount
+    };
+
+    /// <summary>
+    /// Joins each turn to its feedback, if any.
+    /// </summary>
+    /// <remarks>
+    /// Done as a second query against the ids of one page rather than as a join in the shredding
+    /// query. A join would make the optimiser choose a plan across a table and a CROSS APPLY over
+    /// every transcript in the database, and the shape that loses is the one where it decides to
+    /// shred everything before filtering. Two queries keep the expensive half bounded by the page.
+    /// </remarks>
+    private async Task<List<AssistantQueryLogDto>> AttachFeedbackAsync(
+        IReadOnlyList<AssistantTurn> turns, CancellationToken cancellationToken)
+    {
+        if (turns.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = turns.Select(t => t.AssistantQueryId).ToList();
+
+        var feedback = await _db.AssistantFeedback
+            .AsNoTracking()
+            .Where(f => ids.Contains(f.AssistantQueryId))
+            .ToDictionaryAsync(f => f.AssistantQueryId, cancellationToken);
+
+        return turns
+            .Select(t => ToLogDto(t, feedback.GetValueOrDefault(t.AssistantQueryId)))
+            .ToList();
+    }
+
+    private static AssistantQueryLogDto ToLogDto(AssistantTurn t, AssistantFeedback? feedback) => new()
+    {
+        AssistantQueryId = t.AssistantQueryId,
+        SessionId = t.SessionId,
+        UserId = t.UserId,
+        AskedAtPkt = t.AskedAtPkt,
+        QuestionText = t.QuestionText,
 
         // Shown for rejected rows too, unlike the answer DTO: judging whether a refusal was
         // correct means reading the statement that was refused.
-        GeneratedSql = q.GeneratedSql,
-        SqlParameters = DeserializeParameters(q.SqlParametersJson),
-        Explanation = q.Explanation,
+        GeneratedSql = t.GeneratedSql,
+        SqlParameters = DeserializeParameters(t.SqlParametersJson),
+        Explanation = t.Explanation,
 
-        ValidationOutcome = q.ValidationOutcome,
-        ValidationDetail = q.ValidationDetail,
-        WasExecuted = q.WasExecuted,
-        ExecutionStatus = q.ExecutionStatus,
-        ExecutionError = q.ExecutionError,
-        ResultRowCount = q.ResultRowCount,
-        ExecutionMs = q.ExecutionMs,
-        AnswerText = q.AnswerText,
-        ModelName = q.ModelName,
-        PromptTokens = q.PromptTokens,
-        CompletionTokens = q.CompletionTokens,
-        TotalLatencyMs = q.TotalLatencyMs,
+        ValidationOutcome = t.ValidationOutcome,
+        ValidationDetail = t.ValidationDetail,
+        WasExecuted = t.WasExecuted,
+        ExecutionStatus = t.ExecutionStatus,
+        ExecutionError = t.ExecutionError,
+        ResultRowCount = t.ResultRowCount,
+        ExecutionMs = t.ExecutionMs,
+        AnswerText = t.AnswerText,
+        ModelName = t.ModelName,
+        PromptTokens = t.PromptTokens,
+        CompletionTokens = t.CompletionTokens,
+        TotalTokens = t.TotalTokens,
+        TotalLatencyMs = t.TotalLatencyMs,
         FeedbackIsHelpful = feedback?.IsHelpful,
         FeedbackComment = feedback?.Comment
     };
 
     /// <summary>
-    /// Closes a turn: persists it, refreshes the session's JSON transcript, and shapes the reply.
+    /// Closes a turn: writes the final state of it into the transcript and shapes the reply.
     /// </summary>
     /// <remarks>
     /// Every exit from <see cref="AskAsync"/> comes through here, refusals included. A transcript
     /// updated only on the paths that produced an answer would be missing exactly the turns a
     /// reader is most likely to be looking for, and the user's own question would vanish from the
     /// conversation they just had.
-    /// <para>
-    /// The two saves are ordered, not redundant. The turn's row is made durable first and the
-    /// transcript is derived from what is then committed — so a failure between them costs the
-    /// projection and never the audit record, and the next turn rebuilds the transcript whole and
-    /// repairs it. Reversing the order would let a session advertise a turn the log had not kept.
-    /// </para>
     /// </remarks>
     private async Task<AssistantAnswerDto> FinishAsync(
         AssistantSession session,
-        AssistantQuery log,
+        List<ChatTranscriptTurn> turns,
+        TurnDraft draft,
         IReadOnlyList<IReadOnlyDictionary<string, object?>>? rows,
         CancellationToken cancellationToken)
     {
-        await _db.SaveChangesAsync(cancellationToken);
+        var final = Replace(turns, draft);
+        await SaveTurnsAsync(session, final, cancellationToken);
 
-        var turns = await _db.AssistantQueries
-            .AsNoTracking()
-            .Where(q => q.SessionId == session.SessionId)
-            .OrderBy(q => q.AskedAtUtc)
-            .ThenBy(q => q.AssistantQueryId)
+        return ToDto(draft, rows);
+    }
+
+    /// <summary>Swaps the draft's latest state into the turn list, in place.</summary>
+    /// <remarks>
+    /// Matched by id rather than by position. The turn is appended at the start of the request and
+    /// rewritten several times as it progresses, and position is not a safe handle on it — a
+    /// concurrent turn appended to the same session would shift it.
+    /// </remarks>
+    private static List<ChatTranscriptTurn> Replace(List<ChatTranscriptTurn> turns, TurnDraft draft)
+    {
+        var index = turns.FindIndex(t => t.AssistantQueryId == draft.AssistantQueryId);
+
+        if (index < 0)
+        {
+            turns.Add(draft.ToTurn());
+        }
+        else
+        {
+            turns[index] = draft.ToTurn();
+        }
+
+        return turns;
+    }
+
+    /// <summary>Serialises the conversation onto the session and commits it.</summary>
+    /// <remarks>
+    /// The running token total is recomputed here rather than added to, and that is deliberate: a
+    /// turn is written several times as it progresses — Pending, then again once the model has
+    /// answered — so adding this turn's cost on each save would count the same tokens two or three
+    /// times over. Recomputing from the turns cannot drift, and the turns are already in hand.
+    /// </remarks>
+    private async Task SaveTurnsAsync(
+        AssistantSession session, List<ChatTranscriptTurn> turns, CancellationToken cancellationToken)
+    {
+        session.TranscriptJson = ChatTranscriptWriter.Serialize(session, turns);
+        session.TotalTokens = SumTokens(turns);
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// What the conversation has cost so far, or null if nothing is known about what it cost.
+    /// </summary>
+    /// <remarks>
+    /// Null and zero say different things here — "no turn reported usage" against "the model was
+    /// never called" — and the chat list shows them differently, so the distinction is kept rather
+    /// than collapsed by <c>Sum()</c>, which would report 0 for both.
+    /// <para>
+    /// Turns that report nothing are skipped rather than treated as zero. That makes a partially
+    /// reported conversation a floor rather than an exact figure, which is the honest reading:
+    /// see <see cref="ChatTranscriptTurn.TotalTokens"/> for why a missing count is not a zero one.
+    /// </para>
+    /// </remarks>
+    private static int? SumTokens(IReadOnlyList<ChatTranscriptTurn> turns)
+    {
+        var known = turns.Where(t => t.TotalTokens is not null).ToList();
+
+        return known.Count == 0 ? null : known.Sum(t => t.TotalTokens!.Value);
+    }
+
+    /// <summary>
+    /// Allocates the next turn id from <c>ai.AssistantTurnId</c>.
+    /// </summary>
+    /// <remarks>
+    /// A sequence rather than a count of the turns already in the document, because the id has to
+    /// be unique across every session: it is what the API returns and what the feedback endpoint
+    /// takes, and per-session numbering would have two conversations both claiming turn 1. The
+    /// identity column that used to do this job belonged to a table that is no longer written.
+    /// </remarks>
+    private async Task<long> NextTurnIdAsync(CancellationToken cancellationToken)
+    {
+        var allocated = await _db.Database
+            .SqlQueryRaw<long>("SELECT NEXT VALUE FOR ai.AssistantTurnId AS Value")
             .ToListAsync(cancellationToken);
 
-        session.TranscriptJson = ChatTranscriptWriter.Serialize(session, turns);
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return ToDto(log, rows);
+        return allocated[0];
     }
 
     /// <summary>
     /// The last few exchanges of this session that actually became a query, oldest first.
     /// </summary>
     /// <remarks>
+    /// Read from the turns already in hand rather than queried: the whole conversation was loaded
+    /// to be written back anyway, so a second trip to the database would fetch what is sitting in
+    /// memory. This is the one place the JSON store is cheaper than the table it replaced.
+    /// <para>
     /// Restricted to statements that ran and succeeded. A refused turn offers nothing to resolve a
     /// pronoun against, and one that failed validation or blew up in the database is a statement
     /// the platform has already judged wrong — replaying either as an example of what to produce
     /// invites the model to produce more of it.
-    /// <para>
-    /// Taken newest-first with <c>Take</c> and then reversed, rather than ordered ascending and
-    /// trimmed afterwards: the point is the <i>most recent</i> N turns, and ascending order would
-    /// have to read the whole session to find its end. With IX_AssistantQuery_Session this is a
-    /// backwards seek that stops after N rows however long the conversation has run.
     /// </para>
-    /// The row just inserted for this question is excluded by id. It is still Pending with no SQL,
-    /// so the outcome filters would drop it anyway — but only by accident of when it is written,
-    /// and a question that quietly became context for itself is a strange thing to leave to luck.
+    /// The turn just appended for this question is excluded by id. It is still Pending with no SQL,
+    /// so the filters would drop it anyway — but only by accident of when it is written, and a
+    /// question that quietly became context for itself is a strange thing to leave to luck.
     /// </remarks>
-    private async Task<IReadOnlyList<ConversationTurn>> LoadHistoryAsync(
-        Guid sessionId, long currentQueryId, CancellationToken cancellationToken)
+    private IReadOnlyList<ConversationTurn> BuildHistory(
+        IReadOnlyList<ChatTranscriptTurn> turns, long currentTurnId)
     {
         if (_historyTurns <= 0)
         {
             return [];
         }
 
-        var recent = await _db.AssistantQueries
-            .AsNoTracking()
-            .Where(q => q.SessionId == sessionId
-                && q.AssistantQueryId != currentQueryId
-                && q.GeneratedSql != null
-                && q.ValidationOutcome == AssistantValidationOutcome.Approved
-                && q.ExecutionStatus == AssistantExecutionStatus.Succeeded)
-            .OrderByDescending(q => q.AskedAtUtc)
-            .ThenByDescending(q => q.AssistantQueryId)
-            .Take(_historyTurns)
-            .Select(q => new { q.QuestionText, q.GeneratedSql, q.SqlParametersJson })
-            .ToListAsync(cancellationToken);
-
-        recent.Reverse();
-
-        return recent
-            .Select(r => new ConversationTurn(
-                r.QuestionText,
-                r.GeneratedSql!,
-                DeserializeParameters(r.SqlParametersJson) ?? new Dictionary<string, object?>()))
+        return turns
+            .Where(t => t.AssistantQueryId != currentTurnId
+                && t.Sql is not null
+                && t.Outcome == AssistantValidationOutcome.Approved
+                && t.ExecutionStatus == AssistantExecutionStatus.Succeeded)
+            .TakeLast(_historyTurns)
+            .Select(t => new ConversationTurn(
+                t.Question,
+                t.Sql!,
+                t.Parameters ?? new Dictionary<string, object?>()))
             .ToList();
     }
 
@@ -426,8 +708,8 @@ public sealed class AssistantService : IAssistantService
         {
             SessionId = Guid.NewGuid(),
             UserId = userId,
-            StartedAtUtc = now,
-            LastActivityAtUtc = now
+            StartedAtPkt = now,
+            LastActivityAtPkt = now
         };
 
         _db.AssistantSessions.Add(session);
@@ -456,26 +738,91 @@ public sealed class AssistantService : IAssistantService
         }
     }
 
-    /// <summary>Hashed, not raw (SOW 3 — Security), matching AssistantQuery.ClientIpHash.</summary>
-    private static byte[]? HashIp(string? ip) =>
-        string.IsNullOrWhiteSpace(ip) ? null : SHA256.HashData(Encoding.UTF8.GetBytes(ip));
+    /// <summary>Hashed, not raw (SOW 3 — Security). Base64, because it is stored in JSON now.</summary>
+    private static string? HashIp(string? ip) =>
+        string.IsNullOrWhiteSpace(ip)
+            ? null
+            : Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(ip)));
 
     private static AssistantAnswerDto ToDto(
-        AssistantQuery log, IReadOnlyList<IReadOnlyDictionary<string, object?>>? rows) => new()
+        TurnDraft draft, IReadOnlyList<IReadOnlyDictionary<string, object?>>? rows) => new()
     {
-        AssistantQueryId = log.AssistantQueryId,
-        SessionId = log.SessionId,
-        QuestionText = log.QuestionText,
-        ValidationOutcome = log.ValidationOutcome,
-        GeneratedSql = log.ValidationOutcome == AssistantValidationOutcome.Approved ? log.GeneratedSql : null,
-        SqlParameters = log.ValidationOutcome == AssistantValidationOutcome.Approved
-            ? DeserializeParameters(log.SqlParametersJson)
-            : null,
-        Explanation = log.Explanation,
-        WasExecuted = log.WasExecuted,
-        ExecutionStatus = log.ExecutionStatus,
-        AnswerText = log.AnswerText ?? string.Empty,
+        AssistantQueryId = draft.AssistantQueryId,
+        SessionId = draft.SessionId,
+        QuestionText = draft.Question,
+        ValidationOutcome = draft.Outcome,
+        GeneratedSql = draft.Outcome == AssistantValidationOutcome.Approved ? draft.Sql : null,
+        SqlParameters = draft.Outcome == AssistantValidationOutcome.Approved ? draft.Parameters : null,
+        Explanation = draft.Explanation,
+        WasExecuted = draft.WasExecuted,
+        ExecutionStatus = draft.ExecutionStatus,
+        AnswerText = draft.Answer ?? string.Empty,
         Rows = rows,
-        ResultRowCount = log.ResultRowCount
+        ResultRowCount = draft.ResultRowCount
     };
+
+    /// <summary>
+    /// A turn while it is still being answered.
+    /// </summary>
+    /// <remarks>
+    /// Mutable, unlike the <see cref="ChatTranscriptTurn"/> it becomes. A turn is filled in across
+    /// eight or so steps, several of which can end it, and threading an immutable record through
+    /// that with <c>with</c> expressions would mean every step returning a new value that the next
+    /// step has to be given — an easy place to update one copy and persist another. The record is
+    /// what gets stored; this is the thing being assembled.
+    /// </remarks>
+    private sealed class TurnDraft
+    {
+        public required long AssistantQueryId { get; init; }
+        public Guid SessionId { get; set; }
+        public required DateTime AskedAtPkt { get; init; }
+        public required string Question { get; init; }
+        public required AssistantValidationOutcome Outcome { get; set; }
+        public string? ClientIpHash { get; init; }
+
+        public string? Answer { get; set; }
+        public string? ValidationDetail { get; set; }
+        public string? Sql { get; set; }
+        public IReadOnlyDictionary<string, object?>? Parameters { get; set; }
+        public string? Explanation { get; set; }
+
+        public bool WasExecuted { get; set; }
+        public AssistantExecutionStatus? ExecutionStatus { get; set; }
+        public string? ExecutionError { get; set; }
+        public int? ExecutionMs { get; set; }
+        public int? ResultRowCount { get; set; }
+
+        public string? ModelName { get; set; }
+        public int? PromptTokens { get; set; }
+        public int? CompletionTokens { get; set; }
+        public int? TotalLatencyMs { get; set; }
+
+        public ChatTranscriptTurn ToTurn() => new()
+        {
+            AssistantQueryId = AssistantQueryId,
+            AskedAtPkt = AskedAtPkt,
+            Question = Question,
+            Answer = Answer,
+            Outcome = Outcome,
+            ValidationDetail = ValidationDetail,
+            Sql = Sql,
+            Parameters = Parameters,
+            Explanation = Explanation,
+            WasExecuted = WasExecuted,
+            ExecutionStatus = ExecutionStatus,
+            ExecutionError = ExecutionError,
+            ExecutionMs = ExecutionMs,
+            ResultRowCount = ResultRowCount,
+            ModelName = ModelName,
+            PromptTokens = PromptTokens,
+            CompletionTokens = CompletionTokens,
+
+            // Null unless both halves are known — see ChatTranscriptTurn.TotalTokens. Adding a
+            // known half to an unknown one would report a confident undercount.
+            TotalTokens = PromptTokens is { } p && CompletionTokens is { } c ? p + c : null,
+
+            TotalLatencyMs = TotalLatencyMs,
+            ClientIpHash = ClientIpHash
+        };
+    }
 }

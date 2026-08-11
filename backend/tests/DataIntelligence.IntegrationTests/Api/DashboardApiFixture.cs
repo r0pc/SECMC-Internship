@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -71,7 +71,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
     /// <remarks>
     /// The collection-health endpoints measure a rolling window ending now, so runs dated in a
     /// fixed past would fall outside it and the health assertions would rot the moment the
-    /// calendar moved past them. Truncated to whole seconds because <c>ScheduledForUtc</c> is
+    /// calendar moved past them. Truncated to whole seconds because <c>ScheduledForPkt</c> is
     /// <c>datetime2(0)</c>: without that, what is written and what is read back differ by the
     /// sub-second part.
     /// </remarks>
@@ -200,7 +200,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
             FirstCollectionUtc);
 
         superseded.IsCurrent = false;
-        superseded.SupersededAtUtc = RevisionCollectionUtc;
+        superseded.SupersededAtPkt = RevisionCollectionUtc;
 
         db.CpiObservations.Add(superseded);
 
@@ -223,18 +223,18 @@ public sealed class DashboardApiFixture : IAsyncLifetime
 
     private static CollectionRun NewRun(
         byte dataSourceId,
-        DateTime startedAtUtc,
+        DateTime startedAtPkt,
         CollectionRunStatus status,
         CollectionFailureCategory? failureCategory = null,
         string? errorMessage = null) =>
         new()
         {
             DataSourceId = dataSourceId,
-            ScheduledForUtc = startedAtUtc,
+            ScheduledForPkt = startedAtPkt,
             Attempt = 1,
             TriggerType = CollectionTriggerType.Scheduled,
-            StartedAtUtc = startedAtUtc,
-            CompletedAtUtc = startedAtUtc.AddSeconds(4),
+            StartedAtPkt = startedAtPkt,
+            CompletedAtPkt = startedAtPkt.AddSeconds(4),
             Status = status,
             RequestUrl = "https://example.test/seed",
             HttpStatusCode = status == CollectionRunStatus.Failed ? (short)503 : (short)200,
@@ -251,7 +251,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
         PeriodType periodType,
         decimal indexValue,
         long collectionRunId,
-        DateTime collectedAtUtc,
+        DateTime collectedAtPkt,
         short revisionNumber = 0) =>
         new()
         {
@@ -263,7 +263,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
             RevisionNumber = revisionNumber,
             IsCurrent = true,
             CollectionRunId = collectionRunId,
-            CollectedAtUtc = collectedAtUtc,
+            CollectedAtPkt = collectedAtPkt,
             RowHash = Hash($"cpi|{referenceDate:O}|{periodCode}|{indexValue}|{revisionNumber}")
         };
 
@@ -272,7 +272,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
         decimal rate,
         decimal volume,
         long collectionRunId,
-        DateTime collectedAtUtc) =>
+        DateTime collectedAtPkt) =>
         new()
         {
             EffectiveDate = effectiveDate,
@@ -285,7 +285,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
             RevisionNumber = 0,
             IsCurrent = true,
             CollectionRunId = collectionRunId,
-            CollectedAtUtc = collectedAtUtc,
+            CollectedAtPkt = collectedAtPkt,
             RowHash = Hash($"sofr|{effectiveDate:O}|{rate}|{volume}")
         };
 

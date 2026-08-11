@@ -1,4 +1,4 @@
-// backend/src/DataIntelligence.Core/Interfaces/INlToSqlClient.cs
+﻿// backend/src/DataIntelligence.Core/Interfaces/INlToSqlClient.cs
 namespace DataIntelligence.Core.Interfaces;
 
 /// <summary>
@@ -31,11 +31,17 @@ public interface INlToSqlClient
     /// generation, and the bound <c>@year</c> is the only place the answer's actual subject is
     /// written down.
     /// </param>
+    /// <param name="coverage">
+    /// The first and last date held per dataset. Turns an empty result from a dead end into an
+    /// explanation: "no rows" and "that period is before the series begins" are the same JSON, and
+    /// only this tells them apart.
+    /// </param>
     Task<NlSummaryResult> SummariseResultsAsync(
         string question,
         string generatedSql,
         IReadOnlyDictionary<string, object?> parameters,
         string resultsJson,
+        string coverage,
         CancellationToken cancellationToken);
 }
 
@@ -100,7 +106,27 @@ public enum NlRefusalKind
     /// a sudden run of questions the platform supposedly cannot answer, and the reviewer goes
     /// looking for missing views instead of a broken response format.
     /// </remarks>
-    Unreadable
+    Unreadable,
+
+    /// <summary>Asks what CPI is, rather than what it was.</summary>
+    /// <remarks>
+    /// "What is SOFR?" is a fair question and neither chatter nor unanswerable — answering it with
+    /// a greeting, as this used to, reads as the assistant having misheard. It is separated from
+    /// the others because the reply is a definition rather than a figure, and definitions are the
+    /// one thing safe to state without querying: the platform knows what it collects.
+    /// <para>
+    /// The model classifies; it does not compose. The text is fixed on this side, so the path that
+    /// answers without running a query still cannot produce a number — which is the invariant the
+    /// whole design is built on.
+    /// </para>
+    /// </remarks>
+    AboutCpi,
+
+    /// <summary>Asks what SOFR is.</summary>
+    AboutSofr,
+
+    /// <summary>Asks what the collection log or this platform is.</summary>
+    AboutPlatform
 }
 
 public sealed record NlSummaryResult(string AnswerText, int? CompletionTokens, int LatencyMs);

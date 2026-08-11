@@ -1,4 +1,4 @@
-// backend/src/DataIntelligence.Infrastructure/Ai/ChatTranscriptWriter.cs
+﻿// backend/src/DataIntelligence.Infrastructure/Ai/ChatTranscriptWriter.cs
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DataIntelligence.Core.Dtos;
@@ -7,16 +7,22 @@ using DataIntelligence.Core.Entities;
 namespace DataIntelligence.Infrastructure.Ai;
 
 /// <summary>
-/// Projects a conversation's <c>ai.AssistantQuery</c> rows into the JSON document stored on
-/// <see cref="AssistantSession.TranscriptJson"/>.
+/// Reads and writes the JSON document stored on <see cref="AssistantSession.TranscriptJson"/>,
+/// which is the assistant's record of a conversation.
 /// </summary>
 /// <remarks>
-/// Rebuilt whole on every turn rather than appended to. Appending is cheaper and is the wrong
-/// trade here: a transcript assembled incrementally drifts the moment one write is missed, and the
-/// drift is invisible — the document stays valid JSON and simply stops matching the rows it claims
-/// to describe. Rebuilding makes the rows the only source of truth by construction, so the two
-/// cannot disagree. The cost is quadratic across a session, which is affordable precisely because
-/// a session is a chat: tens of turns, not thousands.
+/// This document is now the store, not a projection of one: nothing else records what was asked,
+/// what SQL it became, or whether that SQL ran. Every write is therefore a read-modify-write of the
+/// whole document — load it, change the turn in flight, serialise it back — and the cost is
+/// quadratic across a session. That is affordable because a session is a chat: tens of turns, not
+/// thousands.
+/// <para>
+/// The consequence worth knowing is concurrency. A row insert per turn could not lose a turn; a
+/// document rewrite can. Two questions answered against one session at the same moment will both
+/// load the same document and the later save will win, dropping the other turn entirely. A chat UI
+/// asks one question at a time, so this is unlikely rather than impossible — see the note in
+/// AssistantService.
+/// </para>
 /// </remarks>
 public static class ChatTranscriptWriter
 {
@@ -44,20 +50,29 @@ public static class ChatTranscriptWriter
     };
 
     /// <summary>Serialises the whole conversation, oldest turn first.</summary>
-    public static string Serialize(AssistantSession session, IReadOnlyList<AssistantQuery> turns)
+    public static string Serialize(AssistantSession session, IReadOnlyList<ChatTranscriptTurn> turns)
     {
         var transcript = new ChatTranscript
         {
             SessionId = session.SessionId,
             UserId = session.UserId,
-            StartedAtUtc = session.StartedAtUtc,
-            LastActivityAtUtc = session.LastActivityAtUtc,
+            StartedAtPkt = session.StartedAtPkt,
+            LastActivityAtPkt = session.LastActivityAtPkt,
             TurnCount = turns.Count,
-            Turns = turns.Select(ToTurn).ToList()
+            Turns = turns
         };
 
         return JsonSerializer.Serialize(transcript, Format);
     }
+
+    /// <summary>The turns already recorded for a session, or an empty list if there are none.</summary>
+    /// <remarks>
+    /// An unreadable document yields no turns rather than an exception. The alternative is a
+    /// session that can never be added to again: every subsequent question would fail on the same
+    /// unparseable string, and the conversation would be dead rather than merely damaged.
+    /// </remarks>
+    public static List<ChatTranscriptTurn> ReadTurns(string? json) =>
+        Deserialize(json)?.Turns.ToList() ?? [];
 
     /// <summary>Reads a transcript back. Returns null for anything that will not parse.</summary>
     /// <remarks>
@@ -83,41 +98,4 @@ public static class ChatTranscriptWriter
         }
     }
 
-    private static ChatTranscriptTurn ToTurn(AssistantQuery q) => new()
-    {
-        AssistantQueryId = q.AssistantQueryId,
-        AskedAtUtc = q.AskedAtUtc,
-        Question = q.QuestionText,
-        Answer = q.AnswerText,
-        Outcome = q.ValidationOutcome,
-
-        // Carried for every turn, including refused ones — unlike the answer DTO, which hides the
-        // SQL of a rejected query. A transcript is read to understand what happened, and for a
-        // refusal the statement that was turned away is the part that explains it.
-        Sql = q.GeneratedSql,
-        Parameters = ReadParameters(q.SqlParametersJson),
-        Explanation = q.Explanation,
-        ResultRowCount = q.ResultRowCount
-    };
-
-    /// <summary>
-    /// Re-reads the stored parameter bag so it nests as an object in the transcript rather than
-    /// being embedded as a string of JSON inside JSON.
-    /// </summary>
-    private static IReadOnlyDictionary<string, object?>? ReadParameters(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize<Dictionary<string, object?>>(json);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
 }

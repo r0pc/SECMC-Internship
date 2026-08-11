@@ -1,3 +1,4 @@
+﻿using DataIntelligence.Core;
 using DataIntelligence.Core.Analytics;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
@@ -27,7 +28,7 @@ public sealed class DashboardQueryService : IDashboardQueryService
         _timeProvider = timeProvider;
     }
 
-    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
+    private DateTime UtcNow => PakistanTime.Now(_timeProvider);
 
     // ------------------------------------------------------------- observations
 
@@ -58,7 +59,7 @@ public sealed class DashboardQueryService : IDashboardQueryService
             // This selects exactly one row per period on its own, so IncludeRevisions has nothing
             // left to add and is ignored.
             filtered = filtered.Where(o =>
-                o.CollectedAtUtc <= asOf && (o.SupersededAtUtc == null || o.SupersededAtUtc > asOf));
+                o.CollectedAtPkt <= asOf && (o.SupersededAtPkt == null || o.SupersededAtPkt > asOf));
         }
         else if (!query.IncludeRevisions)
         {
@@ -92,9 +93,9 @@ public sealed class DashboardQueryService : IDashboardQueryService
                 Value = o.Value,
                 RevisionNumber = o.RevisionNumber,
                 IsCurrent = o.IsCurrent,
-                SupersededAtUtc = o.SupersededAtUtc,
+                SupersededAtPkt = o.SupersededAtPkt,
                 SourceAnnotation = o.Annotation,
-                CollectedAtUtc = o.CollectedAtUtc,
+                CollectedAtPkt = o.CollectedAtPkt,
                 CollectionRunId = o.CollectionRunId
             })
             .ToList();
@@ -250,7 +251,7 @@ public sealed class DashboardQueryService : IDashboardQueryService
             var recent = await current
                 .OrderByDescending(o => o.ReferenceDate)
                 .Take(2)
-                .Select(o => new { o.ReferenceDate, o.Value, o.CollectedAtUtc })
+                .Select(o => new { o.ReferenceDate, o.Value, o.CollectedAtPkt })
                 .ToListAsync(cancellationToken);
 
             var latest = recent.FirstOrDefault();
@@ -282,7 +283,7 @@ public sealed class DashboardQueryService : IDashboardQueryService
                     {
                         ReferenceDate = latest.ReferenceDate,
                         Value = latest.Value,
-                        CollectedAtUtc = latest.CollectedAtUtc
+                        CollectedAtPkt = latest.CollectedAtPkt
                     },
                 PreviousValue = previous?.Value,
                 PreviousReferenceDate = previous?.ReferenceDate,
@@ -339,10 +340,10 @@ public sealed class DashboardQueryService : IDashboardQueryService
             LatestSofrDate = await sofrDays
                 .Select(r => (DateOnly?)r.EffectiveDate).MaxAsync(cancellationToken),
 
-            LastCollectionAtUtc = await _db.CollectionRuns.AsNoTracking()
+            LastCollectionAtPkt = await _db.CollectionRuns.AsNoTracking()
                 .Where(r => r.Status == CollectionRunStatus.Succeeded
                     || r.Status == CollectionRunStatus.PartialSuccess)
-                .Select(r => (DateTime?)r.StartedAtUtc)
+                .Select(r => (DateTime?)r.StartedAtPkt)
                 .MaxAsync(cancellationToken),
 
             Sources = await GetHealthAsync(windowDays, cancellationToken)
@@ -363,7 +364,7 @@ public sealed class DashboardQueryService : IDashboardQueryService
             .ToListAsync(cancellationToken);
 
         var windowStats = await _db.CollectionRuns.AsNoTracking()
-            .Where(r => r.StartedAtUtc >= since)
+            .Where(r => r.StartedAtPkt >= since)
             .GroupBy(r => r.DataSourceId)
             .Select(g => new
             {
@@ -383,10 +384,10 @@ public sealed class DashboardQueryService : IDashboardQueryService
 
             var lastRun = await _db.CollectionRuns.AsNoTracking()
                 .Where(r => r.DataSourceId == source.DataSourceId)
-                .OrderByDescending(r => r.StartedAtUtc)
+                .OrderByDescending(r => r.StartedAtPkt)
                 .Select(r => new
                 {
-                    r.StartedAtUtc,
+                    r.StartedAtPkt,
                     r.Status,
                     r.FailureCategory,
                     r.ErrorMessage
@@ -397,14 +398,14 @@ public sealed class DashboardQueryService : IDashboardQueryService
                 .Where(r => r.DataSourceId == source.DataSourceId
                     && (r.Status == CollectionRunStatus.Succeeded
                         || r.Status == CollectionRunStatus.PartialSuccess))
-                .OrderByDescending(r => r.StartedAtUtc)
-                .Select(r => (DateTime?)r.StartedAtUtc)
+                .OrderByDescending(r => r.StartedAtPkt)
+                .Select(r => (DateTime?)r.StartedAtPkt)
                 .FirstOrDefaultAsync(cancellationToken);
 
             var recentStatuses = await _db.CollectionRuns.AsNoTracking()
                 .Where(r => r.DataSourceId == source.DataSourceId
                     && r.Status != CollectionRunStatus.Running)
-                .OrderByDescending(r => r.StartedAtUtc)
+                .OrderByDescending(r => r.StartedAtPkt)
                 .Take(ConsecutiveFailureScanLimit)
                 .Select(r => r.Status)
                 .ToListAsync(cancellationToken);
@@ -421,8 +422,8 @@ public sealed class DashboardQueryService : IDashboardQueryService
                 PartialRuns = stats?.Partial ?? 0,
                 FailedRuns = stats?.Failed ?? 0,
                 SuccessRatePercent = SuccessRate(stats?.Succeeded ?? 0, stats?.Partial ?? 0, stats?.Failed ?? 0),
-                LastRunAtUtc = lastRun?.StartedAtUtc,
-                LastSuccessAtUtc = lastSuccess,
+                LastRunAtPkt = lastRun?.StartedAtPkt,
+                LastSuccessAtPkt = lastSuccess,
                 LastRunStatus = lastRun?.Status,
                 LastFailureCategory = lastRun?.FailureCategory,
                 LastErrorMessage = lastRun?.ErrorMessage,
@@ -479,12 +480,12 @@ public sealed class DashboardQueryService : IDashboardQueryService
 
         if (query.FromUtc is { } fromUtc)
         {
-            filtered = filtered.Where(r => r.StartedAtUtc >= fromUtc);
+            filtered = filtered.Where(r => r.StartedAtPkt >= fromUtc);
         }
 
         if (query.ToUtc is { } toUtc)
         {
-            filtered = filtered.Where(r => r.StartedAtUtc <= toUtc);
+            filtered = filtered.Where(r => r.StartedAtPkt <= toUtc);
         }
 
         var totalCount = await filtered.CountAsync(cancellationToken);
@@ -494,7 +495,7 @@ public sealed class DashboardQueryService : IDashboardQueryService
             return PagedResult<CollectionRunDto>.Empty(query.Page);
         }
 
-        var items = await RunProjection(filtered.OrderByDescending(r => r.StartedAtUtc))
+        var items = await RunProjection(filtered.OrderByDescending(r => r.StartedAtPkt))
             .Skip(query.Page.Skip)
             .Take(query.Page.PageSize)
             .ToListAsync(cancellationToken);
@@ -515,11 +516,11 @@ public sealed class DashboardQueryService : IDashboardQueryService
             CollectionRunId = r.CollectionRunId,
             DataSourceId = r.DataSourceId,
             SourceCode = r.DataSource!.Code,
-            ScheduledForUtc = r.ScheduledForUtc,
+            ScheduledForPkt = r.ScheduledForPkt,
             Attempt = r.Attempt,
             TriggerType = r.TriggerType,
-            StartedAtUtc = r.StartedAtUtc,
-            CompletedAtUtc = r.CompletedAtUtc,
+            StartedAtPkt = r.StartedAtPkt,
+            CompletedAtPkt = r.CompletedAtPkt,
             DurationMs = r.DurationMs,
             Status = r.Status,
             HttpStatusCode = r.HttpStatusCode,

@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Entities;
+﻿using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Exceptions;
 using DataIntelligence.Infrastructure.Ai;
@@ -147,12 +147,18 @@ public sealed class SchemaContextProviderTests : IClassFixture<ReadOnlyExecution
     {
         // A process up since yesterday would otherwise answer "last month" against yesterday's
         // idea of the calendar, and keep doing so until it was restarted.
-        var clock = new FakeClock(new DateTimeOffset(2026, 8, 6, 23, 59, 0, TimeSpan.Zero));
+        //
+        // The instants below straddle midnight in PAKISTAN, not in UTC, which is the point: 18:59
+        // UTC is 23:59 the same day in Karachi, and 19:01 UTC is already the next morning. A
+        // provider that still resolved "today" against UTC would report the 6th for both and be
+        // wrong for five hours of every day — the window in which "last month" and "year to date"
+        // quietly shift by one.
+        var clock = new FakeClock(new DateTimeOffset(2026, 8, 6, 18, 59, 0, TimeSpan.Zero));
         var provider = Build(clock);
 
         Assert.Contains("Today's date is 2026-08-06", await provider.GetContextAsync(default));
 
-        clock.Now = new DateTimeOffset(2026, 8, 7, 0, 1, 0, TimeSpan.Zero);
+        clock.Now = new DateTimeOffset(2026, 8, 6, 19, 1, 0, TimeSpan.Zero);
 
         Assert.Contains("Today's date is 2026-08-07", await provider.GetContextAsync(default));
     }
@@ -230,8 +236,8 @@ public sealed class SchemaContextProviderTests : IClassFixture<ReadOnlyExecution
         var run = new CollectionRun
         {
             DataSourceId = 1,
-            ScheduledForUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
-            StartedAtUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
+            ScheduledForPkt = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
+            StartedAtPkt = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
             Status = CollectionRunStatus.Succeeded,
             TriggerType = CollectionTriggerType.Manual,
             RequestUrl = "https://api.bls.gov/publicAPI/v2/timeseries/data/",

@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Dtos;
+﻿using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Persistence;
@@ -29,7 +29,7 @@ public sealed class CpiObservationWriter : IDatasetWriter
     public async Task<DatasetWriteSummary> WriteAsync(
         CollectionRun run,
         IReadOnlyList<ObservationRecord> records,
-        DateTime collectedAtUtc,
+        DateTime collectedAtPkt,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -60,7 +60,7 @@ public sealed class CpiObservationWriter : IDatasetWriter
 
             if (!currentVintages.TryGetValue((record.ReferenceYear, record.PeriodCode), out var current))
             {
-                _db.CpiObservations.Add(NewObservation(record, run, collectedAtUtc, rowHash, 0));
+                _db.CpiObservations.Add(NewObservation(record, run, collectedAtPkt, rowHash, 0));
                 inserted++;
                 continue;
             }
@@ -77,10 +77,10 @@ public sealed class CpiObservationWriter : IDatasetWriter
             // A genuine revision, in the order the unique index requires: release the current
             // flag before claiming it, or the insert collides with the row it replaces.
             current.IsCurrent = false;
-            current.SupersededAtUtc = collectedAtUtc;
+            current.SupersededAtPkt = collectedAtPkt;
 
             _db.CpiObservations.Add(NewObservation(
-                record, run, collectedAtUtc, rowHash, (short)(current.RevisionNumber + 1)));
+                record, run, collectedAtPkt, rowHash, (short)(current.RevisionNumber + 1)));
 
             revised++;
 
@@ -96,7 +96,7 @@ public sealed class CpiObservationWriter : IDatasetWriter
 
     private static CpiObservation NewObservation(
         CpiObservationRecord record, CollectionRun run,
-        DateTime collectedAtUtc, byte[] rowHash, short revisionNumber) =>
+        DateTime collectedAtPkt, byte[] rowHash, short revisionNumber) =>
         new()
         {
             SeriesCode = CpiObservation.SeriesCodeValue,
@@ -109,7 +109,7 @@ public sealed class CpiObservationWriter : IDatasetWriter
             RevisionNumber = revisionNumber,
             IsCurrent = true,
             CollectionRunId = run.CollectionRunId,
-            CollectedAtUtc = collectedAtUtc,
+            CollectedAtPkt = collectedAtPkt,
             RowHash = rowHash
         };
 }

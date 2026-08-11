@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 using DataIntelligence.Infrastructure.Ai;
 
 namespace DataIntelligence.UnitTests.Ai;
@@ -355,5 +355,60 @@ public class SqlSafetyValidatorTests
             + string.Concat(Enumerable.Repeat("JOIN analytics.vw_Sofr ON 1 = 1 ", 8));
 
         Assert.Equal(AssistantValidationOutcome.RejectedComplexity, Validator.Validate(sql).Outcome);
+    }
+
+    // ------------------------------------------------- analytical query shapes
+
+    [Fact]
+    public void ApprovesAWindowFunctionOverNestedDerivedTables()
+    {
+        // The shape the prompt teaches for "which month changed the most". It matters that this
+        // passes: derived tables are the only way to express a CTE here, so if the validator ever
+        // stopped accepting them the whole class of change-over-time questions would start being
+        // refused with no obvious cause.
+        const string sql = """
+            SELECT TOP (1) DATEADD(month, -1, m.MonthStart) AS FromMonth, m.MonthStart AS ToMonth,
+                   m.AvgRate - m.PrevAvgRate AS ChangeInPercentagePoints
+            FROM (SELECT MonthStart, AvgRate, LAG(AvgRate) OVER (ORDER BY MonthStart) AS PrevAvgRate
+                  FROM (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart,
+                               AVG(RatePercent) AS AvgRate
+                        FROM analytics.vw_Sofr
+                        WHERE EffectiveDate >= @from AND EffectiveDate < @to
+                        GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS monthly) AS m
+            WHERE m.PrevAvgRate IS NOT NULL
+            ORDER BY ABS(m.AvgRate - m.PrevAvgRate) DESC
+            """;
+
+        var parameters = new Dictionary<string, object?> { ["@from"] = "2025-01-01", ["@to"] = "2026-01-01" };
+
+        Assert.Equal(AssistantValidationOutcome.Approved, Validator.Validate(sql, parameters).Outcome);
+    }
+
+    [Fact]
+    public void DoesNotOverrideATopTheQueryChoseForItself()
+    {
+        // A "which single month" question answers itself with TOP (1). Injecting the 2,000-row cap
+        // over it would turn one row into two thousand and change the answer.
+        const string sql = "SELECT TOP (1) EffectiveDate FROM analytics.vw_Sofr ORDER BY RatePercent DESC";
+
+        var result = Validator.Validate(sql);
+
+        Assert.Equal(AssistantValidationOutcome.Approved, result.Outcome);
+        Assert.Contains("TOP (1)", result.NormalizedSql);
+        Assert.DoesNotContain("TOP (2000)", result.NormalizedSql);
+    }
+
+    [Fact]
+    public void RejectsACommonTableExpression()
+    {
+        // Pinned as a refusal rather than left undefined, because it is the shape a model reaches
+        // for first and the prompt spends a rule talking it out of. A CTE fails the "starts with
+        // SELECT" test, and its name would not be an allowed object either.
+        const string sql = """
+            WITH monthly AS (SELECT AVG(RatePercent) AS AvgRate FROM analytics.vw_Sofr)
+            SELECT AvgRate FROM monthly
+            """;
+
+        Assert.NotEqual(AssistantValidationOutcome.Approved, Validator.Validate(sql).Outcome);
     }
 }

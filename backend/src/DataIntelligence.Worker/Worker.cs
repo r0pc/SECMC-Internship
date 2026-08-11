@@ -1,3 +1,4 @@
+﻿using DataIntelligence.Core;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
@@ -74,7 +75,7 @@ public class Worker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            var now = PakistanTime.Now(_timeProvider);
             var nextRun = CollectionSchedule.GetNextRunTime(
                 now, TimeSpan.FromMinutes(_options.IntervalMinutes), _options.AlignToClock);
 
@@ -105,13 +106,13 @@ public class Worker : BackgroundService
     /// <para>
     /// The cycle is stamped with the current time rather than the next scheduled boundary. That
     /// is what keeps it out of the way of the scheduled run for the same hour: the two would
-    /// otherwise share <c>ScheduledForUtc</c> and the manual one would be filed as a retry of a
+    /// otherwise share <c>ScheduledForPkt</c> and the manual one would be filed as a retry of a
     /// cycle that had not happened.
     /// </para>
     /// </remarks>
     private async Task RunOnceAsync(CancellationToken stoppingToken)
     {
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var now = PakistanTime.Now(_timeProvider);
 
         _logger.LogInformation("Running a single collection cycle on demand, then exiting.");
 
@@ -134,7 +135,7 @@ public class Worker : BackgroundService
     /// </remarks>
     private async Task RunBackfillAsync(CancellationToken stoppingToken)
     {
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var now = PakistanTime.Now(_timeProvider);
         var total = new BackfillTally();
 
         if (_runMode.IncludeCpi)
@@ -283,7 +284,7 @@ public class Worker : BackgroundService
     /// tables for no measurable gain.
     /// </remarks>
     private async Task RunCycleAsync(
-        DateTime scheduledForUtc, CollectionTriggerType trigger, CancellationToken stoppingToken)
+        DateTime scheduledForPkt, CollectionTriggerType trigger, CancellationToken stoppingToken)
     {
         List<string> sourceCodes;
 
@@ -319,7 +320,7 @@ public class Worker : BackgroundService
 
         foreach (var sourceCode in sourceCodes)
         {
-            await RunSourceSafelyAsync(sourceCode, scheduledForUtc, trigger, null, stoppingToken);
+            await RunSourceSafelyAsync(sourceCode, scheduledForPkt, trigger, null, stoppingToken);
         }
     }
 
@@ -329,7 +330,7 @@ public class Worker : BackgroundService
     /// </summary>
     private async Task<CollectionSummary?> RunSourceSafelyAsync(
         string sourceCode,
-        DateTime scheduledForUtc,
+        DateTime scheduledForPkt,
         CollectionTriggerType trigger,
         CollectionWindow? window,
         CancellationToken stoppingToken)
@@ -342,7 +343,7 @@ public class Worker : BackgroundService
             var runner = scope.ServiceProvider.GetRequiredService<ICollectionRunner>();
 
             var summary = await runner.RunAsync(
-                sourceCode, scheduledForUtc, trigger, window, stoppingToken);
+                sourceCode, scheduledForPkt, trigger, window, stoppingToken);
 
             if (_runMode.Mode == WorkerMode.Once)
             {
@@ -359,7 +360,7 @@ public class Worker : BackgroundService
             {
                 _logger.LogError(
                     "{Source}: cycle {ScheduledFor:u} failed ({Category}): {Message}",
-                    sourceCode, scheduledForUtc, summary.FailureCategory, summary.ErrorMessage);
+                    sourceCode, scheduledForPkt, summary.FailureCategory, summary.ErrorMessage);
             }
             else if (summary.Revised > 0)
             {
@@ -381,7 +382,7 @@ public class Worker : BackgroundService
         {
             _logger.LogError(ex,
                 "{Source}: cycle {ScheduledFor:u} threw outside the runner's own handling. "
-                + "The schedule continues.", sourceCode, scheduledForUtc);
+                + "The schedule continues.", sourceCode, scheduledForPkt);
 
             return null;
         }

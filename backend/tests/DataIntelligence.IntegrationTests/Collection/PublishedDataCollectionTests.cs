@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Dtos;
+﻿using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
@@ -325,7 +325,7 @@ public class PublishedDataRevisionTests : IAsyncLifetime
 
         Assert.Equal(333.952m, vintages[0].IndexValue);
         Assert.False(vintages[0].IsCurrent);
-        Assert.NotNull(vintages[0].SupersededAtUtc);
+        Assert.NotNull(vintages[0].SupersededAtPkt);
 
         Assert.Equal(334.100m, vintages[1].IndexValue);
         Assert.True(vintages[1].IsCurrent);

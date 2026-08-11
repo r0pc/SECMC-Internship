@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Dtos;
+﻿using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Interfaces;
@@ -10,7 +10,7 @@ namespace DataIntelligence.Core.Interfaces;
 public interface ICollectionRunner
 {
     /// <summary>
-    /// Runs the cycle scheduled for <paramref name="scheduledForUtc"/> against one source.
+    /// Runs the cycle scheduled for <paramref name="scheduledForPkt"/> against one source.
     /// </summary>
     /// <param name="window">
     /// The period to request. Null uses the adapter's default, which is what the schedule wants;
@@ -22,7 +22,7 @@ public interface ICollectionRunner
     /// </remarks>
     Task<CollectionSummary> RunAsync(
         string sourceCode,
-        DateTime scheduledForUtc,
+        DateTime scheduledForPkt,
         CollectionTriggerType trigger,
         CollectionWindow? window,
         CancellationToken cancellationToken);

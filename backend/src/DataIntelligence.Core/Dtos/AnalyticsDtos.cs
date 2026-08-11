@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Dtos;
 
@@ -7,7 +7,7 @@ namespace DataIntelligence.Core.Dtos;
 /// </summary>
 /// <remarks>
 /// Both dates matter and neither substitutes for the other: <see cref="ReferenceDate"/> is the
-/// period the number describes, <see cref="CollectedAtUtc"/> is when this platform learned it.
+/// period the number describes, <see cref="CollectedAtPkt"/> is when this platform learned it.
 /// A revision keeps the reference date and gets a new collection timestamp.
 /// </remarks>
 public sealed record ObservationDto
@@ -36,12 +36,12 @@ public sealed record ObservationDto
     /// <summary>False for a superseded vintage — only returned when revisions are requested.</summary>
     public required bool IsCurrent { get; init; }
 
-    public DateTime? SupersededAtUtc { get; init; }
+    public DateTime? SupersededAtPkt { get; init; }
 
     /// <summary>Publisher annotation as published: BLS footnote codes, the NY Fed revision indicator.</summary>
     public string? SourceAnnotation { get; init; }
 
-    public required DateTime CollectedAtUtc { get; init; }
+    public required DateTime CollectedAtPkt { get; init; }
     public required long CollectionRunId { get; init; }
 }
 
@@ -134,11 +134,11 @@ public sealed record CollectionRunDto
     public required long CollectionRunId { get; init; }
     public required byte DataSourceId { get; init; }
     public required string SourceCode { get; init; }
-    public required DateTime ScheduledForUtc { get; init; }
+    public required DateTime ScheduledForPkt { get; init; }
     public required byte Attempt { get; init; }
     public required CollectionTriggerType TriggerType { get; init; }
-    public required DateTime StartedAtUtc { get; init; }
-    public DateTime? CompletedAtUtc { get; init; }
+    public required DateTime StartedAtPkt { get; init; }
+    public DateTime? CompletedAtPkt { get; init; }
     public long? DurationMs { get; init; }
     public required CollectionRunStatus Status { get; init; }
     public short? HttpStatusCode { get; init; }
@@ -175,8 +175,8 @@ public sealed record SourceHealthDto
     /// </summary>
     public decimal? SuccessRatePercent { get; init; }
 
-    public DateTime? LastRunAtUtc { get; init; }
-    public DateTime? LastSuccessAtUtc { get; init; }
+    public DateTime? LastRunAtPkt { get; init; }
+    public DateTime? LastSuccessAtPkt { get; init; }
     public CollectionRunStatus? LastRunStatus { get; init; }
     public CollectionFailureCategory? LastFailureCategory { get; init; }
     public string? LastErrorMessage { get; init; }
@@ -212,6 +212,6 @@ public sealed record DashboardSummaryDto
     public DateOnly? LatestCpiMonth { get; init; }
     public DateOnly? EarliestSofrDate { get; init; }
     public DateOnly? LatestSofrDate { get; init; }
-    public DateTime? LastCollectionAtUtc { get; init; }
+    public DateTime? LastCollectionAtPkt { get; init; }
     public required IReadOnlyList<SourceHealthDto> Sources { get; init; }
 }

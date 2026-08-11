@@ -4,6 +4,7 @@ using DataIntelligence.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DataIntelligence.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(DataIntelligenceDbContext))]
-    partial class DataIntelligenceDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260810130232_PakistanTimeAndDropAssistantQuery")]
+    partial class PakistanTimeAndDropAssistantQuery
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -64,9 +67,6 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         .HasColumnType("datetime2(3)")
                         .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
 
-                    b.Property<int?>("TotalTokens")
-                        .HasColumnType("int");
-
                     b.Property<string>("TranscriptJson")
                         .HasColumnType("nvarchar(max)");
 
@@ -83,39 +83,6 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         {
                             t.HasCheckConstraint("CK_AssistantSession_TranscriptJson", "[TranscriptJson] IS NULL OR ISJSON([TranscriptJson]) = 1");
                         });
-                });
-
-            modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantSessionSummary", b =>
-                {
-                    b.Property<DateTime>("LastActivityAtPkt")
-                        .HasPrecision(3)
-                        .HasColumnType("datetime2(3)");
-
-                    b.Property<Guid>("SessionId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("StartedAtPkt")
-                        .HasPrecision(3)
-                        .HasColumnType("datetime2(3)");
-
-                    b.Property<string>("Title")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<int?>("TotalTokens")
-                        .HasColumnType("int");
-
-                    b.Property<int>("TurnCount")
-                        .HasColumnType("int");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("int");
-
-                    b.ToTable("AssistantSessionSummaries", "ai", t =>
-                        {
-                            t.ExcludeFromMigrations();
-                        });
-
-                    b.ToSqlQuery("SELECT  s.SessionId,\n        s.UserId,\n        s.StartedAtPkt,\n        s.LastActivityAtPkt,\n        ISNULL(TRY_CAST(JSON_VALUE(s.TranscriptJson, '$.turnCount') AS INT), 0) AS TurnCount,\n        JSON_VALUE(s.TranscriptJson, '$.turns[0].question') AS Title,\n\n        -- The column, not a SUM over the turns. Deriving it here would shred every one\n        -- of a user's transcripts to add up one integer per conversation, which is the\n        -- cost this list exists to avoid. AssistantService keeps the column current.\n        s.TotalTokens\nFROM    ai.AssistantSession AS s\nWHERE   s.TranscriptJson IS NOT NULL");
                 });
 
             modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantTurn", b =>

@@ -1,4 +1,4 @@
-namespace DataIntelligence.Core.Entities;
+﻿namespace DataIntelligence.Core.Entities;
 
 /// <summary>
 /// The untouched API response for a run, stored compressed. Diagnostic: it lets a parse failure
@@ -9,7 +9,7 @@ public class RawPayload
 {
     public long RawPayloadId { get; set; }
     public long CollectionRunId { get; set; }
-    public DateTime FetchedAtUtc { get; set; }
+    public DateTime FetchedAtPkt { get; set; }
     public string? ContentType { get; set; }
 
     /// <summary>

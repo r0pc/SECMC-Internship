@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Dtos;
+﻿using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Entities;
 
 namespace DataIntelligence.Core.Interfaces;
@@ -25,14 +25,14 @@ public interface IDatasetWriter
     /// </summary>
     /// <param name="run">The run to attribute the rows to.</param>
     /// <param name="records">Records that passed validation. Never empty.</param>
-    /// <param name="collectedAtUtc">
+    /// <param name="collectedAtPkt">
     /// One timestamp for the whole batch (FR-6), so every row from a cycle agrees about when the
     /// platform learned it.
     /// </param>
     Task<DatasetWriteSummary> WriteAsync(
         CollectionRun run,
         IReadOnlyList<ObservationRecord> records,
-        DateTime collectedAtUtc,
+        DateTime collectedAtPkt,
         CancellationToken cancellationToken);
 }
 

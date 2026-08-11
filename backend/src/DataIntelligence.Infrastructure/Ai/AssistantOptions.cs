@@ -47,8 +47,23 @@ public sealed class AssistantOptions
     /// </remarks>
     public string? ExecuteAsUser { get; set; } = "di_ai_user";
 
+    /// <summary>
+    /// Ceiling on the model's reply to one call.
+    /// </summary>
+    /// <remarks>
+    /// Raised from 1024, which was comfortable for a single-view lookup and too tight for the
+    /// analytical shapes: "which month changed the most" nests three levels of derived table and
+    /// runs to several hundred tokens of SQL before the explanation starts. Hitting the cap does
+    /// not truncate the SQL into something invalid — it truncates the JSON wrapping it, so the
+    /// reply arrives unparseable and the question is recorded as RejectedUnreadableResponse. The
+    /// tell is a completion-token count sitting exactly on this number.
+    /// <para>
+    /// It is a ceiling, not a reservation: a short answer still costs short-answer tokens, so the
+    /// headroom is only paid for when it is used.
+    /// </para>
+    /// </remarks>
     [Range(1, 4000)]
-    public int MaxOutputTokens { get; set; } = 1024;
+    public int MaxOutputTokens { get; set; } = 3000;
 
     /// <summary>
     /// How many earlier exchanges of the same session are replayed to the model, so a follow-up

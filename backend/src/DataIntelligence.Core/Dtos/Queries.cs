@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Enums;
+﻿using DataIntelligence.Core.Enums;
 
 namespace DataIntelligence.Core.Dtos;
 
@@ -87,7 +87,7 @@ public sealed record CollectionRunQuery
     public byte? DataSourceId { get; init; }
     public CollectionRunStatus? Status { get; init; }
 
-    /// <summary>Filters on <c>StartedAtUtc</c>, which is what the log is indexed by.</summary>
+    /// <summary>Filters on <c>StartedAtPkt</c>, which is what the log is indexed by.</summary>
     public DateTime? FromUtc { get; init; }
 
     public DateTime? ToUtc { get; init; }

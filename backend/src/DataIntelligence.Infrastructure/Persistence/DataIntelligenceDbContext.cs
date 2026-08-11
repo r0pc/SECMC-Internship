@@ -1,4 +1,4 @@
-using DataIntelligence.Core.Entities;
+﻿using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -32,8 +32,13 @@ public class DataIntelligenceDbContext : DbContext
     public DbSet<SofrDailyRate> SofrDailyRates => Set<SofrDailyRate>();
     public DbSet<RejectedObservation> RejectedObservations => Set<RejectedObservation>();
     public DbSet<AssistantSession> AssistantSessions => Set<AssistantSession>();
-    public DbSet<AssistantQuery> AssistantQueries => Set<AssistantQuery>();
     public DbSet<AssistantFeedback> AssistantFeedback => Set<AssistantFeedback>();
+
+    /// <summary>Read-only view of the turns inside every session's JSON transcript.</summary>
+    public DbSet<AssistantTurn> AssistantTurns => Set<AssistantTurn>();
+
+    /// <summary>Read-only list of conversations, for resuming one.</summary>
+    public DbSet<AssistantSessionSummary> AssistantSessionSummaries => Set<AssistantSessionSummary>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -41,7 +46,7 @@ public class DataIntelligenceDbContext : DbContext
 
         // Millisecond precision for every timestamp. EF's default is datetime2(7), which costs
         // two bytes a row for sub-millisecond resolution no publisher provides. Columns needing
-        // something else (ScheduledForUtc) set it explicitly.
+        // something else (ScheduledForPkt) set it explicitly.
         configurationBuilder.Properties<DateTime>().HavePrecision(3);
     }
 
@@ -56,8 +61,14 @@ public class DataIntelligenceDbContext : DbContext
         ConfigureSofrDailyRate(modelBuilder.Entity<SofrDailyRate>());
         ConfigureRejectedObservation(modelBuilder.Entity<RejectedObservation>());
         ConfigureAssistantSession(modelBuilder.Entity<AssistantSession>());
-        ConfigureAssistantQuery(modelBuilder.Entity<AssistantQuery>());
         ConfigureAssistantFeedback(modelBuilder.Entity<AssistantFeedback>());
+        ConfigureAssistantTurn(modelBuilder.Entity<AssistantTurn>());
+        ConfigureAssistantSessionSummary(modelBuilder.Entity<AssistantSessionSummary>());
+
+        // Turn ids. Declared on the model so migrations create it; allocated explicitly in
+        // AssistantService rather than as a column default, since there is no column — the turn it
+        // identifies is an object inside ai.AssistantSession.TranscriptJson.
+        modelBuilder.HasSequence<long>("AssistantTurnId", "ai").StartsAt(1).IncrementsBy(1);
 
         ConfigureSeedData(modelBuilder);
     }
@@ -100,7 +111,7 @@ public class DataIntelligenceDbContext : DbContext
                 CollectionIntervalMinutes = 60,
                 TermsOfUseUrl = "https://www.bls.gov/developers/api_faqs.htm",
                 IsEnabled = true,
-                CreatedAtUtc = seededAt
+                CreatedAtPkt = seededAt
             },
             new DataSource
             {
@@ -120,7 +131,7 @@ public class DataIntelligenceDbContext : DbContext
                 TermsOfUseUrl =
                     "https://www.newyorkfed.org/markets/reference-rates/terms-of-use-for-selected-rate-data",
                 IsEnabled = true,
-                CreatedAtUtc = seededAt
+                CreatedAtPkt = seededAt
             });
     }
 
@@ -157,7 +168,7 @@ public class DataIntelligenceDbContext : DbContext
         entity.Property(e => e.RequestTimeoutSec).HasDefaultValue((short)30);
         entity.Property(e => e.MaxRetries).HasDefaultValue((byte)3);
         entity.Property(e => e.IsEnabled).HasDefaultValue(true);
-        entity.Property(e => e.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.CreatedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
 
         entity.Property(e => e.RequiresApiKey).HasDefaultValue(false);
 
@@ -176,7 +187,7 @@ public class DataIntelligenceDbContext : DbContext
             t.HasCheckConstraint("CK_CollectionRun_FailureRequired",
                 "[Status] <> 'Failed' OR [FailureCategory] IS NOT NULL");
             t.HasCheckConstraint("CK_CollectionRun_Completed",
-                "[CompletedAtUtc] IS NULL OR [CompletedAtUtc] >= [StartedAtUtc]");
+                "[CompletedAtPkt] IS NULL OR [CompletedAtPkt] >= [StartedAtPkt]");
             t.HasCheckConstraint("CK_CollectionRun_Status",
                 "[Status] IN ('Running','Succeeded','PartialSuccess','Failed','Skipped')");
             t.HasCheckConstraint("CK_CollectionRun_Trigger",
@@ -190,12 +201,12 @@ public class DataIntelligenceDbContext : DbContext
         entity.HasKey(e => e.CollectionRunId);
 
         // Idempotency key, scoped per source so both publishers can share a cycle time.
-        entity.HasIndex(e => new { e.DataSourceId, e.ScheduledForUtc, e.Attempt })
+        entity.HasIndex(e => new { e.DataSourceId, e.ScheduledForPkt, e.Attempt })
             .IsUnique()
             .HasDatabaseName("UQ_CollectionRun_Cycle");
 
-        entity.Property(e => e.ScheduledForUtc).HasColumnType("datetime2(0)");
-        entity.Property(e => e.StartedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.ScheduledForPkt).HasColumnType("datetime2(0)");
+        entity.Property(e => e.StartedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
         entity.Property(e => e.Attempt).HasDefaultValue((byte)1);
         entity.Property(e => e.RequestUrl).HasMaxLength(1000).IsRequired();
         entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
@@ -220,25 +231,25 @@ public class DataIntelligenceDbContext : DbContext
         entity.Property(e => e.ObservationsRejected).HasDefaultValue(0);
 
         entity.Property(e => e.DurationMs)
-            .HasComputedColumnSql("DATEDIFF_BIG(MILLISECOND, [StartedAtUtc], [CompletedAtUtc])");
+            .HasComputedColumnSql("DATEDIFF_BIG(MILLISECOND, [StartedAtPkt], [CompletedAtPkt])");
 
         entity.HasOne(e => e.DataSource)
             .WithMany()
             .HasForeignKey(e => e.DataSourceId)
             .OnDelete(DeleteBehavior.NoAction);
 
-        // Both indexes cover StartedAtUtc, so each needs an explicit model name — EF keys
+        // Both indexes cover StartedAtPkt, so each needs an explicit model name — EF keys
         // indexes by property set, and the unnamed overload would let one replace the other.
-        entity.HasIndex(e => e.StartedAtUtc, "IX_CollectionRun_StartedAtUtc")
+        entity.HasIndex(e => e.StartedAtPkt, "IX_CollectionRun_StartedAtPkt")
             .IsDescending()
             .IncludeProperties(e => new { e.DataSourceId, e.Status, e.ObservationsInserted });
 
-        entity.HasIndex(e => e.StartedAtUtc, "IX_CollectionRun_Failures")
+        entity.HasIndex(e => e.StartedAtPkt, "IX_CollectionRun_Failures")
             .IsDescending()
             .HasFilter("[Status] IN ('Failed','PartialSuccess')")
             .IncludeProperties(e => new
             {
-                e.DataSourceId, e.FailureCategory, e.ErrorMessage, e.AlertSentAtUtc
+                e.DataSourceId, e.FailureCategory, e.ErrorMessage, e.AlertSentAtPkt
             });
     }
 
@@ -249,7 +260,7 @@ public class DataIntelligenceDbContext : DbContext
 
         entity.HasKey(e => e.RawPayloadId);
 
-        entity.Property(e => e.FetchedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.FetchedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
         entity.Property(e => e.ContentType).HasMaxLength(100);
         entity.Property(e => e.ContentHash).HasColumnType("binary(32)").IsRequired();
         entity.Property(e => e.CompressedContent).HasColumnType("varbinary(max)").IsRequired();
@@ -260,7 +271,7 @@ public class DataIntelligenceDbContext : DbContext
             .OnDelete(DeleteBehavior.Cascade);
 
         entity.HasIndex(e => e.CollectionRunId).HasDatabaseName("IX_RawPayload_Run");
-        entity.HasIndex(e => new { e.ContentHash, e.FetchedAtUtc })
+        entity.HasIndex(e => new { e.ContentHash, e.FetchedAtPkt })
             .IsDescending(false, true)
             .HasDatabaseName("IX_RawPayload_Hash");
     }
@@ -307,8 +318,8 @@ public class DataIntelligenceDbContext : DbContext
 
             // A superseded row is not current, and a current row is not superseded.
             t.HasCheckConstraint("CK_Cpi_Superseded",
-                "([IsCurrent] = 1 AND [SupersededAtUtc] IS NULL) "
-                + "OR ([IsCurrent] = 0 AND [SupersededAtUtc] IS NOT NULL)");
+                "([IsCurrent] = 1 AND [SupersededAtPkt] IS NULL) "
+                + "OR ([IsCurrent] = 0 AND [SupersededAtPkt] IS NOT NULL)");
         });
 
         entity.HasKey(e => e.CpiObservationId).IsClustered(false).HasName("PK_CpiObservation");
@@ -384,8 +395,8 @@ public class DataIntelligenceDbContext : DbContext
 
             t.HasCheckConstraint("CK_Sofr_Revision", "[RevisionNumber] >= 0");
             t.HasCheckConstraint("CK_Sofr_Superseded",
-                "([IsCurrent] = 1 AND [SupersededAtUtc] IS NULL) "
-                + "OR ([IsCurrent] = 0 AND [SupersededAtUtc] IS NOT NULL)");
+                "([IsCurrent] = 1 AND [SupersededAtPkt] IS NULL) "
+                + "OR ([IsCurrent] = 0 AND [SupersededAtPkt] IS NOT NULL)");
         });
 
         entity.HasKey(e => e.SofrDailyRateId).IsClustered(false).HasName("PK_SofrDailyRate");
@@ -443,7 +454,7 @@ public class DataIntelligenceDbContext : DbContext
 
         entity.Property(e => e.SeriesCode).HasMaxLength(100);
         entity.Property(e => e.ReferenceDateText).HasMaxLength(50);
-        entity.Property(e => e.RejectedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.RejectedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
         entity.Property(e => e.ReasonDetail).HasMaxLength(1000);
         entity.Property(e => e.Reason).HasConversion<string>().HasMaxLength(30).IsUnicode(false);
 
@@ -452,7 +463,7 @@ public class DataIntelligenceDbContext : DbContext
             .HasForeignKey(e => e.CollectionRunId)
             .OnDelete(DeleteBehavior.Cascade);
 
-        entity.HasIndex(e => new { e.CollectionRunId, e.RejectedAtUtc })
+        entity.HasIndex(e => new { e.CollectionRunId, e.RejectedAtPkt })
             .IsDescending(false, true)
             .HasDatabaseName("IX_RejectedObservation_Run");
     }
@@ -471,96 +482,12 @@ public class DataIntelligenceDbContext : DbContext
 
         entity.HasKey(e => e.SessionId);
         entity.Property(e => e.SessionId).ValueGeneratedNever();
-        entity.Property(e => e.StartedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
-        entity.Property(e => e.LastActivityAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.StartedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+        entity.Property(e => e.LastActivityAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
 
-        entity.HasIndex(e => new { e.UserId, e.StartedAtUtc })
+        entity.HasIndex(e => new { e.UserId, e.StartedAtPkt })
             .IsDescending(false, true)
             .HasDatabaseName("IX_AssistantSession_User");
-    }
-
-    private static void ConfigureAssistantQuery(EntityTypeBuilder<AssistantQuery> entity)
-    {
-        entity.ToTable("AssistantQuery", "ai", t =>
-        {
-            t.HasCheckConstraint("CK_AssistantQuery_Validation",
-                "[ValidationOutcome] IN ('Pending','Approved','RejectedNotSelect',"
-                + "'RejectedForbiddenObject','RejectedSyntax','RejectedComplexity','RejectedNoSql',"
-                + "'NotADataQuestion','RejectedUnreadableResponse')");
-            t.HasCheckConstraint("CK_AssistantQuery_Execution",
-                "[ExecutionStatus] IS NULL OR [ExecutionStatus] IN "
-                + "('Succeeded','Failed','Timeout','Cancelled')");
-            // The backstop behind ISqlSafetyValidator (SOW 9): even a bug in the validator cannot
-            // record a statement as executed unless it was approved first.
-            t.HasCheckConstraint("CK_AssistantQuery_NoUnvalidatedRun",
-                "[WasExecuted] = 0 OR [ValidationOutcome] = 'Approved'");
-        });
-
-        entity.HasKey(e => e.AssistantQueryId);
-
-        entity.Property(e => e.AskedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
-        entity.Property(e => e.QuestionText).HasMaxLength(2000).IsRequired();
-        entity.Property(e => e.ValidationDetail).HasMaxLength(1000);
-        entity.Property(e => e.Explanation).HasMaxLength(2000);
-        entity.Property(e => e.ExecutionError).HasMaxLength(1000);
-        entity.Property(e => e.ModelName).HasMaxLength(100);
-        entity.Property(e => e.ClientIpHash).HasColumnType("binary(32)");
-        entity.Property(e => e.WasExecuted).HasDefaultValue(false);
-
-        // Stored as strings so the CHECK constraints above stay readable, matching how the
-        // collection enums are persisted.
-        // 30, not 20. 'RejectedForbiddenObject' is 23 characters, so at 20 the CHECK constraint
-        // permitted a value the column could not physically hold: the first time the model wrote a
-        // query against sec.* the audit insert would fail on truncation and take the request with
-        // it — the one rejection the log most needs to record.
-        entity.Property(e => e.ValidationOutcome)
-            .HasConversion<string>().HasMaxLength(30).IsUnicode(false)
-            .HasDefaultValue(AssistantValidationOutcome.Pending);
-        entity.Property(e => e.ExecutionStatus)
-            .HasConversion<string>().HasMaxLength(20).IsUnicode(false);
-
-        entity.HasOne(e => e.Session)
-            .WithMany(s => s.Queries)
-            .HasForeignKey(e => e.SessionId)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        // Both of these cover AskedAtUtc. They are declared with the named HasIndex overload
-        // because the expression-only overload identifies an index by its property list — calling
-        // it twice for the same column reconfigures one index rather than declaring two, which
-        // silently loses whichever was declared first.
-        entity.HasIndex(e => e.AskedAtUtc, "IX_AssistantQuery_AskedAtUtc")
-            .IsDescending(true);
-
-        entity.HasIndex(e => new { e.UserId, e.AskedAtUtc }, "IX_AssistantQuery_User")
-            .IsDescending(false, true);
-
-        // Conversation memory: the last few turns of one session, newest first.
-        //
-        // This replaces the index EF creates by convention for the SessionId foreign key. That one
-        // covers the column but not the order, so finding the most recent turns still meant sorting
-        // every row of the session; the composite makes it a backwards seek that stops after N rows
-        // however long the conversation has run, and covers the FK exactly as well by leading on
-        // the same column. Note that docs/database-schema.sql has to declare it explicitly — raw
-        // SQL Server, unlike EF, indexes no foreign key on its own.
-        //
-        // GeneratedSql is deliberately not included: it is nvarchar(max) and would drag the leaf
-        // pages up to the size of the statements themselves, so the lookup keys off the index and
-        // pays for the handful of rows it actually keeps.
-        entity.HasIndex(e => new { e.SessionId, e.AskedAtUtc }, "IX_AssistantQuery_Session")
-            .IsDescending(false, true);
-
-        // The review queue (NFR Auditability): everything the validator turned away that is worth
-        // a human's attention. NotADataQuestion is excluded deliberately — greetings would
-        // otherwise dominate the queue by volume and bury the probes it exists to surface.
-        //
-        // Spelled as chained <> rather than NOT IN because a filtered index predicate does not
-        // accept NOT IN — SQL Server rejects it at CREATE INDEX with a syntax error.
-        entity.HasIndex(e => e.AskedAtUtc, "IX_AssistantQuery_Rejected")
-            .IsDescending(true)
-            .IncludeProperties(e => new { e.QuestionText, e.ValidationOutcome, e.ValidationDetail })
-            .HasFilter(
-                "[ValidationOutcome] <> 'Approved' AND [ValidationOutcome] <> 'Pending' "
-                + "AND [ValidationOutcome] <> 'NotADataQuestion'");
     }
 
     private static void ConfigureAssistantFeedback(EntityTypeBuilder<AssistantFeedback> entity)
@@ -570,11 +497,141 @@ public class DataIntelligenceDbContext : DbContext
         entity.HasKey(e => e.AssistantQueryId);
         entity.Property(e => e.AssistantQueryId).ValueGeneratedNever();
         entity.Property(e => e.Comment).HasMaxLength(1000);
-        entity.Property(e => e.SubmittedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+        entity.Property(e => e.SubmittedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
 
-        entity.HasOne(e => e.Query)
-            .WithOne(q => q.Feedback)
-            .HasForeignKey<AssistantFeedback>(e => e.AssistantQueryId)
-            .OnDelete(DeleteBehavior.Cascade);
+        // No relationship to AssistantQuery any more. The turn this feedback is about lives inside
+        // a JSON document, and a foreign key cannot point into one — so AssistantQueryId is now an
+        // id the database does not enforce, allocated from the ai.AssistantTurnId sequence.
+        //
+        // What that loses is worth stating plainly: nothing stops a row here referring to a turn
+        // that does not exist, and deleting a session no longer cascades to the feedback on its
+        // turns. RecordFeedbackAsync checks the turn exists before writing, which closes the first
+        // gap for anything going through the API but not for anything going around it.
+        //
+    }
+
+    /// <summary>
+    /// The read model over <c>ai.AssistantSession.TranscriptJson</c>: one row per turn, shredded
+    /// out of the stored document so the audit log can be filtered and paged in SQL.
+    /// </summary>
+    /// <remarks>
+    /// <c>OPENJSON ... WITH</c> rather than <c>JSON_VALUE</c> per column, because the WITH form
+    /// parses each document once and projects every column from that single parse; a column list of
+    /// JSON_VALUE calls re-parses the whole document once per column per row.
+    /// <para>
+    /// The path strings are the contract with <c>ChatTranscriptWriter</c>'s camelCase output, and
+    /// the two have to be changed together. A renamed property here silently yields NULL rather
+    /// than an error — OPENJSON in non-strict mode treats a missing path as absent, not as a fault.
+    /// </para>
+    /// </remarks>
+    private static void ConfigureAssistantTurn(EntityTypeBuilder<AssistantTurn> entity)
+    {
+        // ExcludeFromMigrations as well as ToSqlQuery. The DbSet gives the type a table mapping by
+        // convention, and ToSqlQuery adds the query on top rather than replacing it — so without
+        // this, migrations helpfully create a real ai.AssistantTurns table that nothing would ever
+        // write to and the query would ignore.
+        entity.ToTable("AssistantTurns", "ai", t => t.ExcludeFromMigrations());
+
+        entity.HasNoKey().ToSqlQuery("""
+            SELECT  t.AssistantQueryId,
+                    s.SessionId,
+                    s.UserId,
+                    -- Documents written before the clock moved to PKT carry askedAtUtc and a UTC
+                    -- reading. Shifted rather than merely coalesced: taking the old value as-is
+                    -- would file those turns five hours early and sort them among the wrong ones,
+                    -- which is a subtler failure than the NULL it would otherwise be.
+                    ISNULL(t.AskedAtPkt, DATEADD(hour, 5, t.AskedAtLegacyUtc)) AS AskedAtPkt,
+                    t.QuestionText,
+                    t.AnswerText,
+                    t.ValidationOutcome,
+                    t.ValidationDetail,
+                    t.GeneratedSql,
+                    t.SqlParametersJson,
+                    t.Explanation,
+
+                    -- Backfilled, not read straight through. A JSON store has no migration step:
+                    -- documents written before a field existed simply lack it, OPENJSON returns
+                    -- NULL, and a NULL into a non-nullable bool throws rather than degrading. Turns
+                    -- written before wasExecuted was recorded still carry an execution status, and
+                    -- having one is exactly what being executed means — so the older shape can be
+                    -- answered accurately instead of merely defaulted.
+                    --
+                    -- Every reader of this column has to keep tolerating shapes it did not write.
+                    -- That is the standing cost of the store being a document.
+                    ISNULL(t.WasExecuted,
+                           CASE WHEN t.ExecutionStatus IS NOT NULL THEN 1 ELSE 0 END) AS WasExecuted,
+                    t.ExecutionStatus,
+                    t.ExecutionError,
+                    t.ExecutionMs,
+                    t.ResultRowCount,
+                    t.ModelName,
+                    t.PromptTokens,
+                    t.CompletionTokens,
+                    t.TotalTokens,
+                    t.TotalLatencyMs
+            FROM    ai.AssistantSession AS s
+            CROSS APPLY OPENJSON(s.TranscriptJson, '$.turns')
+            WITH (
+                    AssistantQueryId    BIGINT          '$.assistantQueryId',
+                    AskedAtPkt          DATETIME2(3)    '$.askedAtPkt',
+                    AskedAtLegacyUtc    DATETIME2(3)    '$.askedAtUtc',
+                    QuestionText        NVARCHAR(2000)  '$.question',
+                    AnswerText          NVARCHAR(MAX)   '$.answer',
+                    ValidationOutcome   VARCHAR(30)     '$.outcome',
+                    ValidationDetail    NVARCHAR(1000)  '$.validationDetail',
+                    GeneratedSql        NVARCHAR(MAX)   '$.sql',
+                    SqlParametersJson   NVARCHAR(MAX)   '$.parameters' AS JSON,
+                    Explanation         NVARCHAR(2000)  '$.explanation',
+                    WasExecuted         BIT             '$.wasExecuted',
+                    ExecutionStatus     VARCHAR(20)     '$.executionStatus',
+                    ExecutionError      NVARCHAR(1000)  '$.executionError',
+                    ExecutionMs         INT             '$.executionMs',
+                    ResultRowCount      INT             '$.resultRowCount',
+                    ModelName           NVARCHAR(100)   '$.modelName',
+                    PromptTokens        INT             '$.promptTokens',
+                    CompletionTokens    INT             '$.completionTokens',
+                    TotalTokens         INT             '$.totalTokens',
+                    TotalLatencyMs      INT             '$.totalLatencyMs'
+            ) AS t
+            """);
+
+        entity.Property(e => e.ValidationOutcome).HasConversion<string>();
+        entity.Property(e => e.ExecutionStatus).HasConversion<string>();
+    }
+
+    /// <summary>
+    /// The conversation list: one row per session, read out of the transcript without shredding it.
+    /// </summary>
+    /// <remarks>
+    /// Sessions with no transcript are excluded rather than shown as empty. One is created the
+    /// moment a question arrives and before the answer is written, so a crashed or abandoned first
+    /// question leaves a session behind with nothing in it — offering that back as a conversation
+    /// to resume would be offering a blank page.
+    /// <para>
+    /// TRY_CAST on the count, not CAST: turnCount comes out of a document the database does not
+    /// validate the shape of, and one malformed transcript should cost its own row rather than
+    /// failing the whole list for that user.
+    /// </para>
+    /// </remarks>
+    private static void ConfigureAssistantSessionSummary(
+        EntityTypeBuilder<AssistantSessionSummary> entity)
+    {
+        entity.ToTable("AssistantSessionSummaries", "ai", t => t.ExcludeFromMigrations());
+
+        entity.HasNoKey().ToSqlQuery("""
+            SELECT  s.SessionId,
+                    s.UserId,
+                    s.StartedAtPkt,
+                    s.LastActivityAtPkt,
+                    ISNULL(TRY_CAST(JSON_VALUE(s.TranscriptJson, '$.turnCount') AS INT), 0) AS TurnCount,
+                    JSON_VALUE(s.TranscriptJson, '$.turns[0].question') AS Title,
+
+                    -- The column, not a SUM over the turns. Deriving it here would shred every one
+                    -- of a user's transcripts to add up one integer per conversation, which is the
+                    -- cost this list exists to avoid. AssistantService keeps the column current.
+                    s.TotalTokens
+            FROM    ai.AssistantSession AS s
+            WHERE   s.TranscriptJson IS NOT NULL
+            """);
     }
 }
