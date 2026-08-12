@@ -93,4 +93,4 @@ dead endpoint costs its own panel and not the page.
 
 - Authentication (FR-9). Every API endpoint is anonymous, which is why `/sources` is
   read-only here even though the API accepts `PATCH` on a source's polling settings.
-
+  
