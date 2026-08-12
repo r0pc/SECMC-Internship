@@ -79,6 +79,63 @@
       },
       "coverage": "",
       "expect": { "containsAnyOf": ["250", "4.25", "5.41", "4.83"] }
+    },
+    {
+      "id": "empty-from-a-filter",
+      "guards": "Zero rows because the WHERE clause matched nothing, not because the period is missing. This is the case the SQL echo is kept for - without the filter in front of it, an honest 'none were' becomes 'we do not hold that'.",
+      "question": "how many days was sofr above 10 percent in 2025",
+      "sql": "SELECT EffectiveDate, RatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to AND RatePercent > @threshold",
+      "parameters": { "@from": "2025-01-01", "@to": "2026-01-01", "@threshold": 10 },
+      "results": { "columns": ["EffectiveDate", "RatePercent"], "rows": [], "rowCount": 0 },
+      "coverage": "What this platform holds:\n- SOFR (analytics.vw_Sofr, EffectiveDate): 2018-04-02 to 2026-08-10\n",
+      "expect": {
+        "containsAnyOf": ["no days", "none", "did not", "never", "no dates", "zero"],
+        "absent": ["outside", "do not hold", "does not hold", "not collected", "no data for"]
+      }
+    },
+    {
+      "id": "cross-dataset-no-causation",
+      "guards": "Describe how two series move; do not assert one causes the other. The rule exists in the prompt and nothing tested it.",
+      "question": "how did inflation and interest rates move together in 2025",
+      "sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
+      "parameters": { "@from": "2025-01-01", "@to": "2026-01-01" },
+      "results": {
+        "columns": ["ReferenceDate", "InflationPct", "AvgRatePercent"],
+        "rows": [
+          ["2025-01-01", 3.0, 4.33], ["2025-04-01", 2.3, 4.33],
+          ["2025-08-01", 2.9, 4.33], ["2025-12-01", 2.7, 4.29]
+        ],
+        "rowCount": 4
+      },
+      "coverage": "",
+      "expect": {
+        "containsAnyOf": ["2.7", "2.9", "4.33", "4.29"],
+        "absent": ["caused", "causes", "because of the rate", "driven by the rate", "correlation coefficient"]
+      }
+    },
+    {
+      "id": "volume-is-in-billions",
+      "guards": "VolumeUsdBillions is in billions. The unit lives in a view note; this is where getting it wrong becomes a figure a user reads.",
+      "question": "how much was borrowed overnight on 2 january 2025",
+      "sql": "SELECT EffectiveDate, VolumeUsdBillions FROM analytics.vw_Sofr WHERE EffectiveDate = @day",
+      "parameters": { "@day": "2025-01-02" },
+      "results": { "columns": ["EffectiveDate", "VolumeUsdBillions"], "rows": [["2025-01-02", 2451.0]], "rowCount": 1 },
+      "coverage": "",
+      "expect": { "containsAnyOf": ["billion", "trillion"] }
+    },
+    {
+      "id": "wide-result-stays-prose",
+      "guards": "A result with many columns is the one that tempts a table. The answer is rendered in a pre-wrapped paragraph, so a table arrives as literal pipes.",
+      "question": "give me the sofr percentiles for 2 january 2025",
+      "sql": "SELECT EffectiveDate, RatePercent, Percentile1Percent, Percentile25Percent, Percentile75Percent, Percentile99Percent, VolumeUsdBillions FROM analytics.vw_Sofr WHERE EffectiveDate = @day",
+      "parameters": { "@day": "2025-01-02" },
+      "results": {
+        "columns": ["EffectiveDate", "RatePercent", "Percentile1Percent", "Percentile25Percent", "Percentile75Percent", "Percentile99Percent", "VolumeUsdBillions"],
+        "rows": [["2025-01-02", 4.33, 4.24, 4.29, 4.36, 4.55, 2451.0]],
+        "rowCount": 1
+      },
+      "coverage": "",
+      "expect": { "contains": ["4.33"] }
     }
   ]
 }

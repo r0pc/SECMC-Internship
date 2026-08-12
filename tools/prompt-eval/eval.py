@@ -199,6 +199,14 @@ def check(case: dict, global_rules: dict, reply: dict) -> list[str]:
         if fragment.upper() in upper:
             failures.append(f"must not contain {fragment!r}")
 
+    # Patterns rather than fragments, for rules that forbid a shape rather than a word. The one
+    # that earns this is inline date literals: the contract says every literal the question supplies
+    # is bound as a parameter, and until now nothing checked it on any case, let alone all of them.
+    for name, pattern in (global_rules.get("absentPattern") or {}).items():
+        found = re.search(pattern, sql, re.IGNORECASE)
+        if found:
+            failures.append(f"{name}: found {found.group(0)!r}")
+
     for prefix in global_rules.get("notStartsWith", []):
         if upper.lstrip().startswith(prefix.upper()):
             failures.append(f"must not start with {prefix!r}")
@@ -212,6 +220,13 @@ def check(case: dict, global_rules: dict, reply: dict) -> list[str]:
     for fragment in expect.get("contains", []):
         if fragment.upper() not in upper:
             failures.append(f"expected to contain {fragment!r}")
+
+    # For questions with more than one right answer. "The first half of 2024" is FirstHalfValue on
+    # vw_CpiAnnual or PeriodCode 'S01' on vw_Cpi; both prove the model knew the value exists, which
+    # is the thing under test, and requiring one of them would fail a correct statement.
+    any_of = expect.get("containsAnyOf", [])
+    if any_of and not any(f.upper() in upper for f in any_of):
+        failures.append(f"expected at least one of {any_of}")
 
     wanted_views = expect.get("views", [])
     if wanted_views:

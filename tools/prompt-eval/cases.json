@@ -5,7 +5,11 @@
     "//": "Applied to every case that comes back with SQL. These are the mistakes that are always wrong, whatever was asked.",
     "absent": ["LIMIT ", "```"],
     "notStartsWith": ["WITH"],
-    "onlyViews": true
+    "onlyViews": true,
+    "absentPattern": {
+      "//": "The output contract says every literal the question supplies is bound as a parameter and referenced by name. Nothing tested that until this line, and it tests it on every case at once rather than one - which makes it the cheapest assertion in the file and the one most likely to catch a trim of the contract block.",
+      "date literal inline instead of bound as a parameter": "'\\d{4}-\\d{2}-\\d{2}"
+    }
   },
 
   "cases": [
@@ -152,6 +156,131 @@
         "views": ["analytics.vw_CpiAnnual"],
         "parameterValues": ["2021"]
       }
+    },
+    {
+      "id": "parameters-not-literals",
+      "guards": "The output contract's parameterisation rule. A question naming a month must bind it, not inline it.",
+      "question": "what was cpi in march 2024",
+      "expect": {
+        "views": ["analytics.vw_Cpi"],
+        "hasParameters": true,
+        "parameterValues": ["2024-03-01"]
+      }
+    },
+    {
+      "id": "about-platform",
+      "guards": "The about_platform arm of the refusal taxonomy in the output contract. Only about_cpi was tested.",
+      "question": "what data do you have and how often do you collect it",
+      "expect": { "refusal": "about_platform" }
+    },
+    {
+      "id": "not-a-data-question",
+      "guards": "The not_a_data_question arm of the taxonomy. The pleasantry filter catches most of these before the model, but not all.",
+      "question": "thanks, that helps a lot",
+      "expect": { "refusal": "not_a_data_question" }
+    },
+    {
+      "id": "semiannual-code",
+      "guards": "'S01'/'S02' and FirstHalfValue exist. A guessed code returns nothing, which reads as no data.",
+      "question": "what was the average cpi for the first half of 2024",
+      "expect": {
+        "views": ["analytics.vw_CpiAnnual", "analytics.vw_Cpi"],
+        "viewsAnyOf": true,
+        "containsAnyOf": ["FirstHalfValue", "S01"]
+      }
+    },
+    {
+      "id": "m13-not-month",
+      "guards": "M13 is the annual average BLS publishes, not a thirteenth month - and not something to reconstruct by averaging twelve rows.",
+      "question": "what was cpi for the whole of 2023",
+      "expect": {
+        "views": ["analytics.vw_CpiAnnual", "analytics.vw_Cpi"],
+        "viewsAnyOf": true,
+        "containsAnyOf": ["AnnualValue", "M13", "'Annual'"]
+      }
+    },
+    {
+      "id": "no-dedup",
+      "guards": "Every view already filters to the current vintage, so deduplicating revisions is work that can only go wrong.",
+      "question": "what was cpi in each month of 2024",
+      "expect": {
+        "views": ["analytics.vw_Cpi", "analytics.vw_CpiMonthlyChange"],
+        "viewsAnyOf": true,
+        "absent": ["ROW_NUMBER", "DISTINCT"]
+      }
+    },
+    {
+      "id": "revision-history",
+      "guards": "The revision views and their notes. 'Has it been revised' is the one question the current-vintage views cannot answer.",
+      "question": "has the june 2025 cpi figure been revised",
+      "expect": {
+        "views": ["analytics.vw_CpiRevision"],
+        "parameterValues": ["2025-06-01"]
+      }
+    },
+    {
+      "id": "rolling-week",
+      "guards": "Weeks are rolling, not calendar. Asked on a Tuesday, a calendar week starts 2026-08-10 and the rolling one starts 2026-08-05.",
+      "question": "what was the average sofr rate this week",
+      "expect": {
+        "views": ["analytics.vw_Sofr"],
+        "contains": ["AVG"],
+        "parameterValues": ["2026-08-05"]
+      }
+    },
+    {
+      "id": "year-to-date",
+      "guards": "Relative-date resolution against today, for a phrase the temporal block names explicitly.",
+      "question": "what is the average sofr rate year to date",
+      "expect": {
+        "views": ["analytics.vw_Sofr"],
+        "contains": ["AVG"],
+        "parameterValues": ["2026-01-01"]
+      }
+    },
+    {
+      "id": "follow-up-two-deep",
+      "guards": "A referent two turns back, which is also what the history-compaction setting is betting on.",
+      "question": "and the one before that",
+      "history": [
+        {
+          "question": "what is the average cpi of 2022",
+          "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+          "parameters": { "@year": 2022 }
+        },
+        {
+          "question": "and the year before that",
+          "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+          "parameters": { "@year": 2021 }
+        }
+      ],
+      "expect": {
+        "views": ["analytics.vw_CpiAnnual"],
+        "parameterValues": ["2020"]
+      }
+    },
+    {
+      "id": "follow-up-new-subject",
+      "guards": "'Carry the reference only'. A follow-up that names its own subject and period completely is a new question.",
+      "question": "what was the average sofr rate in 2023",
+      "history": [
+        {
+          "question": "what is the average cpi of 2022",
+          "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+          "parameters": { "@year": 2022 }
+        }
+      ],
+      "expect": {
+        "views": ["analytics.vw_Sofr", "analytics.vw_SofrAnnual"],
+        "viewsAnyOf": true,
+        "parameterValues": ["2023"]
+      }
+    },
+    {
+      "id": "follow-up-unresolvable",
+      "guards": "A referent that is not in the conversation at all is a refusal, not a guessed period.",
+      "question": "and what about the year before that",
+      "expect": { "refusal": "unanswerable" }
     }
   ]
 }
