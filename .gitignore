@@ -65,3 +65,6 @@ TestResult.xml
 nunit-*.xml
 
 keys.txt
+# Python bytecode from the prompt-eval harness.
+__pycache__/
+*.pyc
