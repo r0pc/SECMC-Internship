@@ -1,0 +1,13 @@
+28 case(s) against local qwen3.5:4b
+system prompt: 6217 chars  [semantics from variants\V2f-semantics.txt; shape from variants\V2f-shape.txt; views from variants\V2f-views.txt]
+
+  pass  explicit-month  109.7s read +  25.8s gen
+  pass  explicit-year-average   60.8s read +  18.4s gen
+  pass  inflation-wording   67.5s read +  29.5s gen
+  pass  interest-rate-wording   60.7s read +  17.7s gen
+  FAIL  volume-wording   62.7s read +  32.7s gen
+  pass  recent-window-not-refused   63.9s read +  29.6s gen
+  pass  cross-dataset   64.0s read +  57.3s gen
+  pass  largest-change   63.6s read +  72.2s gen
+  FAIL  peak   63.3s read +  22.3s gen
+  pass  annual-average   65.7s read +  18.1s gen

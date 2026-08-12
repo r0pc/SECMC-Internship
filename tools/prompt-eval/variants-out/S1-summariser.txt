@@ -1,0 +1,20 @@
+10 case(s) against cloud deepseek-v4-flash
+summariser system prompt: 1563 chars (from variants\S1-summariser.txt)
+
+  pass  states-the-figure
+  pass  empty-outside-coverage
+  FAIL  empty-inside-coverage
+  pass  period-mismatch-is-our-fault
+  pass  follow-up-answers-the-query
+  pass  described-long-result
+  pass  empty-from-a-filter
+  pass  cross-dataset-no-causation
+  pass  volume-is-in-billions
+  pass  wide-result-stays-prose
+
+9/10 passed
+
+--- empty-inside-coverage
+    guards: The opposite failure: a period that IS held must not be explained away as outside coverage. This is the one that tells a user the platform lacks data it has.
+    - must not contain 'outside'
+    answer: The question asked for the annual average CPI for 2019, and the query that ran requested the annual value for the reference year 2019. However, the query returned no rows. This is a fault on our side: the question named 2019, but the query that ran asked for a different period — specifically, it app

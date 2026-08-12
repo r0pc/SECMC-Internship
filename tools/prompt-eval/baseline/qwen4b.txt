@@ -23,3 +23,44 @@ system prompt: 12382 chars  [shipping prompt]
   FAIL  semiannual-code   54.4s read +  20.7s gen
   pass  m13-not-month   51.8s read +  15.8s gen
   pass  no-dedup   55.8s read +  21.7s gen
+  FAIL  revision-history   51.4s read +  25.7s gen
+  FAIL  rolling-week   63.3s read +  31.8s gen
+  FAIL  year-to-date   64.3s read +  22.9s gen
+  pass  follow-up-two-deep   72.0s read +  20.8s gen
+  pass  follow-up-new-subject   65.5s read +  21.8s gen
+  pass  follow-up-unresolvable   61.1s read +  10.2s gen
+
+21 passed / 7 failed / 0 errored  (of 28 cases)
+cost: 94,636 prompt tokens + 2,413 completion = 97,049 total  (3,379 prompt per case)
+time: 1941.0s reading the prompt + 699.8s generating  (69,320 ms prefill per case)
+statements written to produced-baseline-qwen4b.json — `python diff.py <baseline> produced-baseline-qwen4b.json`
+
+--- FAIL volume-wording: 'how much was borrowed overnight in march 2025'
+    guards: Term mapping: 'how much was borrowed' is VolumeUsdBillions, and it is in billions.
+    - date literal inline instead of bound as a parameter: found "'2025-03-01"
+
+--- FAIL peak: 'which month had the highest cpi in 2024'
+    guards: 'When was it highest' takes TOP with ORDER BY rather than returning every period.
+    - expected to contain 'TOP'
+
+--- FAIL half-open-range: 'what was the average sofr rate in january 2025'
+    guards: A range is half-open; BETWEEN with a guessed month-end drops the 31st on daily SOFR.
+    - date literal inline instead of bound as a parameter: found "'2025-01-01"
+
+--- FAIL semiannual-code: 'what is the published semiannual cpi figure for the first half of 2024'
+    guards: 'S01'/'S02' and FirstHalfValue exist as published figures. A guessed code returns nothing, which reads as no data.
+    - expected at least one of ['FirstHalfValue', 'S01']
+
+--- FAIL revision-history: 'has the june 2025 cpi figure been revised'
+    guards: The revision views and their notes. 'Has it been revised' is the one question the current-vintage views cannot answer.
+    - expected a parameter containing '2025-06-01', bound {'@year': 2025}
+
+--- FAIL rolling-week: 'what was the average sofr rate this week'
+    guards: Weeks are rolling, not calendar. Asked on a Tuesday, a calendar week starts 2026-08-10 and the rolling one starts 2026-08-05.
+    - expected a parameter containing '2026-08-05', bound {'@today': '2026-08-11'}
+
+--- FAIL year-to-date: 'what is the average sofr rate year to date'
+    guards: Relative-date resolution against today, for a phrase the temporal block names explicitly.
+    - expected to read ['analytics.vw_Sofr'], read ['analytics.vw_sofrannual']
+    - expected a parameter containing '2026-01-01', bound {'@year': 2026}
+EXIT=1
