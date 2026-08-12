@@ -204,6 +204,13 @@ VARIANTS = {
     # reason: a frontier nobody pushed past is a guess about where the frontier is.
     "V2f": ("V2e + the term mapping", ["P4", "P7", "P12", "P14", "P1", "P16",
                                        "P5", "P6", "P8", "P9", "P11"]),
+
+    # The candidate for shipping: V2f minus the two blocks the local model turned out to need.
+    # deepseek-v4-flash resolves a follow-up and scopes a refusal without either of them; qwen3.5:4b
+    # loses follow-up-referent and unanswerable-subject when they go. The cloud model being able to
+    # do without a rule is not the question - Local is a supported choice on every question, so a
+    # cut has to hold on the weaker model too.
+    "VS": ("safe on both models", ["P4", "P12", "P14", "P16", "P5", "P6", "P8", "P9", "P11"]),
 }
 
 

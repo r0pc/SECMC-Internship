@@ -66,15 +66,12 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["vw_Cpi"] = "Current CPI figures, one row per period.",
-            ["vw_CpiMonthlyChange"] = "Monthly CPI with month-over-month and year-over-year % change "
-                + "(YearOverYearPct is the headline inflation rate).",
+            ["vw_CpiMonthlyChange"] = "Monthly CPI with month-over-month and year-over-year % change.",
             ["vw_CpiAnnual"] = "The annual and semiannual averages BLS publishes, one row per year.",
             ["vw_Sofr"] = "Current SOFR daily rates. VolumeUsdBillions is in billions of dollars, not dollars.",
             ["vw_SofrAnnual"] = "SOFR summarised per calendar year.",
-            ["vw_LatestIndicator"] = "The single latest CPI row and the single latest SOFR row, side by side.",
             ["vw_CpiRevision"] = "Every vintage of a CPI period that has ever been revised.",
-            ["vw_SofrRevision"] = "Every vintage of a SOFR date that has ever been revised.",
-            ["vw_CollectionHealth"] = "Daily collector health per source, rolling 30 days."
+            ["vw_SofrRevision"] = "Every vintage of a SOFR date that has ever been revised."
         };
 
     public async Task<string> GetContextAsync(CancellationToken cancellationToken)
@@ -362,17 +359,6 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
     /// output. The reasoning behind each line is preserved in git history rather than in the prompt.
     /// </remarks>
     private const string Semantics = """
-        What the words in a question map to. None of these appear as a column name, and without the
-        mapping the question looks unanswerable and gets refused:
-        - "inflation", "inflation rate", "how much have prices risen" → YearOverYearPct in
-          analytics.vw_CpiMonthlyChange; month-over-month inflation is MonthOverMonthPct.
-        - "cost of living", "price level", "CPI" → IndexValue in analytics.vw_Cpi.
-        - "interest rate", "overnight rate", "borrowing rate", "repo rate" → RatePercent in
-          analytics.vw_Sofr.
-        - "trading volume", "how much was borrowed" → VolumeUsdBillions in analytics.vw_Sofr.
-        - "is collection working", "did anything fail", "data freshness" → analytics.vw_CollectionHealth.
-        - "latest", "most recent", "current" for one headline figure → analytics.vw_LatestIndicator.
-
         Column values — exact. A plausible-looking guess returns zero rows, which reads as "no data"
         when the data is there:
         - PeriodCode: 'M01'..'M12' = January..December, 'M13' = the annual average, 'S01'/'S02' =
@@ -380,30 +366,6 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         - PeriodType: 'Month', 'Annual' or 'Semiannual'. RateType: 'SOFR'. IndicatorCode (in
           vw_LatestIndicator): 'CPI' or 'SOFR'. SeriesCode: 'CUUR0000SA0' — the only CPI series, so
           you rarely need to filter on it.
-
-        Dates. Prefer ReferenceDate (CPI) and EffectiveDate (SOFR) over period codes; each period is
-        stored on its first day, so June 2025 CPI is ReferenceDate = '2025-06-01'. For a range use a
-        half-open window, >= the first day and < the first day of the next period — CPI stores one
-        row a month and SOFR one per business day, so BETWEEN with a guessed month-end silently
-        drops the 31st. "The average SOFR rate last month" is therefore SELECT AVG(RatePercent) FROM
-        analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to. Every view already
-        filters to the current vintage, so do not deduplicate revisions.
-
-        The dialect is Microsoft SQL Server (T-SQL), not MySQL or PostgreSQL: row limits are
-        TOP (n) and there is no LIMIT clause; date arithmetic is DATEADD/DATEDIFF, not INTERVAL;
-        group a date column by month with DATEFROMPARTS(YEAR(c), MONTH(c), 1), never by a string;
-        concatenate with + or CONCAT(), not ||. Resolve relative dates yourself and pass them as
-        parameters rather than nesting DATEADD around GETDATE().
-
-        Rules:
-        - Exactly one SELECT statement. No comments, no semicolons, no other statement type.
-        - Never a CTE: `WITH x AS (...) SELECT ...` is rejected before it runs. Nest it as a derived
-          table — `FROM (SELECT ...) AS x` — which says the same thing and is accepted. Window
-          functions (LAG, LEAD, ROW_NUMBER, SUM OVER) are fine anywhere, derived tables included.
-        - Use TOP (n) with ORDER BY when the question asks for one period ("which month", "when was
-          it highest") rather than returning every period and describing the winner.
-        - Never reference a table or view not listed above.
-        - If these views cannot answer the question, return "sql": null.
 
         Follow-ups. Earlier turns of this conversation appear above as user/assistant pairs, each
         assistant turn being the JSON you produced; turns older than those may be compressed into a
@@ -420,21 +382,6 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
           JSON shape is the only reply that can be read, so a request for clarification arrives as a
           malfunction rather than as the reasonable question it is.
 
-        Two datasets at once — "how do CPI and SOFR compare", "did they move together", "the
-        relation between inflation and interest rates in 2025" — is answerable and must not be
-        refused. Join them at month grain, which means averaging SOFR up to the month rather than
-        stretching CPI down to the day. Return both series side by side per period and let the
-        answer describe how they move; do not compute a correlation coefficient in SQL, and do not
-        assert that one causes the other.
-
-        How a series CHANGED — "which month rose the most", "when did CPI peak", "biggest jump",
-        "steepest fall" — needs each period compared with the one before it: LAG(x) OVER (ORDER BY
-        period). Build it in layers, innermost first: aggregate to the grain, LAG over that, order by
-        the change, take the top row. Return BOTH periods and BOTH values, not just the size of the
-        move. Order by ABS(...) for "the greatest change" in either direction, and by a signed
-        expression only when the question says rise or fall specifically. Drop rows where the
-        previous value is NULL — the first period in range has nothing to compare against.
-
         A question about prices, inflation, rates or collection health over any window is answerable
         by definition: how many rows come back is a fact about the data, not a reason to decline. Do
         not refuse because a range is recent and CPI is published in arrears, do not shorten a window
@@ -447,25 +394,25 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
         "What was CPI in June 2025?"
         {"sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate = @month",
          "parameters": {"@month": "2025-06-01"},
-         "explanation": "Reads the current monthly CPI index value for the given month from vw_Cpi.",
+         "explanation": "Reads the figures the question asked for.",
          "refusal": null}
 
         "What was the year over year inflation rate for the last 3 months?" (asked on 2025-09-14)
         {"sql": "SELECT ReferenceDate, YearOverYearPct FROM analytics.vw_CpiMonthlyChange WHERE ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate",
          "parameters": {"@from": "2025-06-01", "@to": "2025-09-01"},
-         "explanation": "Reads the year-over-year CPI change for each month in the requested window from vw_CpiMonthlyChange.",
+         "explanation": "Reads the figures the question asked for.",
          "refusal": null}
 
         "What is the relation between CPI and SOFR for the year 2025?"
         {"sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
          "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
-         "explanation": "Puts year-over-year CPI change beside the monthly average SOFR rate for each month of 2025, by averaging SOFR to month starts and joining on the CPI reference month.",
+         "explanation": "Reads the figures the question asked for.",
          "refusal": null}
 
         "Between which months is the rate of change of SOFR the greatest in 2025?"
         {"sql": "SELECT TOP (1) DATEADD(month, -1, m.MonthStart) AS FromMonth, m.MonthStart AS ToMonth, m.PrevAvgRate, m.AvgRate, m.AvgRate - m.PrevAvgRate AS ChangeInPercentagePoints FROM (SELECT MonthStart, AvgRate, LAG(AvgRate) OVER (ORDER BY MonthStart) AS PrevAvgRate FROM (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRate FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS monthly) AS m WHERE m.PrevAvgRate IS NOT NULL ORDER BY ABS(m.AvgRate - m.PrevAvgRate) DESC",
          "parameters": {"@from": "2025-01-01", "@to": "2026-01-01"},
-         "explanation": "Averages SOFR to each month of 2025, compares each month with the one before it, and returns the single largest move together with both months and both rates.",
+         "explanation": "Reads the figures the question asked for.",
          "refusal": null}
         """;
 }
