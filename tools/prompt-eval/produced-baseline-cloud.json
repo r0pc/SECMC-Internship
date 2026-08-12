@@ -1,0 +1,226 @@
+{
+  "explicit-month": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate = @month",
+    "parameters": {
+      "@month": "2025-06-01"
+    },
+    "explanation": "Reads the current monthly CPI index value for June 2025 from vw_Cpi.",
+    "refusal": null
+  },
+  "explicit-year-average": {
+    "sql": "SELECT AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+    "parameters": {
+      "@from": "2023-01-01",
+      "@to": "2024-01-01"
+    },
+    "explanation": "Reads the average SOFR rate for calendar year 2023 from vw_Sofr.",
+    "refusal": null
+  },
+  "inflation-wording": {
+    "sql": "SELECT TOP (1) ReferenceDate, YearOverYearPct FROM analytics.vw_CpiMonthlyChange WHERE ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate DESC",
+    "parameters": {
+      "@from": "2025-08-01",
+      "@to": "2026-08-01"
+    },
+    "explanation": "Reads the most recent year-over-year CPI change within the last year from vw_CpiMonthlyChange.",
+    "refusal": null
+  },
+  "interest-rate-wording": {
+    "sql": "SELECT AsOfDate, Value FROM analytics.vw_LatestIndicator WHERE IndicatorCode = 'SOFR'",
+    "parameters": {},
+    "explanation": "Reads the single latest SOFR rate from vw_LatestIndicator.",
+    "refusal": null
+  },
+  "volume-wording": {
+    "sql": "SELECT SUM(VolumeUsdBillions) AS TotalBorrowedUsdBillions FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+    "parameters": {
+      "@from": "2025-03-01",
+      "@to": "2025-04-01"
+    },
+    "explanation": "Sums the daily SOFR trading volume in billions of dollars for March 2025 from vw_Sofr.",
+    "refusal": null
+  },
+  "recent-window-not-refused": {
+    "sql": "SELECT ReferenceDate, YearOverYearPct FROM analytics.vw_CpiMonthlyChange WHERE ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate",
+    "parameters": {
+      "@from": "2026-05-01",
+      "@to": "2026-08-01"
+    },
+    "explanation": "Reads the year-over-year CPI change for each of the last three months from vw_CpiMonthlyChange.",
+    "refusal": null
+  },
+  "cross-dataset": {
+    "sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
+    "parameters": {
+      "@from": "2025-01-01",
+      "@to": "2026-01-01"
+    },
+    "explanation": "Puts year-over-year CPI change beside the monthly average SOFR rate for each month of 2025, by averaging SOFR to month starts and joining on the CPI reference month.",
+    "refusal": null
+  },
+  "largest-change": {
+    "sql": "SELECT TOP (1) DATEADD(month, -1, m.MonthStart) AS FromMonth, m.MonthStart AS ToMonth, m.PrevAvgRate, m.AvgRate, m.AvgRate - m.PrevAvgRate AS ChangeInPercentagePoints FROM (SELECT MonthStart, AvgRate, LAG(AvgRate) OVER (ORDER BY MonthStart) AS PrevAvgRate FROM (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRate FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS monthly) AS m WHERE m.PrevAvgRate IS NOT NULL ORDER BY ABS(m.AvgRate - m.PrevAvgRate) DESC",
+    "parameters": {
+      "@from": "2025-01-01",
+      "@to": "2026-01-01"
+    },
+    "explanation": "Averages SOFR to each month of 2025, compares each month with the one before it, and returns the single largest move together with both months and both rates.",
+    "refusal": null
+  },
+  "peak": {
+    "sql": "SELECT TOP (1) ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate >= @from AND ReferenceDate < @to ORDER BY IndexValue DESC",
+    "parameters": {
+      "@from": "2024-01-01",
+      "@to": "2025-01-01"
+    },
+    "explanation": "Reads the monthly CPI index values for 2024 from vw_Cpi and returns the month with the highest index value.",
+    "refusal": null
+  },
+  "annual-average": {
+    "sql": "SELECT ReferenceYear, AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+    "parameters": {
+      "@year": 2022
+    },
+    "explanation": "Reads the annual average CPI value for 2022 from vw_CpiAnnual.",
+    "refusal": null
+  },
+  "collection-health": {
+    "sql": "SELECT SourceCode, CollectionDate, Attempts, Failures, LastStatus FROM analytics.vw_CollectionHealth WHERE CollectionDate >= @from AND CollectionDate < @to AND Failures > 0 ORDER BY CollectionDate, SourceCode",
+    "parameters": {
+      "@from": "2026-08-05",
+      "@to": "2026-08-12"
+    },
+    "explanation": "Reads collection health for the past 7 days ending today and returns only sources with at least one failure.",
+    "refusal": null
+  },
+  "latest-figure": {
+    "sql": "SELECT TOP (1) ReferenceDate, IndexValue FROM analytics.vw_Cpi ORDER BY ReferenceDate DESC",
+    "parameters": {},
+    "explanation": "Reads the most recent monthly CPI index value from vw_Cpi, ordered by reference date descending.",
+    "refusal": null
+  },
+  "half-open-range": {
+    "sql": "SELECT AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+    "parameters": {
+      "@from": "2025-01-01",
+      "@to": "2025-02-01"
+    },
+    "explanation": "Reads the average SOFR rate for January 2025 from vw_Sofr.",
+    "refusal": null
+  },
+  "unanswerable-subject": {
+    "sql": null,
+    "parameters": {},
+    "explanation": null,
+    "refusal": "unanswerable"
+  },
+  "about-cpi": {
+    "sql": null,
+    "parameters": {},
+    "explanation": null,
+    "refusal": "about_cpi"
+  },
+  "follow-up-referent": {
+    "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+    "parameters": {
+      "@year": 2021
+    },
+    "explanation": "Reads the annual average CPI for 2021 from vw_CpiAnnual, following up on the previous question about 2022.",
+    "refusal": null
+  },
+  "parameters-not-literals": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate = @month",
+    "parameters": {
+      "@month": "2024-03-01"
+    },
+    "explanation": "Reads the current monthly CPI index value for March 2024 from vw_Cpi.",
+    "refusal": null
+  },
+  "about-platform": {
+    "sql": null,
+    "parameters": {},
+    "explanation": null,
+    "refusal": "about_platform"
+  },
+  "not-a-data-question": {
+    "sql": null,
+    "parameters": {},
+    "explanation": null,
+    "refusal": "not_a_data_question"
+  },
+  "semiannual-code": {
+    "sql": "SELECT AVG(IndexValue) AS AvgCpi FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate >= @from AND ReferenceDate < @to",
+    "parameters": {
+      "@from": "2024-01-01",
+      "@to": "2024-07-01"
+    },
+    "explanation": "Averages the monthly CPI index values for January through June 2024 from vw_Cpi.",
+    "refusal": null
+  },
+  "m13-not-month": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Annual' AND ReferenceYear = @year",
+    "parameters": {
+      "@year": 2023
+    },
+    "explanation": "Reads the annual average CPI index value for 2023 from vw_Cpi.",
+    "refusal": null
+  },
+  "no-dedup": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate",
+    "parameters": {
+      "@from": "2024-01-01",
+      "@to": "2025-01-01"
+    },
+    "explanation": "Reads the monthly CPI index value for each month of 2024 from vw_Cpi.",
+    "refusal": null
+  },
+  "revision-history": {
+    "sql": "SELECT ReferenceDate, RevisionNumber, IndexValue, CollectedAtPkt FROM analytics.vw_CpiRevision WHERE ReferenceDate = @month ORDER BY RevisionNumber",
+    "parameters": {
+      "@month": "2025-06-01"
+    },
+    "explanation": "Reads all revision vintages for the June 2025 CPI period from vw_CpiRevision to see if it has been revised.",
+    "refusal": null
+  },
+  "rolling-week": {
+    "sql": "SELECT AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+    "parameters": {
+      "@from": "2026-08-05",
+      "@to": "2026-08-12"
+    },
+    "explanation": "Computes the average SOFR rate over the 7 days ending today (2026-08-11), using a half-open window from 2026-08-05 to 2026-08-12.",
+    "refusal": null
+  },
+  "year-to-date": {
+    "sql": "SELECT AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
+    "parameters": {
+      "@from": "2026-01-01",
+      "@to": "2026-08-11"
+    },
+    "explanation": "Computes the average SOFR rate from the start of the current year through today by averaging RatePercent in vw_Sofr over that date range.",
+    "refusal": null
+  },
+  "follow-up-two-deep": {
+    "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
+    "parameters": {
+      "@year": 2020
+    }
+  },
+  "follow-up-new-subject": {
+    "sql": "SELECT AvgRatePercent FROM analytics.vw_SofrAnnual WHERE CalendarYear = @year",
+    "parameters": {
+      "@year": 2023
+    },
+    "explanation": "Reads the average SOFR rate for the given calendar year from vw_SofrAnnual.",
+    "refusal": null
+  },
+  "follow-up-unresolvable": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate >= @from AND ReferenceDate < @to ORDER BY ReferenceDate",
+    "parameters": {
+      "@from": "2024-01-01",
+      "@to": "2025-01-01"
+    },
+    "explanation": "Reads the current monthly CPI index values for each month of 2024 from vw_Cpi, following up on the previous year's query.",
+    "refusal": null
+  }
+}

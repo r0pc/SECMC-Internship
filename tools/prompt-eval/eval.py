@@ -74,7 +74,13 @@ def shape(override: Path | None = None) -> str:
     if override:
         return override.read_text(encoding="utf-8")
     source = (AI / "ChatCompletionsNlToSqlClient.cs").read_text(encoding="utf-8")
-    return _raw_string(source, "Respond with JSON only", '""" + schemaContext')
+
+    # Anchored on the declaration, not on the first line of content. `_raw_string` drops the line
+    # its marker lands on, because for `private const string Semantics = """` that line is the
+    # declaration — so starting at "Respond with JSON only" silently ate exactly that instruction,
+    # and every run before this one measured a prompt that never told the model to answer in JSON.
+    # The cases still passed, because both providers are also asked for JSON by response_format.
+    return _raw_string(source, 'var system = """', '""" + schemaContext')
 
 
 def views(override: Path | None = None) -> str:
@@ -387,12 +393,19 @@ def main() -> int:
             produced[case["id"]] = {"unparseable": reply["content"]}
 
         problems = check(case, spec.get("global", {}), reply)
+
+        # Per case, not just as a total. The first question of a run pays to read the whole prompt
+        # and the rest reuse its prefix, so an average hides a 20:1 difference between them — and
+        # that difference is the entire question of what a shorter prompt is worth locally.
+        timing = (f"  {reply['prefill_ms'] / 1000:5.1f}s read + {reply['generate_ms'] / 1000:5.1f}s gen"
+                  if reply.get("prefill_ms") else "")
+
         if problems:
             failed.append((case, problems))
-            print(f"  FAIL  {case['id']}", flush=True)
+            print(f"  FAIL  {case['id']}{timing}", flush=True)
         else:
             passed += 1
-            print(f"  pass  {case['id']}", flush=True)
+            print(f"  pass  {case['id']}{timing}", flush=True)
 
         if wanted and len(wanted) == 1:
             print("\n" + reply["content"])

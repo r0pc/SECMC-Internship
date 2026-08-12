@@ -181,8 +181,9 @@
     },
     {
       "id": "semiannual-code",
-      "guards": "'S01'/'S02' and FirstHalfValue exist. A guessed code returns nothing, which reads as no data.",
-      "question": "what was the average cpi for the first half of 2024",
+      "//": "First worded 'the average cpi for the first half of 2024', which deepseek-v4-flash answered by averaging the six monthly index values. That is a correct answer to that question - BLS's published semiannual figure is a different correct answer - so the case was punishing a good statement rather than testing the value list. Naming the published series is what makes 'S01'/FirstHalfValue the only right reading.",
+      "guards": "'S01'/'S02' and FirstHalfValue exist as published figures. A guessed code returns nothing, which reads as no data.",
+      "question": "what is the published semiannual cpi figure for the first half of 2024",
       "expect": {
         "views": ["analytics.vw_CpiAnnual", "analytics.vw_Cpi"],
         "viewsAnyOf": true,

@@ -1,0 +1,7 @@
+28 case(s) against local qwen3.5:4b
+system prompt: 12327 chars  [shipping prompt]
+
+  pass  explicit-month   81.2s read +  25.4s gen
+  pass  explicit-year-average   76.5s read +  25.0s gen
+  pass  inflation-wording   74.8s read +  35.9s gen
+  pass  interest-rate-wording   73.9s read +  23.9s gen
