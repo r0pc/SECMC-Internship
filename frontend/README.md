@@ -93,7 +93,4 @@ dead endpoint costs its own panel and not the page.
 
 - Authentication (FR-9). Every API endpoint is anonymous, which is why `/sources` is
   read-only here even though the API accepts `PATCH` on a source's polling settings.
-- The AI query assistant (FR-13 – FR-16).
-- A `notFound()` inside a streamed response returns HTTP 200 with the not-found UI — Next's
-  documented behaviour when a `loading.js` boundary is in play. Fine for humans, wrong for
-  uptime monitoring; revisit if that matters.
+
