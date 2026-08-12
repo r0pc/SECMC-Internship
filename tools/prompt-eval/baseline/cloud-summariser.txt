@@ -1,0 +1,15 @@
+10 case(s) against cloud deepseek-v4-flash
+summariser system prompt: 1797 chars (shipping)
+
+  pass  states-the-figure
+  pass  empty-outside-coverage
+  pass  empty-inside-coverage
+  pass  period-mismatch-is-our-fault
+  pass  follow-up-answers-the-query
+  pass  described-long-result
+  pass  empty-from-a-filter
+  pass  cross-dataset-no-causation
+  pass  volume-is-in-billions
+  pass  wide-result-stays-prose
+
+10/10 passed

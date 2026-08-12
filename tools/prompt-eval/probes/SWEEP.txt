@@ -1,0 +1,315 @@
+P1    --semantics  27 passed / 1 failed / 0 errored
+P2    --semantics  27 passed / 1 failed / 0 errored
+P3    --semantics  26 passed / 2 failed / 0 errored
+P4    --semantics  27 passed / 1 failed / 0 errored
+P5    --semantics  27 passed / 1 failed / 0 errored
+P6    --semantics  27 passed / 1 failed / 0 errored
+P7    --semantics  27 passed / 1 failed / 0 errored
+P8    --semantics  27 passed / 1 failed / 0 errored
+P9    --semantics  27 passed / 1 failed / 0 errored
+P10   --semantics  26 passed / 2 failed / 0 errored
+P11   --semantics  27 passed / 1 failed / 0 errored
+P12   --views      27 passed / 1 failed / 0 errored
+P13   --shape      26 passed / 2 failed / 0 errored
+P14   --shape      27 passed / 1 failed / 0 errored
+P16   --semantics  27 passed / 1 failed / 0 errored
+
+diffs against the baseline (statement changes, not just pass counts):
+=== P1
+
+interest-rate-wording
+  statement changed
+
+collection-health
+  statement changed
+
+follow-up-unresolvable
+  statement changed
+    views ['analytics.vw_cpimonthlychange'] → ['analytics.vw_cpi']
+
+3 of 28 shared case(s) changed
+=== P2
+
+inflation-wording
+  statement changed
+    LOST TOP
+
+cross-dataset
+  statement changed
+    views ['analytics.vw_cpimonthlychange', 'analytics.vw_sofr'] → ['analytics.vw_cpi', 'analytics.vw_sofr']
+
+largest-change
+  statement changed
+    LOST AVG, GROUP BY, DATEFROMPARTS, IS NOT NULL
+    gained JOIN
+    parameters {'@from': '2025-01-01', '@to': '2026-01-01'} → {'@start': '2025-01-01', '@end': '2026-01-01'}
+
+collection-health
+  statement changed
+
+m13-not-month
+  statement changed
+    parameters {'@year': '2023-01-01'} → {'@year': 2023}
+
+revision-history
+  statement changed
+
+year-to-date
+  statement changed
+
+follow-up-unresolvable
+  statement changed
+    views ['analytics.vw_cpimonthlychange'] → ['analytics.vw_cpi']
+    LOST ORDER BY
+    parameters {'@from': '2024-01-01', '@to': '2025-01-01'} → {'@month': '2025-06-01'}
+
+8 of 28 shared case(s) changed
+=== P3
+
+explicit-month
+  statement changed
+
+interest-rate-wording
+  statement changed
+    views ['analytics.vw_latestindicator'] → ['analytics.vw_sofr']
+    gained TOP, ORDER BY
+
+recent-window-not-refused
+  statement changed
+    gained TOP
+
+peak
+  statement changed
+
+parameters-not-literals
+  statement changed
+
+m13-not-month
+  statement changed
+    gained ORDER BY
+    parameters {'@year': '2023-01-01'} → {'@from': '2023-01-01', '@to': '2024-01-01'}
+
+no-dedup
+  statement changed
+
+revision-history
+  statement changed
+    parameters {'@month': '2025-06-01'} → {'@refDate': '2025-06-01'}
+
+year-to-date
+  statement changed
+    parameters {'@from': '2026-01-01', '@to': '2026-08-11'} → {'@from': '2026-01-01', '@to': '2027-01-01'}
+
+follow-up-unresolvable
+  statement changed
+    views ['analytics.vw_cpimonthlychange'] → ['analytics.vw_cpimonthlychange', 'analytics.vw_sofr']
+    gained AVG, JOIN, GROUP BY, DATEFROMPARTS
+
+10 of 28 shared case(s) changed
+=== P4
+
+revision-history
+  statement changed
+
+year-to-date
+  statement changed
+
+follow-up-unresolvable
+  statement changed
+    views ['analytics.vw_cpimonthlychange'] → ['analytics.vw_cpi']
+
+3 of 28 shared case(s) changed
+=== P5
+
+interest-rate-wording
+  statement changed
+
+latest-figure
+  statement changed
+
+revision-history
+  statement changed
+
+rolling-week
+  statement changed
+
+follow-up-unresolvable
+  same SQL, parameters {'@from': '2024-01-01', '@to': '2025-01-01'} → {'@from': '2024-06-01', '@to': '2024-09-01'}
+
+5 of 28 shared case(s) changed
+=== P6
+
+collection-health
+  statement changed
+
+revision-history
+  statement changed
+
+year-to-date
+  statement changed
+
+3 of 28 shared case(s) changed
+=== P7
+
+year-to-date
+  statement changed
+
+follow-up-unresolvable
+  same SQL, parameters {'@from': '2024-01-01', '@to': '2025-01-01'} → {'@from': '2024-06-01', '@to': '2024-09-01'}
+
+2 of 28 shared case(s) changed
+=== P8
+
+interest-rate-wording
+  statement changed
+
+collection-health
+  statement changed
+
+semiannual-code
+  statement changed
+    views ['analytics.vw_cpiannual'] → ['analytics.vw_cpi']
+
+rolling-week
+  statement changed
+
+4 of 28 shared case(s) changed
+=== P9
+
+volume-wording
+  statement changed
+    gained ORDER BY
+
+collection-health
+  statement changed
+
+revision-history
+  statement changed
+
+rolling-week
+  statement changed
+    parameters {'@from': '2026-08-05', '@to': '2026-08-12'} → {'@from': '2026-08-05', '@to': '2026-08-11'}
+
+year-to-date
+  statement changed
+
+5 of 28 shared case(s) changed
+=== P10
+
+interest-rate-wording
+  statement changed
+
+m13-not-month
+  statement changed
+    gained ORDER BY
+    parameters {'@year': '2023-01-01'} → {'@from': '2023-01-01', '@to': '2024-01-01'}
+
+revision-history
+  statement changed
+
+rolling-week
+  statement changed
+
+year-to-date
+  statement changed
+
+5 of 28 shared case(s) changed
+=== P11
+
+inflation-wording
+  statement changed
+    LOST TOP
+
+interest-rate-wording
+  statement changed
+    views ['analytics.vw_latestindicator'] → ['analytics.vw_sofr']
+    gained TOP, ORDER BY
+
+latest-figure
+  statement changed
+
+semiannual-code
+  statement changed
+    views ['analytics.vw_cpiannual'] → ['analytics.vw_cpi']
+
+revision-history
+  statement changed
+
+5 of 28 shared case(s) changed
+=== P12
+
+interest-rate-wording
+  statement changed
+    views ['analytics.vw_latestindicator'] → ['analytics.vw_sofr']
+    gained TOP, ORDER BY
+
+collection-health
+  statement changed
+
+latest-figure
+  statement changed
+
+m13-not-month
+  statement changed
+    parameters {'@year': '2023-01-01'} → {'@year': 2023}
+
+year-to-date
+  statement changed
+
+5 of 28 shared case(s) changed
+=== P13
+
+interest-rate-wording
+  statement changed
+    gained TOP
+
+volume-wording
+  statement changed
+
+collection-health
+  statement changed
+
+m13-not-month
+  statement changed
+    gained ORDER BY
+    parameters {'@year': '2023-01-01'} → {'@from': '2023-01-01', '@to': '2024-01-01'}
+
+year-to-date
+  statement changed
+
+5 of 28 shared case(s) changed
+=== P14
+
+interest-rate-wording
+  statement changed
+
+m13-not-month
+  statement changed
+    views ['analytics.vw_cpi'] → ['analytics.vw_cpiannual']
+    parameters {'@year': '2023-01-01'} → {'@year': 2023}
+
+follow-up-unresolvable
+  statement changed
+    views ['analytics.vw_cpimonthlychange'] → ['analytics.vw_cpi']
+
+3 of 28 shared case(s) changed
+=== P16
+
+inflation-wording
+  statement changed
+    LOST TOP
+
+interest-rate-wording
+  statement changed
+
+semiannual-code
+  statement changed
+    views ['analytics.vw_cpiannual'] → ['analytics.vw_cpi']
+
+year-to-date
+  statement changed
+
+follow-up-unresolvable
+  same SQL, parameters {'@from': '2024-01-01', '@to': '2025-01-01'} → {'@from': '2024-06-01', '@to': '2024-09-01'}
+
+5 of 28 shared case(s) changed

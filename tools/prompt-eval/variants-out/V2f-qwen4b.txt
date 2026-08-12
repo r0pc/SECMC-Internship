@@ -1,0 +1,78 @@
+28 case(s) against local qwen3.5:4b
+system prompt: 6217 chars  [semantics from variants\V2f-semantics.txt; shape from variants\V2f-shape.txt; views from variants\V2f-views.txt]
+
+  pass  explicit-month  109.7s read +  25.8s gen
+  pass  explicit-year-average   60.8s read +  18.4s gen
+  pass  inflation-wording   67.5s read +  29.5s gen
+  pass  interest-rate-wording   60.7s read +  17.7s gen
+  FAIL  volume-wording   62.7s read +  32.7s gen
+  pass  recent-window-not-refused   63.9s read +  29.6s gen
+  pass  cross-dataset   64.0s read +  57.3s gen
+  pass  largest-change   63.6s read +  72.2s gen
+  FAIL  peak   63.3s read +  22.3s gen
+  pass  annual-average   65.7s read +  18.1s gen
+  pass  collection-health   60.5s read +  15.4s gen
+  pass  latest-figure   59.3s read +  14.5s gen
+  FAIL  half-open-range   60.7s read +  28.2s gen
+  FAIL  unanswerable-subject   59.6s read +   7.3s gen
+  pass  about-cpi   59.4s read +   7.7s gen
+  FAIL  follow-up-referent   73.1s read +  23.2s gen
+  pass  parameters-not-literals   72.2s read +  36.5s gen
+  pass  about-platform   78.4s read +  25.9s gen
+  pass  not-a-data-question   70.9s read +  14.1s gen
+  FAIL  semiannual-code   72.2s read +  22.1s gen
+  pass  m13-not-month   71.9s read +  20.1s gen
+  pass  no-dedup   68.2s read +  23.5s gen
+  FAIL  revision-history   74.9s read +  28.3s gen
+  FAIL  rolling-week  1862.9s read +  34.6s gen
+  FAIL  year-to-date   72.2s read +  23.7s gen
+  pass  follow-up-two-deep  466.5s read +  18.6s gen
+  pass  follow-up-new-subject   70.4s read +  18.7s gen
+  FAIL  follow-up-unresolvable   66.6s read +  10.0s gen
+
+18 passed / 10 failed / 0 errored  (of 28 cases)
+cost: 51,824 prompt tokens + 2,327 completion = 54,151 total  (1,850 prompt per case)
+time: 4101.7s reading the prompt + 696.2s generating  (146,489 ms prefill per case)
+statements written to produced-V2f-qwen4b.json — `python diff.py <baseline> produced-V2f-qwen4b.json`
+
+--- FAIL volume-wording: 'how much was borrowed overnight in march 2025'
+    guards: Term mapping: 'how much was borrowed' is VolumeUsdBillions, and it is in billions.
+    - date literal inline instead of bound as a parameter: found "'2025-03-01"
+
+--- FAIL peak: 'which month had the highest cpi in 2024'
+    guards: 'When was it highest' takes TOP with ORDER BY rather than returning every period.
+    - expected to contain 'TOP'
+
+--- FAIL half-open-range: 'what was the average sofr rate in january 2025'
+    guards: A range is half-open; BETWEEN with a guessed month-end drops the 31st on daily SOFR.
+    - date literal inline instead of bound as a parameter: found "'2025-01-01"
+
+--- FAIL unanswerable-subject: 'what is the current unemployment rate in the united states'
+    guards: 'Unanswerable' is for subjects these views do not hold — not for windows that come back short.
+    - expected refusal 'unanswerable', got 'not_a_data_question'
+
+--- FAIL follow-up-referent: 'and what about the year before that'
+    guards: A follow-up resolves against the prior turn's bound parameters, not its answer.
+    - expected a parameter containing '2021', bound {'@year': None}
+
+--- FAIL semiannual-code: 'what is the published semiannual cpi figure for the first half of 2024'
+    guards: 'S01'/'S02' and FirstHalfValue exist as published figures. A guessed code returns nothing, which reads as no data.
+    - expected at least one of ['FirstHalfValue', 'S01']
+
+--- FAIL revision-history: 'has the june 2025 cpi figure been revised'
+    guards: The revision views and their notes. 'Has it been revised' is the one question the current-vintage views cannot answer.
+    - expected a parameter containing '2025-06-01', bound {'@revision_count': None}
+
+--- FAIL rolling-week: 'what was the average sofr rate this week'
+    guards: Weeks are rolling, not calendar. Asked on a Tuesday, a calendar week starts 2026-08-10 and the rolling one starts 2026-08-05.
+    - expected a parameter containing '2026-08-05', bound {'@from': '2026-08-04', '@to': '2026-08-11'}
+
+--- FAIL year-to-date: 'what is the average sofr rate year to date'
+    guards: Relative-date resolution against today, for a phrase the temporal block names explicitly.
+    - expected to read ['analytics.vw_Sofr'], read ['analytics.vw_sofrannual']
+    - expected a parameter containing '2026-01-01', bound {'@year': 2026}
+
+--- FAIL follow-up-unresolvable: 'and what about the year before that'
+    guards: A referent that is not in the conversation at all is a refusal, not a guessed period.
+    - expected refusal 'unanswerable', got 'about_platform'
+EXIT=1

@@ -1,0 +1,27 @@
+{
+  "explicit-month": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate = @month",
+    "parameters": {
+      "@month": "2025-06-01"
+    },
+    "explanation": "Retrieves the current CPI index value for June 2025 from vw_Cpi.",
+    "refusal": null
+  },
+  "inflation-wording": {
+    "sql": "SELECT YearOverYearPct FROM analytics.vw_CpiMonthlyChange WHERE ReferenceDate >= DATEADD(month, -12, @today) AND ReferenceDate < @next_month ORDER BY ReferenceDate DESC",
+    "parameters": {
+      "@today": "2026-08-11",
+      "@next_month": "2027-09-01"
+    },
+    "explanation": "Retrieves the year-over-year inflation rate (headline CPI change) for each month in the last 12 months from vw_CpiMonthlyChange.",
+    "refusal": null
+  },
+  "peak": {
+    "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceYear = @year ORDER BY IndexValue DESC",
+    "parameters": {
+      "@year": 2024
+    },
+    "explanation": "Reads the monthly CPI index values for each month in 2024 and returns the row with the highest value.",
+    "refusal": null
+  }
+}

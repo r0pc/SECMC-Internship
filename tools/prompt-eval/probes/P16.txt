@@ -1,0 +1,39 @@
+28 case(s) against cloud deepseek-v4-flash at https://api.deepseek.com/
+system prompt: 11733 chars  [semantics from variants\P16.txt]
+
+  pass  explicit-month
+  pass  explicit-year-average
+  pass  inflation-wording
+  pass  interest-rate-wording
+  pass  volume-wording
+  pass  recent-window-not-refused
+  pass  cross-dataset
+  pass  largest-change
+  pass  peak
+  pass  annual-average
+  pass  collection-health
+  pass  latest-figure
+  pass  half-open-range
+  pass  unanswerable-subject
+  pass  about-cpi
+  pass  follow-up-referent
+  pass  parameters-not-literals
+  pass  about-platform
+  pass  not-a-data-question
+  pass  semiannual-code
+  pass  m13-not-month
+  pass  no-dedup
+  pass  revision-history
+  pass  rolling-week
+  pass  year-to-date
+  pass  follow-up-two-deep
+  pass  follow-up-new-subject
+  FAIL  follow-up-unresolvable
+
+27 passed / 1 failed / 0 errored  (of 28 cases)
+cost: 87,159 prompt tokens, 84,224 of them cached + 2,400 completion = 89,559 total  (3,112 prompt per case)
+statements written to produced-P16.json — `python diff.py <baseline> produced-P16.json`
+
+--- FAIL follow-up-unresolvable: 'and what about the year before that'
+    guards: A referent that is not in the conversation at all is a refusal, not a guessed period.
+    - expected a refusal (unanswerable), got SQL

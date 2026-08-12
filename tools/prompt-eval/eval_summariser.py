@@ -25,8 +25,11 @@ HERE = Path(__file__).resolve().parent
 AI = HERE.parents[1] / "backend" / "src" / "DataIntelligence.Infrastructure" / "Ai"
 
 
-def system_prompt() -> str:
+def system_prompt(override: Path | None = None) -> str:
     """The summariser's `const string system`, reassembled from the C# string literals."""
+    if override:
+        return override.read_text(encoding="utf-8")
+
     source = (AI / "ChatCompletionsNlToSqlClient.cs").read_text(encoding="utf-8")
     start = source.index('"You answer questions about')
     end = source.index("var user =", start)
@@ -110,6 +113,13 @@ def check(case: dict, global_rules: dict, answer: str) -> list[str]:
     if any_of and not any(f.lower() in lowered for f in any_of):
         problems.append(f"expected at least one of {any_of}")
 
+    # Length is the one assertion here that is about cost rather than truth. Completion tokens bill
+    # at several times input and never cache, so a five-sentence answer to "none did" is the most
+    # expensive kind of wrong: correct, and paid for by the word.
+    limit = expect.get("maxChars") or global_rules.get("maxChars")
+    if limit and len(answer.strip()) > limit:
+        problems.append(f"too long: {len(answer.strip())} chars, limit {limit}")
+
     return problems
 
 
@@ -121,6 +131,8 @@ def main() -> int:
     parser.add_argument("--cloud", action="store_true")
     parser.add_argument("--reasoning", default="none", help="cloud reasoning_effort; '' to omit")
     parser.add_argument("--case")
+    parser.add_argument("--system", type=Path,
+                        help="file replacing the summariser's system prompt, for A/B-ing a trim")
     parser.add_argument("--show", action="store_true", help="print each answer in full")
     parser.add_argument("--views-only", action="store_true",
                         help="candidate: name the views instead of echoing the statement")
@@ -132,9 +144,10 @@ def main() -> int:
         print(f"no case with id {args.case!r}", file=sys.stderr)
         return 2
 
-    system = system_prompt()
+    system = system_prompt(args.system)
     print(f"{len(cases)} case(s) against {'cloud ' if args.cloud else 'local '}{args.model}")
-    print(f"summariser system prompt: {len(system)} chars\n", flush=True)
+    print(f"summariser system prompt: {len(system)} chars"
+          + (f" (from {args.system})" if args.system else " (shipping)") + "\n", flush=True)
 
     passed, failed = 0, []
     for case in cases:

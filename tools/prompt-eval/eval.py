@@ -16,15 +16,19 @@ Usage
     python eval.py                             # local Ollama, default model
     python eval.py --model qwen3.5:2b          # a different local model
     python eval.py --semantics trimmed.txt     # A/B a cut-down rules block
+    python eval.py --shape s.txt --views v.txt # the other two halves of the prompt
     python eval.py --cloud                     # a hosted OpenAI-shaped gateway (see --help)
     python eval.py --case explicit-month       # one case, printing the full SQL
+    python eval.py --case a,b,c --label p2     # an ablation probe, dumped under its own name
 
 Trimming workflow
 -----------------
-1. `python eval.py > before.txt` to get a baseline. Fix any case that already fails, or delete it —
+1. `python eval.py --label baseline > baseline.txt`. Fix any case that already fails, or delete it —
    a suite that is red before you start cannot tell you anything about your change.
-2. Copy the Semantics block out of SchemaContextProvider.cs into a file, cut one rule.
-3. `python eval.py --semantics that-file.txt`. Same passes? The rule is not paying for itself.
+2. Copy the block you want to cut out of the C# source into a file and cut one rule.
+3. `python eval.py --semantics that-file.txt --label p7`. Same passes? Then
+   `python diff.py produced-baseline.json produced-p7.json` — because a cut that leaves the pass
+   count alone can still have made every statement worse, and pass/fail cannot see that.
 4. Re-run against BOTH models before believing it. A rule a strong model no longer needs may still
    be the only thing keeping a small one honest.
 """
@@ -43,6 +47,12 @@ REPO = Path(__file__).resolve().parents[2]
 AI = REPO / "backend" / "src" / "DataIntelligence.Infrastructure" / "Ai"
 HERE = Path(__file__).resolve().parent
 
+# The `guards` lines and the model's own prose contain em-dashes and arrows, and a Windows console —
+# or a file this output is redirected into — is cp1252 by default. That is why the committed
+# baseline shows replacement characters where its dashes should be. Reports kept as evidence should
+# be readable.
+sys.stdout.reconfigure(encoding="utf-8")
+
 
 # --------------------------------------------------------------- building the prompt
 
@@ -53,23 +63,43 @@ def _raw_string(source: str, start: str, end: str) -> str:
     return textwrap.dedent("\n".join(body.splitlines()[1:]))
 
 
-def semantics(override: Path | None) -> str:
+def semantics(override: Path | None = None) -> str:
     if override:
         return override.read_text(encoding="utf-8")
     source = (AI / "SchemaContextProvider.cs").read_text(encoding="utf-8")
     return _raw_string(source, 'private const string Semantics = """', '""";')
 
 
-def shape() -> str:
+def shape(override: Path | None = None) -> str:
+    if override:
+        return override.read_text(encoding="utf-8")
     source = (AI / "ChatCompletionsNlToSqlClient.cs").read_text(encoding="utf-8")
-    return _raw_string(source, "Respond with JSON only", '""" + schemaContext')
+
+    # Anchored on the declaration, not on the first line of content. `_raw_string` drops the line
+    # its marker lands on, because for `private const string Semantics = """` that line is the
+    # declaration — so starting at "Respond with JSON only" silently ate exactly that instruction,
+    # and every run before this one measured a prompt that never told the model to answer in JSON.
+    # The cases still passed, because both providers are also asked for JSON by response_format.
+    return _raw_string(source, 'var system = """', '""" + schemaContext')
 
 
-def system_prompt(today: str, semantics_text: str) -> str:
-    """The prompt as ChatCompletionsNlToSqlClient assembles it: contract, then schema, date last."""
-    views = (HERE / "schema-fixture.txt").read_text(encoding="utf-8")
+def views(override: Path | None = None) -> str:
+    return (override or HERE / "schema-fixture.txt").read_text(encoding="utf-8")
+
+
+def system_prompt(today: str, semantics_text: str,
+                  shape_text: str | None = None, views_text: str | None = None) -> str:
+    """
+    The prompt as ChatCompletionsNlToSqlClient assembles it: contract, then schema, date last.
+
+    All three of its parts are overridable, because all three are worth trimming and only one of
+    them lives in a file this harness owns. `shape_text` and `views_text` default to the shipping
+    versions so a caller that only wants to A/B the rules block passes one argument as before.
+    """
     temporal = (HERE / "temporal-fixture.txt").read_text(encoding="utf-8").replace("{TODAY}", today)
-    return shape() + "\n\n" + views + "\n" + semantics_text + temporal
+    return ((shape_text if shape_text is not None else shape()) + "\n\n"
+            + (views_text if views_text is not None else views()) + "\n"
+            + semantics_text + temporal)
 
 
 def replay(history: list[dict]) -> list[dict]:
@@ -96,9 +126,16 @@ def ask_ollama(system: str, messages: list[dict], model: str, host: str) -> dict
         headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=1800) as response:
         parsed = json.loads(response.read())
+
+    # Ollama reports its durations in nanoseconds, split into loading the weights, reading the
+    # prompt, and generating. Reading the prompt is the part trimming changes, and on a CPU it is
+    # most of the wait — so it is the one payoff of a shorter prompt that is unambiguous and free
+    # to measure. Tokens alone cannot show it, since a cached prefix costs tokens and no time.
     return {"content": parsed.get("message", {}).get("content", ""),
             "prompt_tokens": parsed.get("prompt_eval_count"),
-            "completion_tokens": parsed.get("eval_count")}
+            "completion_tokens": parsed.get("eval_count"),
+            "prefill_ms": (parsed.get("prompt_eval_duration") or 0) / 1e6,
+            "generate_ms": (parsed.get("eval_duration") or 0) / 1e6}
 
 
 def ask_openai(system: str, messages: list[dict], model: str, base: str, key: str,
@@ -168,6 +205,14 @@ def check(case: dict, global_rules: dict, reply: dict) -> list[str]:
         if fragment.upper() in upper:
             failures.append(f"must not contain {fragment!r}")
 
+    # Patterns rather than fragments, for rules that forbid a shape rather than a word. The one
+    # that earns this is inline date literals: the contract says every literal the question supplies
+    # is bound as a parameter, and until now nothing checked it on any case, let alone all of them.
+    for name, pattern in (global_rules.get("absentPattern") or {}).items():
+        found = re.search(pattern, sql, re.IGNORECASE)
+        if found:
+            failures.append(f"{name}: found {found.group(0)!r}")
+
     for prefix in global_rules.get("notStartsWith", []):
         if upper.lstrip().startswith(prefix.upper()):
             failures.append(f"must not start with {prefix!r}")
@@ -181,6 +226,13 @@ def check(case: dict, global_rules: dict, reply: dict) -> list[str]:
     for fragment in expect.get("contains", []):
         if fragment.upper() not in upper:
             failures.append(f"expected to contain {fragment!r}")
+
+    # For questions with more than one right answer. "The first half of 2024" is FirstHalfValue on
+    # vw_CpiAnnual or PeriodCode 'S01' on vw_Cpi; both prove the model knew the value exists, which
+    # is the thing under test, and requiring one of them would fail a correct statement.
+    any_of = expect.get("containsAnyOf", [])
+    if any_of and not any(f.upper() in upper for f in any_of):
+        failures.append(f"expected at least one of {any_of}")
 
     wanted_views = expect.get("views", [])
     if wanted_views:
@@ -223,9 +275,15 @@ def main() -> int:
                              "ASSISTANT_API_KEY from the environment")
     parser.add_argument("--semantics", type=Path,
                         help="file replacing the Semantics block, for A/B-ing a trim")
+    parser.add_argument("--shape", type=Path,
+                        help="file replacing the JSON output-contract block")
+    parser.add_argument("--views", type=Path,
+                        help="file replacing the view list and its notes")
     parser.add_argument("--today", default="2026-08-11",
                         help="the date the prompt claims it is, so results stay reproducible")
-    parser.add_argument("--case", help="run one case by id and print the SQL it produced")
+    parser.add_argument("--case", help="comma-separated case ids; a single id also prints its SQL")
+    parser.add_argument("--label", help="names the statement dump produced-<label>.json, so an "
+                                        "ablation probe does not overwrite the baseline's")
     parser.add_argument("--reasoning", default="none",
                         help="cloud reasoning_effort; matches production. '' to omit")
     parser.add_argument("--i-know-this-costs", action="store_true",
@@ -233,12 +291,23 @@ def main() -> int:
     args = parser.parse_args()
 
     spec = json.loads((HERE / "cases.json").read_text(encoding="utf-8"))
-    cases = [c for c in spec["cases"] if not args.case or c["id"] == args.case]
-    if not cases:
-        print(f"no case with id {args.case!r}", file=sys.stderr)
-        return 2
 
-    system = system_prompt(args.today, semantics(args.semantics))
+    # A comma list rather than one id, because an ablation probe wants exactly the cases a block
+    # guards plus a few controls — running all 28 for each of fifteen probes is hours of CPU spent
+    # re-confirming the cases that cannot be affected.
+    wanted = [c.strip() for c in args.case.split(",") if c.strip()] if args.case else None
+    cases = [c for c in spec["cases"] if not wanted or c["id"] in wanted]
+
+    if wanted:
+        missing = [w for w in wanted if w not in {c["id"] for c in cases}]
+        if missing:
+            # Named and refused rather than silently skipped: a probe that quietly ran four cases
+            # instead of six would report a clean result for a block it never tested.
+            print(f"no case with id(s): {', '.join(missing)}", file=sys.stderr)
+            return 2
+
+    system = system_prompt(args.today, semantics(args.semantics),
+                           shape(args.shape), views(args.views))
 
     if args.cloud:
         base, key = os.environ.get("ASSISTANT_BASE_URL"), os.environ.get("ASSISTANT_API_KEY")
@@ -263,9 +332,13 @@ def main() -> int:
         target = f"local {args.model}"
         run = lambda msgs: ask_ollama(system, msgs, args.model, args.host)  # noqa: E731
 
+    overrides = [f"{name} from {path}" for name, path in
+                 (("semantics", args.semantics), ("shape", args.shape), ("views", args.views))
+                 if path]
+
     print(f"{len(cases)} case(s) against {target}")
     print(f"system prompt: {len(system)} chars"
-          + (f" (semantics from {args.semantics})" if args.semantics else "") + "\n")
+          + (f"  [{'; '.join(overrides)}]" if overrides else "  [shipping prompt]") + "\n")
 
     passed, failed, errored = 0, [], []
     consecutive_errors = 0
@@ -274,6 +347,7 @@ def main() -> int:
     # matters when the target is a metered gateway: sixteen cases each carrying the whole schema
     # prompt is not a free thing to run in a loop while bisecting a rule.
     prompt_total = completion_total = cached_total = 0
+    prefill_ms_total = generate_ms_total = 0.0
 
     # Every statement the run produced, so two runs can be diffed. Pass/fail alone hides the change
     # that matters most when trimming a rule: SQL that got worse but still satisfies the assertions.
@@ -310,6 +384,8 @@ def main() -> int:
         prompt_total += reply.get("prompt_tokens") or 0
         completion_total += reply.get("completion_tokens") or 0
         cached_total += reply.get("cached_tokens") or 0
+        prefill_ms_total += reply.get("prefill_ms") or 0.0
+        generate_ms_total += reply.get("generate_ms") or 0.0
 
         try:
             produced[case["id"]] = json.loads(reply["content"])
@@ -317,14 +393,21 @@ def main() -> int:
             produced[case["id"]] = {"unparseable": reply["content"]}
 
         problems = check(case, spec.get("global", {}), reply)
+
+        # Per case, not just as a total. The first question of a run pays to read the whole prompt
+        # and the rest reuse its prefix, so an average hides a 20:1 difference between them — and
+        # that difference is the entire question of what a shorter prompt is worth locally.
+        timing = (f"  {reply['prefill_ms'] / 1000:5.1f}s read + {reply['generate_ms'] / 1000:5.1f}s gen"
+                  if reply.get("prefill_ms") else "")
+
         if problems:
             failed.append((case, problems))
-            print(f"  FAIL  {case['id']}", flush=True)
+            print(f"  FAIL  {case['id']}{timing}", flush=True)
         else:
             passed += 1
-            print(f"  pass  {case['id']}", flush=True)
+            print(f"  pass  {case['id']}{timing}", flush=True)
 
-        if args.case:
+        if wanted and len(wanted) == 1:
             print("\n" + reply["content"])
 
     print(f"\n{passed} passed / {len(failed)} failed / {len(errored)} errored"
@@ -337,13 +420,24 @@ def main() -> int:
 
     if prompt_total:
         cached_note = f", {cached_total:,} of them cached" if cached_total else ""
+        answered = passed + len(failed)
         print(f"cost: {prompt_total:,} prompt tokens{cached_note} + {completion_total:,} completion "
-              f"= {prompt_total + completion_total:,} total")
+              f"= {prompt_total + completion_total:,} total"
+              + (f"  ({prompt_total // answered:,} prompt per case)" if answered else ""))
 
-    if produced and not args.case:
-        dump = HERE / f"produced-{'cloud' if args.cloud else 'local'}-{args.model.replace(':', '-')}.json"
+    if prefill_ms_total:
+        # Reported per case as well as in total, because comparing two runs of different sizes on a
+        # total is how a probe that skipped half the suite looks like a speed-up.
+        answered = passed + len(failed)
+        print(f"time: {prefill_ms_total / 1000:.1f}s reading the prompt + "
+              f"{generate_ms_total / 1000:.1f}s generating"
+              + (f"  ({prefill_ms_total / answered:,.0f} ms prefill per case)" if answered else ""))
+
+    if produced and not (wanted and len(wanted) == 1):
+        stem = args.label or f"{'cloud' if args.cloud else 'local'}-{args.model.replace(':', '-')}"
+        dump = HERE / f"produced-{stem}.json"
         dump.write_text(json.dumps(produced, indent=2), encoding="utf-8")
-        print(f"statements written to {dump.name} — diff this against another run")
+        print(f"statements written to {dump.name} — `python diff.py <baseline> {dump.name}`")
 
     for case, problems in failed:
         print(f"\n--- FAIL {case['id']}: {case['question']!r}")

@@ -1,53 +1,127 @@
 {
   "//": "The second model call: turning a result set into prose. Assertions are on prose, which is coarser than the SQL assertions in cases.json — but coarse is what stands between 'trimmed the prompt' and 'started telling users data is missing when it is not'.",
-
   "global": {
     "//": "The answer is rendered as plain text in a pre-wrapped paragraph, so markdown does not render — it just shows as literal punctuation. The prompt asks for prose; this checks it complied.",
-    "absent": ["|", "###", "```", "* ", "- "]
+    "absent": [
+      "|",
+      "###",
+      "```",
+      "* ",
+      "- "
+    ],
+    "//maxChars": "A ceiling on every answer, because verbosity is a cost and not a wrong answer, so nothing else here would ever catch it. 500 rather than 420: a two-series comparison legitimately needs more words than a single figure, and a cap that fails a good answer would just get raised the first time it fired.",
+    "maxChars": 500
   },
-
   "cases": [
     {
       "id": "states-the-figure",
       "guards": "Cite the actual figures; never invent one.",
       "question": "what was cpi in june 2025",
       "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE PeriodType = 'Month' AND ReferenceDate = @month",
-      "parameters": { "@month": "2025-06-01" },
-      "results": { "columns": ["ReferenceDate", "IndexValue"], "rows": [["2025-06-01", 322.561]], "rowCount": 1 },
+      "parameters": {
+        "@month": "2025-06-01"
+      },
+      "results": {
+        "columns": [
+          "ReferenceDate",
+          "IndexValue"
+        ],
+        "rows": [
+          [
+            "2025-06-01",
+            322.561
+          ]
+        ],
+        "rowCount": 1
+      },
       "coverage": "",
-      "expect": { "contains": ["322.561"] }
+      "expect": {
+        "contains": [
+          "322.561"
+        ]
+      }
     },
     {
       "id": "empty-outside-coverage",
       "guards": "An empty result outside the coverage window must say so AND give the range held.",
       "question": "give sofr of may 2001",
       "sql": "SELECT RatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
-      "parameters": { "@from": "2001-05-01", "@to": "2001-06-01" },
-      "results": { "columns": ["RatePercent"], "rows": [], "rowCount": 0 },
+      "parameters": {
+        "@from": "2001-05-01",
+        "@to": "2001-06-01"
+      },
+      "results": {
+        "columns": [
+          "RatePercent"
+        ],
+        "rows": [],
+        "rowCount": 0
+      },
       "coverage": "What this platform holds:\n- SOFR (analytics.vw_Sofr, EffectiveDate): 2018-04-02 to 2026-08-10\n",
-      "expect": { "containsAnyOf": ["2018", "before", "outside", "begins"] }
+      "expect": {
+        "containsAnyOf": [
+          "2018",
+          "before",
+          "outside",
+          "begins"
+        ]
+      }
     },
     {
       "id": "empty-inside-coverage",
       "guards": "The opposite failure: a period that IS held must not be explained away as outside coverage. This is the one that tells a user the platform lacks data it has.",
       "question": "what was the annual average cpi for 2019",
       "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
-      "parameters": { "@year": 2019 },
-      "results": { "columns": ["AnnualValue"], "rows": [], "rowCount": 0 },
+      "parameters": {
+        "@year": 2019
+      },
+      "results": {
+        "columns": [
+          "AnnualValue"
+        ],
+        "rows": [],
+        "rowCount": 0
+      },
       "coverage": "What this platform holds:\n- CPI (analytics.vw_Cpi, ReferenceDate): 2015-01-01 to 2026-06-01\n",
-      "expect": { "absent": ["outside", "before the series", "does not hold", "not collected"] }
+      "expect": {
+        "absent": [
+          "outside",
+          "before the series",
+          "does not hold",
+          "not collected"
+        ],
+        "maxChars": 300,
+        "//maxChars": "Looser than the other empty case on purpose. This one has to deny a coverage explanation without giving one, and the shortest honest way the model finds to do that is to state the range and then say the year is inside it. 220 was a number invented before seeing that; 300 still fails the five-sentence recital that prompted the rule."
+      }
     },
     {
       "id": "period-mismatch-is-our-fault",
       "guards": "The June-2025 bug: the question named a period, the query asked for another. Say the query was wrong; never report the named period as unavailable.",
       "question": "what is the cpi in june 2025",
       "sql": "SELECT ReferenceDate, IndexValue FROM analytics.vw_Cpi WHERE ReferenceDate >= @from AND ReferenceDate < @to",
-      "parameters": { "@from": "2026-08-01", "@to": "2026-09-01" },
-      "results": { "columns": ["ReferenceDate", "IndexValue"], "rows": [], "rowCount": 0 },
+      "parameters": {
+        "@from": "2026-08-01",
+        "@to": "2026-09-01"
+      },
+      "results": {
+        "columns": [
+          "ReferenceDate",
+          "IndexValue"
+        ],
+        "rows": [],
+        "rowCount": 0
+      },
       "coverage": "What this platform holds:\n- CPI (analytics.vw_Cpi, ReferenceDate): 2015-01-01 to 2026-06-01\n",
       "expect": {
-        "containsAnyOf": ["2026", "query", "asked for"],
-        "absent": ["June 2025 is not", "does not hold data for June 2025"]
+        "containsAnyOf": [
+          "2026",
+          "query",
+          "asked for"
+        ],
+        "absent": [
+          "June 2025 is not",
+          "does not hold data for June 2025"
+        ]
       }
     },
     {
@@ -55,30 +129,238 @@
       "guards": "A follow-up's wording names no year; the bound parameter is the only place the subject is written down.",
       "question": "and what is the average cpi of the year before that",
       "sql": "SELECT AnnualValue FROM analytics.vw_CpiAnnual WHERE ReferenceYear = @year",
-      "parameters": { "@year": 2021 },
-      "results": { "columns": ["AnnualValue"], "rows": [[270.97]], "rowCount": 1 },
+      "parameters": {
+        "@year": 2021
+      },
+      "results": {
+        "columns": [
+          "AnnualValue"
+        ],
+        "rows": [
+          [
+            270.97
+          ]
+        ],
+        "rowCount": 1
+      },
       "coverage": "",
-      "expect": { "contains": ["270.97", "2021"] }
+      "expect": {
+        "contains": [
+          "270.97",
+          "2021"
+        ]
+      }
     },
     {
       "id": "described-long-result",
       "guards": "A summarised result must be described from its statistics, not presented as if the rows shown were all of them.",
       "question": "what did sofr do in 2025",
       "sql": "SELECT EffectiveDate, RatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to",
-      "parameters": { "@from": "2025-01-01", "@to": "2026-01-01" },
+      "parameters": {
+        "@from": "2025-01-01",
+        "@to": "2026-01-01"
+      },
       "results": {
-        "columns": ["EffectiveDate", "RatePercent"],
+        "columns": [
+          "EffectiveDate",
+          "RatePercent"
+        ],
         "rowCount": 250,
         "summary": {
-          "EffectiveDate": { "earliest": "2025-01-02", "latest": "2025-12-31" },
-          "RatePercent": { "min": 4.25, "max": 5.41, "mean": 4.8312 }
+          "EffectiveDate": {
+            "earliest": "2025-01-02",
+            "latest": "2025-12-31"
+          },
+          "RatePercent": {
+            "min": 4.25,
+            "max": 5.41,
+            "mean": 4.8312
+          }
         },
-        "first": [["2025-01-02", 4.33]],
-        "last": [["2025-12-31", 4.29]],
+        "first": [
+          [
+            "2025-01-02",
+            4.33
+          ]
+        ],
+        "last": [
+          [
+            "2025-12-31",
+            4.29
+          ]
+        ],
         "note": "This result has 250 rows — too many to list, so they are summarised. \"summary\" holds min, max and mean computed across EVERY row, so those figures are exact for the whole result. \"first\" and \"last\" are the rows at each end in the query's own order; the rows between them are not shown. Describe the result from these — say how many rows there were, what range they cover and how the series behaves. Do not present \"first\" or \"last\" as the complete result, and do not state any figure that is not here."
       },
       "coverage": "",
-      "expect": { "containsAnyOf": ["250", "4.25", "5.41", "4.83"] }
+      "expect": {
+        "containsAnyOf": [
+          "250",
+          "4.25",
+          "5.41",
+          "4.83"
+        ]
+      }
+    },
+    {
+      "id": "empty-from-a-filter",
+      "guards": "Zero rows because the WHERE clause matched nothing, not because the period is missing. This is the case the SQL echo is kept for - without the filter in front of it, an honest 'none were' becomes 'we do not hold that'.",
+      "question": "how many days was sofr above 10 percent in 2025",
+      "sql": "SELECT EffectiveDate, RatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to AND RatePercent > @threshold",
+      "parameters": {
+        "@from": "2025-01-01",
+        "@to": "2026-01-01",
+        "@threshold": 10
+      },
+      "results": {
+        "columns": [
+          "EffectiveDate",
+          "RatePercent"
+        ],
+        "rows": [],
+        "rowCount": 0
+      },
+      "coverage": "What this platform holds:\n- SOFR (analytics.vw_Sofr, EffectiveDate): 2018-04-02 to 2026-08-10\n",
+      "expect": {
+        "containsAnyOf": [
+          "no days",
+          "none",
+          "did not",
+          "never",
+          "no dates",
+          "zero"
+        ],
+        "absent": [
+          "outside",
+          "do not hold",
+          "does not hold",
+          "not collected",
+          "no data for"
+        ],
+        "maxChars": 200
+      }
+    },
+    {
+      "id": "cross-dataset-no-causation",
+      "guards": "Describe how two series move; do not assert one causes the other. The rule exists in the prompt and nothing tested it.",
+      "question": "how did inflation and interest rates move together in 2025",
+      "sql": "SELECT c.ReferenceDate, c.YearOverYearPct AS InflationPct, s.AvgRatePercent FROM analytics.vw_CpiMonthlyChange AS c JOIN (SELECT DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1) AS MonthStart, AVG(RatePercent) AS AvgRatePercent FROM analytics.vw_Sofr WHERE EffectiveDate >= @from AND EffectiveDate < @to GROUP BY DATEFROMPARTS(YEAR(EffectiveDate), MONTH(EffectiveDate), 1)) AS s ON s.MonthStart = c.ReferenceDate WHERE c.ReferenceDate >= @from AND c.ReferenceDate < @to ORDER BY c.ReferenceDate",
+      "parameters": {
+        "@from": "2025-01-01",
+        "@to": "2026-01-01"
+      },
+      "results": {
+        "columns": [
+          "ReferenceDate",
+          "InflationPct",
+          "AvgRatePercent"
+        ],
+        "rows": [
+          [
+            "2025-01-01",
+            3.0,
+            4.33
+          ],
+          [
+            "2025-04-01",
+            2.3,
+            4.33
+          ],
+          [
+            "2025-08-01",
+            2.9,
+            4.33
+          ],
+          [
+            "2025-12-01",
+            2.7,
+            4.29
+          ]
+        ],
+        "rowCount": 4
+      },
+      "coverage": "",
+      "expect": {
+        "containsAnyOf": [
+          "2.7",
+          "2.9",
+          "4.33",
+          "4.29"
+        ],
+        "absent": [
+          "caused",
+          "causes",
+          "because of the rate",
+          "driven by the rate",
+          "correlation coefficient"
+        ]
+      }
+    },
+    {
+      "id": "volume-is-in-billions",
+      "guards": "VolumeUsdBillions is in billions. The unit lives in a view note; this is where getting it wrong becomes a figure a user reads.",
+      "question": "how much was borrowed overnight on 2 january 2025",
+      "sql": "SELECT EffectiveDate, VolumeUsdBillions FROM analytics.vw_Sofr WHERE EffectiveDate = @day",
+      "parameters": {
+        "@day": "2025-01-02"
+      },
+      "results": {
+        "columns": [
+          "EffectiveDate",
+          "VolumeUsdBillions"
+        ],
+        "rows": [
+          [
+            "2025-01-02",
+            2451.0
+          ]
+        ],
+        "rowCount": 1
+      },
+      "coverage": "",
+      "expect": {
+        "containsAnyOf": [
+          "billion",
+          "trillion"
+        ]
+      }
+    },
+    {
+      "id": "wide-result-stays-prose",
+      "guards": "A result with many columns is the one that tempts a table. The answer is rendered in a pre-wrapped paragraph, so a table arrives as literal pipes.",
+      "question": "give me the sofr percentiles for 2 january 2025",
+      "sql": "SELECT EffectiveDate, RatePercent, Percentile1Percent, Percentile25Percent, Percentile75Percent, Percentile99Percent, VolumeUsdBillions FROM analytics.vw_Sofr WHERE EffectiveDate = @day",
+      "parameters": {
+        "@day": "2025-01-02"
+      },
+      "results": {
+        "columns": [
+          "EffectiveDate",
+          "RatePercent",
+          "Percentile1Percent",
+          "Percentile25Percent",
+          "Percentile75Percent",
+          "Percentile99Percent",
+          "VolumeUsdBillions"
+        ],
+        "rows": [
+          [
+            "2025-01-02",
+            4.33,
+            4.24,
+            4.29,
+            4.36,
+            4.55,
+            2451.0
+          ]
+        ],
+        "rowCount": 1
+      },
+      "coverage": "",
+      "expect": {
+        "contains": [
+          "4.33"
+        ]
+      }
     }
   ]
 }

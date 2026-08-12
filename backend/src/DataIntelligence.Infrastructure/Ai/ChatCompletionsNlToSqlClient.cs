@@ -87,13 +87,6 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
             Respond with JSON only, no prose, in this exact shape:
             {"sql": "<statement or null>", "parameters": {"@name": <value>}, "explanation": "<one or two sentences>", "refusal": null}
 
-            Every literal the question supplies goes in "parameters" and is referenced from the
-            statement by name — `WHERE ReferenceDate = @month`, never `WHERE ReferenceDate =
-            '2025-06-01'`. Column and table names are part of the statement and are never
-            parameters; use an empty object when none are needed. "explanation" says in plain
-            language what the statement does and which view it reads — it is shown to the person who
-            asked and kept for review, so describe the query rather than restating the question.
-
             When "sql" is null, set "refusal" to one of:
               "not_a_data_question" — a greeting, thanks, or anything not asking about data.
               "about_cpi", "about_sofr" — asks what CPI or SOFR *is*: how it is defined, who
@@ -105,7 +98,6 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
             Leave "refusal" null whenever you return SQL. The "about_" values are classifications,
             not requests to write the answer — the reply is fixed text on the other side, so put no
             definition in "explanation" and state no figure.
-
 
             """ + schemaContext;
 
@@ -273,30 +265,37 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         // ResultSetFormatter. Without it a columnar payload is a puzzle rather than a saving.
         const string system =
             "You answer questions about US economic data (CPI, SOFR) from a query result. "
-            + "Be concise, cite the actual figures, and never invent a number that is not in the "
-            + "data given to you. Write plain prose — sentences and paragraphs, with the figures "
-            + "inside them. No tables, no bullet or numbered lists, no headings, no code fences, no "
-            + "bold or italic markers. "
-            + "The result is columnar: \"columns\" names the fields in order, "
-            + "and each entry of \"rows\" holds one record's values in that same order. A result "
-            + "too long to list arrives summarised instead, and carries its own note saying how to "
-            + "read it. "
+            + "Answer in one to three sentences. Cite the actual figures, and never invent a number "
+            + "that is not in the data given to you. Write plain prose — sentences and paragraphs, "
+            + "with the figures inside them. No tables, no bullet or numbered lists, no headings, "
+            + "no code fences, no bold or italic markers. "
+            // "Be concise" was not enough on its own: asked which sources failed to collect, an
+            // empty result came back as five sentences reciting the filter, the coverage of both
+            // datasets and the query's own logic, when "none did" was the whole answer. Length is
+            // completion tokens, which bill at several times input and never cache — so this is
+            // the one part of the prompt where adding words saves money.
+            + "Answer the question that was asked and stop. Do not restate the query, the filter "
+            + "or the coverage window unless the answer depends on it. "
+            // The two sentences that described the result's shape, and the one saying a long
+            // result carries a note, are gone: the JSON shows its own shape, and that note is
+            // written into the payload by ResultSetFormatter and says how to read itself.
             + "A follow-up's wording may refer to something you cannot see (\"that year\", \"the "
             + "year before that\", \"the same for SOFR\"); the SQL and its parameters are that "
             + "reference already resolved, so answer for what was queried rather than for the "
             + "wording. That holds only while the question names no period of its own. "
-            + "If the question DOES name one — \"June 2025\", \"in 2023\", \"March 2019\" — and "
-            + "the query asked for a different period, then the query is simply wrong. Say so: "
-            + "that the question asked about the period it named, that the query that ran asked "
-            + "for another, and that this is a fault on our side worth asking again. Do not "
-            + "explain the empty result as anything else, and never tell the reader a period is "
-            + "unavailable when the query did not ask for it — that turns our mistake into a "
-            + "false claim about the data. "
+            // Said once rather than three times. What went was the restatement, not the rule:
+            // period-mismatch still says whose fault it is and still forbids reporting the named
+            // period as unavailable, which is the pair that fixed the June-2025 answer.
+            + "If the question names a period and the query asked for a different one, the query "
+            + "is wrong: say the question asked for the period it named, that the query asked for "
+            + "another, and that this is a fault on our side worth asking again. Never tell the "
+            + "reader a period is unavailable when the query did not ask for it. "
             + "Otherwise, when there are no rows, say why and not only that there are none: if the "
-            + "period queried falls outside the coverage below, say so and give the range that is "
-            + "held — a reader cannot otherwise tell 'we never collected this' from 'this period "
-            + "is before the series existed'. If the period IS covered and the result is still "
-            + "empty, say that plainly instead; do not invent a coverage explanation for it.";
+            + "period queried falls outside the coverage below, say so in one sentence and give the "
+            + "range that is held. The coverage below is for that one purpose. If the period asked "
+            + "for is inside it, the empty result is itself the answer: reply with a single "
+            + "sentence saying what did not happen, and do not mention coverage, ranges or dates "
+            + "held at all — a reader who asked what failed this week wants \"nothing did\".";
 
         var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\n"
             + $"Parameters bound to it (JSON): {JsonSerializer.Serialize(parameters)}\n\n"
