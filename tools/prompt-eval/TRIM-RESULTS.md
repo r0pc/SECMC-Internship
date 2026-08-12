@@ -1,9 +1,37 @@
 # How far the prompt can be trimmed
 
-An experiment, on a branch, to find where cutting the assistant's prompt starts costing answers.
-Not a proposal to ship — the branch tip is the deliverable and the merge decision is open.
+Started as an experiment to find where cutting the assistant's prompt starts costing answers. The
+result was applied and merged.
 
 Everything below is measured. Nothing is estimated.
+
+## What shipped, and the trade-off in it
+
+The **VS** variant: 1,269 tokens off the SQL prompt (12,382 → 7,814 chars), 32% off the summariser
+prompt, plus a brevity rule. Measured live against the running API, same question before and after:
+
+| | before | after |
+| --- | ---: | ---: |
+| prompt | 4,010 | 2,878 |
+| completion | 180 | 231 |
+| **total** | **4,190** | **3,109** |
+
+26% off the displayed count. Off the **bill**, ~14% — fresh 318 + cached 2,560 at roughly a tenth
+comes to ~574 token-equivalents against ~669, because the tokens removed were the cheap cached ones.
+
+**The trade-off, accepted knowingly:** this trim is verified on `deepseek-v4-flash` at 27/28,
+unchanged from baseline. On the local model it is **worse than baseline** — `qwen3.5:4b` loses
+`explicit-month`, `interest-rate-wording` and `parameters-not-literals`, three cases it passes with
+the full prompt. `explicit-month` is the "cpi in june 2025" bug that caused the local default to be
+raised from 2b to 4b in the first place; cutting the dates block reintroduces it.
+
+Cloud is the default and Local is opt-in per question, and the owner chose to accept that rather
+than give the tokens back. **To undo just the local damage**, restore three blocks — the dates
+block, the term mapping and the parameterisation paragraph — which costs about 526 of the 1,269
+tokens back and should return the local model to its baseline. That is untested as a combination.
+
+The ablation that chose these cuts ran **on the cloud model only**. Generalising it to the local
+model was not warranted, and this is what that cost.
 
 ## The short version
 
@@ -104,6 +132,21 @@ This is where the interactions showed up, and exactly where they were predicted 
 
 Note V3 cuts 434 more tokens than V2f and scores *worse*. The curve is not monotonic, which is why
 the frontier had to be searched rather than assumed.
+
+## Brevity, which is a separate saving
+
+Trimming the prompt saves input tokens, and input is the half that caches. The answer is the half
+that does not, and it bills at several times the rate — so the cheapest win in the whole exercise
+was making answers shorter.
+
+Asked which sources failed to collect, an empty result came back as five sentences reciting the
+filter, both datasets' coverage and the query's own logic. "None did" was the answer. `Be concise`
+was already in the prompt and was not enough; saying *answer the question and stop*, plus splitting
+the empty-result rule by whether the period is inside coverage, took that reply from ~450
+characters to 161 against the live API.
+
+`eval_summariser.py` gained a `maxChars` assertion for it, because verbosity is a cost rather than
+a wrong answer and nothing else in the suite would ever have caught it.
 
 ## The summariser prompt
 

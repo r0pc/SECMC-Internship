@@ -19,3 +19,9 @@ system prompt: 7814 chars  [shipping prompt]
   pass  follow-up-referent  169.2s read +  14.1s gen
   FAIL  parameters-not-literals   56.6s read +  22.6s gen
   pass  about-platform   49.3s read +  16.1s gen
+  pass  not-a-data-question   65.7s read +  12.2s gen
+  FAIL  semiannual-code   50.3s read + 496.0s gen
+  pass  m13-not-month   44.5s read +  14.4s gen
+  pass  no-dedup   57.0s read +  23.8s gen
+  FAIL  revision-history   49.6s read +  17.8s gen
+  FAIL  rolling-week   54.1s read +  27.0s gen
