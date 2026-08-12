@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 import eval as e
@@ -80,6 +81,26 @@ def compress_taxonomy(text: str) -> str:
                        for b in blocks(text))
 
 
+def rewrap(text: str) -> str:
+    """
+    The same words, the same order, different line breaks. A placebo.
+
+    The three control runs re-sent a byte-identical prompt and moved one or two statements, which
+    measures only how deterministic the model is. It does not measure what a *changed* prompt does,
+    and several cases here have more than one right answer - "the overnight borrowing rate right
+    now" is vw_Sofr or vw_LatestIndicator, and nothing prefers one. If any perturbation lets the
+    model re-pick among those, then "this cut changed five statements" is not evidence about the
+    cut, and every probe below needs reading against this number rather than against zero.
+    """
+    out = []
+    for block in blocks(text):
+        if block.lstrip().startswith(("{", '"', "-", " ")) or "{" in block:
+            out.append(block)          # examples and bullet lists: leave the shape alone
+            continue
+        out.append(textwrap.fill(" ".join(block.split()), width=88))
+    return "\n\n".join(out)
+
+
 def drop_duplicated_notes(text: str) -> str:
     """
     The view notes whose content the term-mapping block already states.
@@ -102,6 +123,8 @@ def drop_duplicated_notes(text: str) -> str:
 
 # Each probe is (surface, description, transform). `surface` is the eval.py flag it feeds.
 PROBES = {
+    "P0": ("semantics", "PLACEBO: same words, rewrapped. The floor any probe must beat.",
+           rewrap),
     "P2": ("semantics", "worked examples 3 and 4 (cross-dataset, LAG)",
            lambda s: drop(s, '"What is the relation between CPI and SOFR',
                           '"Between which months is the rate of change')),
@@ -146,6 +169,58 @@ def build(name: str) -> tuple[str, str]:
     return surface, transform(SOURCE[surface]())
 
 
+# Composed variants: every cut that cost nothing on its own, applied together.
+#
+# Individually clean does not compose. Two of these pairs are complementary by construction - P2
+# drops the worked examples for cross-dataset and LAG while P5/P6 drop the prose that says the same
+# thing, and P11 drops the term mapping while P12 drops the view notes that restate it. Each half
+# passed alone precisely because the other half was still there. So V1 and V2 keep one side of each
+# pair, and V3 deliberately takes both, because "where does it break" is the question that was
+# asked and an ablation cannot answer it.
+VARIANTS = {
+    "V1": ("conservative", ["P4", "P7", "P12", "P14"]),
+    "V2": ("moderate", ["P4", "P7", "P12", "P14", "P1", "P2", "P16"]),
+    "V3": ("aggressive", ["P4", "P7", "P12", "P14", "P1", "P2", "P16",
+                          "P5", "P6", "P8", "P9", "P11"]),
+
+    # V2 lost largest-change to a CTE, and the Rules list is the only place that forbids one -
+    # worked example 4 is what carried the shape when P16 was cut alone. These two split that pair
+    # to find which half has to stay, and V1b isolates the follow-ups block, the single largest
+    # block that cost nothing on its own.
+    "V1b": ("V1 + follow-ups block", ["P4", "P7", "P12", "P14", "P1"]),
+    "V2a": ("V2 keeping the Rules list", ["P4", "P7", "P12", "P14", "P1", "P2"]),
+    "V2b": ("V2 keeping worked examples 3+4", ["P4", "P7", "P12", "P14", "P1", "P16"]),
+
+    # Pushing on from V2b, which held. P5/P6 drop the prose whose worked examples V2b keeps, so
+    # unlike in V3 each rule still has one statement of it left. P8/P9 are the dialect and dates
+    # blocks, both clean alone. P11 is left out: V2b already cuts the view notes, and the term
+    # mapping is the only other place that says what "inflation" or "borrowed" maps to.
+    "V2c": ("V2b + dialect + dates", ["P4", "P7", "P12", "P14", "P1", "P16", "P8", "P9"]),
+    "V2d": ("V2b + the two prose blocks", ["P4", "P7", "P12", "P14", "P1", "P16", "P5", "P6"]),
+    "V2e": ("V2b + all four", ["P4", "P7", "P12", "P14", "P1", "P16", "P5", "P6", "P8", "P9"]),
+
+    # Everything that survived, plus the term mapping - the other half of the pair V2e already
+    # broke by cutting the view notes. This is the one expected to fail, and it is run for that
+    # reason: a frontier nobody pushed past is a guess about where the frontier is.
+    "V2f": ("V2e + the term mapping", ["P4", "P7", "P12", "P14", "P1", "P16",
+                                       "P5", "P6", "P8", "P9", "P11"]),
+}
+
+
+def build_variant(name: str) -> dict[str, str]:
+    """The variant's {surface: trimmed text}, applying each probe's transform in turn."""
+    _, probes = VARIANTS[name]
+    out = {surface: source() for surface, source in SOURCE.items()}
+
+    for probe in probes:
+        surface, _, transform = PROBES[probe]
+        out[surface] = transform(out[surface])
+
+    # Only the surfaces a variant actually changed, so eval.py is passed the shipping version of
+    # the rest rather than a copy of it that could drift.
+    return {s: t for s, t in out.items() if t != SOURCE[s]()}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -168,6 +243,19 @@ def main() -> int:
     names = list(PROBES) if args.write == ["all"] else args.write
 
     for name in names:
+        if name in VARIANTS:
+            description, probes = VARIANTS[name]
+            saved = 0
+            flags = []
+            for surface, text in build_variant(name).items():
+                path = OUT / f"{name}-{surface}.txt"
+                path.write_text(text, encoding="utf-8")
+                saved += len(SOURCE[surface]()) - len(text)
+                flags.append(f"--{surface} variants/{path.name}")
+            print(f"{name} ({description}, {'+'.join(probes)}): {saved:,} chars, ~{saved / 3.6:.0f} tok")
+            print(f"  {' '.join(flags)}")
+            continue
+
         if name not in PROBES:
             raise SystemExit(f"unknown probe {name!r}; try --list")
         surface, text = build(name)

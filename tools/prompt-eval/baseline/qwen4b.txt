@@ -1,7 +1,25 @@
 28 case(s) against local qwen3.5:4b
-system prompt: 12327 chars  [shipping prompt]
+system prompt: 12382 chars  [shipping prompt]
 
-  pass  explicit-month   81.2s read +  25.4s gen
-  pass  explicit-year-average   76.5s read +  25.0s gen
-  pass  inflation-wording   74.8s read +  35.9s gen
-  pass  interest-rate-wording   73.9s read +  23.9s gen
+  pass  explicit-month  241.4s read +  23.7s gen
+  pass  explicit-year-average   64.5s read +  21.5s gen
+  pass  inflation-wording   71.3s read +  36.3s gen
+  pass  interest-rate-wording   67.5s read +  21.8s gen
+  FAIL  volume-wording   70.2s read +  42.3s gen
+  pass  recent-window-not-refused   67.8s read +  38.6s gen
+  pass  cross-dataset   61.2s read +  56.9s gen
+  pass  largest-change   61.2s read +  70.7s gen
+  FAIL  peak   73.1s read +  22.8s gen
+  pass  annual-average   67.2s read +  24.4s gen
+  pass  collection-health   67.9s read +  28.7s gen
+  pass  latest-figure   66.7s read +  17.4s gen
+  FAIL  half-open-range   62.6s read +  35.9s gen
+  pass  unanswerable-subject   66.8s read +   6.8s gen
+  pass  about-cpi   67.2s read +   9.9s gen
+  pass  follow-up-referent   63.5s read +  17.1s gen
+  pass  parameters-not-literals   54.9s read +  20.3s gen
+  pass  about-platform   54.7s read +   7.1s gen
+  pass  not-a-data-question   51.4s read +   6.1s gen
+  FAIL  semiannual-code   54.4s read +  20.7s gen
+  pass  m13-not-month   51.8s read +  15.8s gen
+  pass  no-dedup   55.8s read +  21.7s gen

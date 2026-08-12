@@ -1,5 +1,5 @@
 28 case(s) against cloud deepseek-v4-flash at https://api.deepseek.com/
-system prompt: 12382 chars  [shipping prompt]
+system prompt: 12142 chars  [shape from variants\P13.txt]
 
   pass  explicit-month
   pass  explicit-year-average
@@ -21,7 +21,7 @@ system prompt: 12382 chars  [shipping prompt]
   pass  about-platform
   pass  not-a-data-question
   pass  semiannual-code
-  pass  m13-not-month
+  FAIL  m13-not-month
   pass  no-dedup
   pass  revision-history
   pass  rolling-week
@@ -30,9 +30,13 @@ system prompt: 12382 chars  [shipping prompt]
   pass  follow-up-new-subject
   FAIL  follow-up-unresolvable
 
-27 passed / 1 failed / 0 errored  (of 28 cases)
-cost: 91,611 prompt tokens, 86,400 of them cached + 2,474 completion = 94,085 total  (3,271 prompt per case)
-statements written to produced-baseline-cloud.json — `python diff.py <baseline> produced-baseline-cloud.json`
+26 passed / 2 failed / 0 errored  (of 28 cases)
+cost: 90,239 prompt tokens, 86,400 of them cached + 2,505 completion = 92,744 total  (3,222 prompt per case)
+statements written to produced-P13.json — `python diff.py <baseline> produced-P13.json`
+
+--- FAIL m13-not-month: 'what was cpi for the whole of 2023'
+    guards: M13 is the annual average BLS publishes, not a thirteenth month - and not something to reconstruct by averaging twelve rows.
+    - expected at least one of ['AnnualValue', 'M13', "'Annual'"]
 
 --- FAIL follow-up-unresolvable: 'and what about the year before that'
     guards: A referent that is not in the conversation at all is a refusal, not a guessed period.

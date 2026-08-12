@@ -1,5 +1,5 @@
 28 case(s) against cloud deepseek-v4-flash at https://api.deepseek.com/
-system prompt: 12382 chars  [shipping prompt]
+system prompt: 7553 chars  [semantics from variants\V2-semantics.txt; shape from variants\V2-shape.txt; views from variants\V2-views.txt]
 
   pass  explicit-month
   pass  explicit-year-average
@@ -8,8 +8,8 @@ system prompt: 12382 chars  [shipping prompt]
   pass  volume-wording
   pass  recent-window-not-refused
   pass  cross-dataset
-  pass  largest-change
-  pass  peak
+  FAIL  largest-change
+  FAIL  peak
   pass  annual-average
   pass  collection-health
   pass  latest-figure
@@ -30,9 +30,17 @@ system prompt: 12382 chars  [shipping prompt]
   pass  follow-up-new-subject
   FAIL  follow-up-unresolvable
 
-27 passed / 1 failed / 0 errored  (of 28 cases)
-cost: 91,611 prompt tokens, 86,400 of them cached + 2,474 completion = 94,085 total  (3,271 prompt per case)
-statements written to produced-baseline-cloud.json — `python diff.py <baseline> produced-baseline-cloud.json`
+25 passed / 3 failed / 0 errored  (of 28 cases)
+cost: 56,919 prompt tokens, 52,352 of them cached + 2,263 completion = 59,182 total  (2,032 prompt per case)
+statements written to produced-V2-cloud.json — `python diff.py <baseline> produced-V2-cloud.json`
+
+--- FAIL largest-change: 'between which months did sofr change the most in 2025'
+    guards: How a series CHANGED needs LAG over an aggregate, and TOP (1) for 'which'.
+    - must not start with 'WITH'
+
+--- FAIL peak: 'which month had the highest cpi in 2024'
+    guards: 'When was it highest' takes TOP with ORDER BY rather than returning every period.
+    - date literal inline instead of bound as a parameter: found "'2024-01-01"
 
 --- FAIL follow-up-unresolvable: 'and what about the year before that'
     guards: A referent that is not in the conversation at all is a refusal, not a guessed period.

@@ -1,5 +1,5 @@
 28 case(s) against cloud deepseek-v4-flash at https://api.deepseek.com/
-system prompt: 12382 chars  [shipping prompt]
+system prompt: 8202 chars  [semantics from variants\V2a-semantics.txt; shape from variants\V2a-shape.txt; views from variants\V2a-views.txt]
 
   pass  explicit-month
   pass  explicit-year-average
@@ -8,7 +8,7 @@ system prompt: 12382 chars  [shipping prompt]
   pass  volume-wording
   pass  recent-window-not-refused
   pass  cross-dataset
-  pass  largest-change
+  FAIL  largest-change
   pass  peak
   pass  annual-average
   pass  collection-health
@@ -30,9 +30,14 @@ system prompt: 12382 chars  [shipping prompt]
   pass  follow-up-new-subject
   FAIL  follow-up-unresolvable
 
-27 passed / 1 failed / 0 errored  (of 28 cases)
-cost: 91,611 prompt tokens, 86,400 of them cached + 2,474 completion = 94,085 total  (3,271 prompt per case)
-statements written to produced-baseline-cloud.json — `python diff.py <baseline> produced-baseline-cloud.json`
+26 passed / 2 failed / 0 errored  (of 28 cases)
+cost: 61,371 prompt tokens, 58,496 of them cached + 2,144 completion = 63,515 total  (2,191 prompt per case)
+statements written to produced-V2a-cloud.json — `python diff.py <baseline> produced-V2a-cloud.json`
+
+--- FAIL largest-change: 'between which months did sofr change the most in 2025'
+    guards: How a series CHANGED needs LAG over an aggregate, and TOP (1) for 'which'.
+    - date literal inline instead of bound as a parameter: found "'2025-01-01"
+    - expected to contain 'LAG'
 
 --- FAIL follow-up-unresolvable: 'and what about the year before that'
     guards: A referent that is not in the conversation at all is a refusal, not a guessed period.

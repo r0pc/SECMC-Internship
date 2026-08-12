@@ -1,5 +1,5 @@
 28 case(s) against cloud deepseek-v4-flash at https://api.deepseek.com/
-system prompt: 12382 chars  [shipping prompt]
+system prompt: 12356 chars  [semantics from variants\P0.txt]
 
   pass  explicit-month
   pass  explicit-year-average
@@ -31,8 +31,8 @@ system prompt: 12382 chars  [shipping prompt]
   FAIL  follow-up-unresolvable
 
 27 passed / 1 failed / 0 errored  (of 28 cases)
-cost: 91,611 prompt tokens, 86,400 of them cached + 2,474 completion = 94,085 total  (3,271 prompt per case)
-statements written to produced-baseline-cloud.json — `python diff.py <baseline> produced-baseline-cloud.json`
+cost: 91,303 prompt tokens, 87,168 of them cached + 2,460 completion = 93,763 total  (3,260 prompt per case)
+statements written to produced-P0a.json — `python diff.py <baseline> produced-P0a.json`
 
 --- FAIL follow-up-unresolvable: 'and what about the year before that'
     guards: A referent that is not in the conversation at all is a refusal, not a guessed period.
