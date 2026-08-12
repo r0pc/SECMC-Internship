@@ -353,12 +353,32 @@ public sealed class SchemaContextProvider : ISchemaContextProvider
     /// Written tersely on purpose. This block is the largest part of every prompt and is re-sent on
     /// every question, so its length is a per-question cost paid by both providers — tokens at the
     /// hosted gateway, and context window at the local model, where it is the difference between a
-    /// reply that fits and one that stops mid-JSON. What was cut in getting it here was the prose
-    /// explaining *why* each rule exists, which is a reader's need and not the model's; every fact,
-    /// every exact value and every worked example survived, because those are what changed the
-    /// output. The reasoning behind each line is preserved in git history rather than in the prompt.
+    /// reply that fits and one that stops mid-JSON.
+    /// <para>
+    /// It is now roughly half what it was, and the half that went was chosen by measurement rather
+    /// than judgement: fifteen probes, each this prompt minus one named block, against the full eval
+    /// suite. See <c>tools/prompt-eval/TRIM-RESULTS.md</c>. What that settled is worth knowing before
+    /// editing here — the worked examples are the load-bearing half and the prose is the redundant
+    /// half. Keeping the rule that forbids a CTE while dropping the example that demonstrates the
+    /// derived-table form still fails; keeping the example and dropping the rule does not. So the
+    /// prose for cross-dataset joins, for LAG-over-aggregate, and the Rules list all went, and every
+    /// worked example stayed.
+    /// </para>
+    /// <para>
+    /// Two consequences to keep in mind. The dialect block below reads as prose whose worked examples
+    /// cover it, and by that logic it was cut — then restored, because an integration test asserts the
+    /// prompt names <c>TOP (n)</c>, and nothing else in the trimmed prompt says T-SQL has no LIMIT
+    /// clause. And the trim is verified on the hosted model only: <c>qwen3.5:4b</c> is measurably worse
+    /// without the blocks that went, which is recorded rather than fixed.
+    /// </para>
     /// </remarks>
     private const string Semantics = """
+        The dialect is Microsoft SQL Server (T-SQL), not MySQL or PostgreSQL: row limits are
+        TOP (n) and there is no LIMIT clause; date arithmetic is DATEADD/DATEDIFF, not INTERVAL;
+        group a date column by month with DATEFROMPARTS(YEAR(c), MONTH(c), 1), never by a string;
+        concatenate with + or CONCAT(), not ||. Resolve relative dates yourself and pass them as
+        parameters rather than nesting DATEADD around GETDATE().
+
         Column values — exact. A plausible-looking guess returns zero rows, which reads as "no data"
         when the data is there:
         - PeriodCode: 'M01'..'M12' = January..December, 'M13' = the annual average, 'S01'/'S02' =
