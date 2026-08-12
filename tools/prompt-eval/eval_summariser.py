@@ -113,6 +113,13 @@ def check(case: dict, global_rules: dict, answer: str) -> list[str]:
     if any_of and not any(f.lower() in lowered for f in any_of):
         problems.append(f"expected at least one of {any_of}")
 
+    # Length is the one assertion here that is about cost rather than truth. Completion tokens bill
+    # at several times input and never cache, so a five-sentence answer to "none did" is the most
+    # expensive kind of wrong: correct, and paid for by the word.
+    limit = expect.get("maxChars") or global_rules.get("maxChars")
+    if limit and len(answer.strip()) > limit:
+        problems.append(f"too long: {len(answer.strip())} chars, limit {limit}")
+
     return problems
 
 

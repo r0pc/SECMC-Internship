@@ -265,10 +265,17 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
         // ResultSetFormatter. Without it a columnar payload is a puzzle rather than a saving.
         const string system =
             "You answer questions about US economic data (CPI, SOFR) from a query result. "
-            + "Be concise, cite the actual figures, and never invent a number that is not in the "
-            + "data given to you. Write plain prose — sentences and paragraphs, with the figures "
-            + "inside them. No tables, no bullet or numbered lists, no headings, no code fences, no "
-            + "bold or italic markers. "
+            + "Answer in one to three sentences. Cite the actual figures, and never invent a number "
+            + "that is not in the data given to you. Write plain prose — sentences and paragraphs, "
+            + "with the figures inside them. No tables, no bullet or numbered lists, no headings, "
+            + "no code fences, no bold or italic markers. "
+            // "Be concise" was not enough on its own: asked which sources failed to collect, an
+            // empty result came back as five sentences reciting the filter, the coverage of both
+            // datasets and the query's own logic, when "none did" was the whole answer. Length is
+            // completion tokens, which bill at several times input and never cache — so this is
+            // the one part of the prompt where adding words saves money.
+            + "Answer the question that was asked and stop. Do not restate the query, the filter "
+            + "or the coverage window unless the answer depends on it. "
             // The two sentences that described the result's shape, and the one saying a long
             // result carries a note, are gone: the JSON shows its own shape, and that note is
             // written into the payload by ResultSetFormatter and says how to read itself.
@@ -284,9 +291,11 @@ public sealed class ChatCompletionsNlToSqlClient : INlToSqlClient
             + "another, and that this is a fault on our side worth asking again. Never tell the "
             + "reader a period is unavailable when the query did not ask for it. "
             + "Otherwise, when there are no rows, say why and not only that there are none: if the "
-            + "period queried falls outside the coverage below, say so and give the range that is "
-            + "held. If it is covered and still empty, say that plainly and invent no coverage "
-            + "explanation.";
+            + "period queried falls outside the coverage below, say so in one sentence and give the "
+            + "range that is held. The coverage below is for that one purpose. If the period asked "
+            + "for is inside it, the empty result is itself the answer: reply with a single "
+            + "sentence saying what did not happen, and do not mention coverage, ranges or dates "
+            + "held at all — a reader who asked what failed this week wants \"nothing did\".";
 
         var user = $"Question: {question}\n\nSQL used: {generatedSql}\n\n"
             + $"Parameters bound to it (JSON): {JsonSerializer.Serialize(parameters)}\n\n"
