@@ -109,6 +109,15 @@ public sealed class DashboardApiFixture : IAsyncLifetime
 
     public string UnavailableReason => _database.UnavailableReason;
 
+    /// <summary>
+    /// The client the data tests use, signed in as an administrator.
+    /// </summary>
+    /// <remarks>
+    /// Every endpoint needs a token since FR-9, and these tests are about what the endpoints
+    /// return rather than who may call them. An administrator can reach all of them, so the
+    /// assertions stay about the data; who may reach what is asserted separately, in
+    /// <c>AuthorizationTests</c>, where it is the subject rather than a precondition.
+    /// </remarks>
     public HttpClient Client { get; private set; } = null!;
 
     /// <summary>Web defaults plus the converters the API serialises with.</summary>
@@ -133,16 +142,39 @@ public sealed class DashboardApiFixture : IAsyncLifetime
 
         await SeedAsync();
 
+        await using (var db = _database.CreateContext())
+        {
+            await TestAccounts.SeedAsync(db);
+        }
+
         // The same channel a deployed environment uses (see backend/README.md). It beats the
         // project's appsettings.json in the configuration order, which an in-memory source added
         // through WithWebHostBuilder does not — that one is applied before the app's own JSON
         // files and loses to them.
         Environment.SetEnvironmentVariable(ConnectionStringVariable, _database.ConnectionString);
 
+        // The API refuses to start without a signing key (FR-9), by design: every endpoint needs
+        // one, so booting without it would mean a process that serves nothing but 401s.
+        Environment.SetEnvironmentVariable(TestAccounts.SigningKeyVariable, TestAccounts.SigningKey);
+
         _factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder => builder.UseEnvironment("Testing"));
 
-        Client = _factory.CreateClient();
+        Anonymous = _factory.CreateClient();
+
+        Client = await CreateClientAsAsync(TestAccounts.AdministratorEmail);
+    }
+
+    /// <summary>A client carrying no token, for asserting that an endpoint demands one.</summary>
+    public HttpClient Anonymous { get; private set; } = null!;
+
+    /// <summary>Signs in over HTTP and returns a client that presents the resulting token.</summary>
+    public async Task<HttpClient> CreateClientAsAsync(string email)
+    {
+        var client = _factory!.CreateClient();
+        var session = await TestAccounts.SignInAsync(client, email);
+
+        return client.Authenticated(session.AccessToken);
     }
 
     /// <summary>
@@ -295,6 +327,7 @@ public sealed class DashboardApiFixture : IAsyncLifetime
     {
         _factory?.Dispose();
         Environment.SetEnvironmentVariable(ConnectionStringVariable, null);
+        Environment.SetEnvironmentVariable(TestAccounts.SigningKeyVariable, null);
         await _database.DisposeAsync();
     }
 }

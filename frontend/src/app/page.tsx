@@ -15,6 +15,7 @@ import {
   subtractMonths,
   todayPkt,
 } from "@/lib/format";
+import { requireSession } from "@/lib/session";
 import {
   CPI_SERIES_KEY,
   DASHBOARD_KPI_KEYS,
@@ -30,8 +31,14 @@ import {
  * Each panel fetches its own data inside a Suspense boundary, so a slow endpoint delays that
  * panel rather than the page, and a failed one is reported in place — an operations dashboard
  * that goes blank because one of four calls failed has told the reader nothing.
+ *
+ * Signed-in only, like every page here (FR-9). `proxy.ts` has already redirected anyone without a
+ * session before this renders; the check is repeated because the proxy is an optimistic cookie
+ * read and this is the page that actually asks for the data.
  */
-export default function DashboardPage() {
+export default async function DashboardPage() {
+  await requireSession();
+
   return (
     <div className="space-y-8">
       <PageHeader

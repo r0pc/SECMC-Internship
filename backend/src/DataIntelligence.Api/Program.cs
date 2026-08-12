@@ -1,13 +1,18 @@
 using System.Text.Json.Serialization;
 using DataIntelligence.Api.Endpoints;
 using DataIntelligence.Api.Json;
+using DataIntelligence.Api.Security;
 using DataIntelligence.Infrastructure;
 using DataIntelligence.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddOpenApi();
+// The transformer adds the bearer scheme; without it the published contract would describe an API
+// that needs no credentials (FR-9).
+builder.Services.AddOpenApi(options =>
+    options.AddDocumentTransformer<BearerSecuritySchemeTransformer>());
 
 // Throws at startup when the connection string is missing, rather than at the first request.
 builder.Services.AddInfrastructure(builder.Configuration);
@@ -44,7 +49,11 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod());
 });
 
-// TODO (Phase 4): register AI orchestration (FR-13 - FR-16) and authentication (FR-9).
+// Accounts, password hashing and token issuance (FR-9). Validates its signing key at startup:
+// every endpoint below requires a token, so a process that boots without one can serve nothing.
+builder.Services.AddSecurity(builder.Configuration);
+builder.Services.AddPlatformAuthentication();
+builder.Services.AddAuthorizationBuilder().AddPlatformPolicies();
 
 var app = builder.Build();
 
@@ -62,8 +71,18 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseCors(FrontendCorsPolicy);
 
+// Order matters and is not interchangeable: authentication works out who the caller is, and
+// authorization then decides whether that caller may have what they asked for. Both sit after
+// CORS so a rejected cross-origin request is answered as one rather than as a 401.
+app.UseAuthentication();
+app.UseAuthorization();
+
 // Liveness plus database reachability. A process that is up but cannot reach SQL Server serves
 // nothing but errors, so reporting it healthy would tell a load balancer exactly the wrong thing.
+//
+// Anonymous, deliberately: a load balancer cannot sign in, and what this reports — up, and can it
+// see the database — is not information worth a credential. It is the only endpoint outside the
+// /api group, which is where FR-9's blanket requirement is declared.
 app.MapGet("/health", async (DataIntelligenceDbContext db, CancellationToken cancellationToken) =>
     {
         var databaseReachable = await db.Database.CanConnectAsync(cancellationToken);
@@ -74,6 +93,7 @@ app.MapGet("/health", async (DataIntelligenceDbContext db, CancellationToken can
                 new { status = "degraded", database = "unreachable" },
                 statusCode: StatusCodes.Status503ServiceUnavailable);
     })
+    .AllowAnonymous()
     .WithTags("Health")
     .WithName("GetHealth")
     .WithSummary("Liveness and database reachability.");

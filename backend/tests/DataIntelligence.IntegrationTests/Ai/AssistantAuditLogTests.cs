@@ -1,8 +1,9 @@
-﻿using DataIntelligence.Core.Dtos;
+using DataIntelligence.Core.Dtos;
 using DataIntelligence.Infrastructure.Persistence;
 using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Interfaces;
+using DataIntelligence.IntegrationTests.Api;
 using DataIntelligence.Infrastructure.Ai;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -23,6 +24,9 @@ namespace DataIntelligence.IntegrationTests.Ai;
 [Collection("AssistantAuditLog")]
 public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixture>, IAsyncLifetime
 {
+    /// <summary>The account every seeded question is asked by, and every filter below asserts on.</summary>
+    private const int AskingUserId = 1;
+
     private readonly ReadOnlyExecutionFixture _fixture;
     private Guid _sessionId;
 
@@ -34,11 +38,19 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
 
     /// <summary>
     /// One row per outcome that matters, so every filter below has both a match and a non-match to
-    /// distinguish. The FK to sec.AppUser is absent until FR-9, so the user id is just an integer.
+    /// distinguish.
     /// </summary>
+    /// <remarks>
+    /// The account is seeded first and with a forced id, because <c>ai.AssistantSession.UserId</c>
+    /// carries a foreign key to <c>sec.AppUser</c> as of FR-9. These tests assert on user 1
+    /// specifically, so user 1 is what gets created rather than whatever the identity column would
+    /// have allocated.
+    /// </remarks>
     public async Task InitializeAsync()
     {
         await using var db = _fixture.CreateContext();
+
+        await TestAccounts.EnsureWithIdAsync(db, AskingUserId, "Audit log test user");
 
         // xUnit constructs the class once per test, so this runs before every one of them while
         // the database is shared for the whole class. Without the clear, the row counts the
@@ -50,7 +62,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
         var session = new AssistantSession
         {
             SessionId = _sessionId,
-            UserId = 1,
+            UserId = AskingUserId,
             StartedAtPkt = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
             LastActivityAtPkt = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc)
         };
@@ -172,7 +184,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
     public async Task FiltersByUser()
     {
         Assert.Equal(5, (await Service().GetQueryLogAsync(
-            new AssistantQueryLogQuery { UserId = 1 }, default)).TotalCount);
+            new AssistantQueryLogQuery { UserId = AskingUserId }, default)).TotalCount);
 
         Assert.Equal(0, (await Service().GetQueryLogAsync(
             new AssistantQueryLogQuery { UserId = 999 }, default)).TotalCount);
@@ -269,7 +281,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
     [Fact]
     public async Task ListsWhatEachConversationCostInTokens()
     {
-        var chat = Assert.Single(await Service().GetSessionsAsync(userId: 1, limit: 10, default));
+        var chat = Assert.Single(await Service().GetSessionsAsync(AskingUserId, limit: 10, default));
 
         // Cross-checked against the turn view rather than asserted as a bare number: the session
         // column is a denormalisation of the transcript, and it is worth having only while it says
@@ -290,7 +302,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
             var session = new AssistantSession
             {
                 SessionId = Guid.NewGuid(),
-                UserId = 1,
+                UserId = AskingUserId,
                 StartedAtPkt = new DateTime(2026, 8, 9, 0, 0, 0, DateTimeKind.Utc),
                 LastActivityAtPkt = new DateTime(2026, 8, 9, 0, 0, 0, DateTimeKind.Utc)
             };
@@ -310,7 +322,7 @@ public sealed class AssistantAuditLogTests : IClassFixture<ReadOnlyExecutionFixt
             await db.SaveChangesAsync();
         }
 
-        var sessions = await Service().GetSessionsAsync(userId: 1, limit: 10, default);
+        var sessions = await Service().GetSessionsAsync(AskingUserId, limit: 10, default);
 
         Assert.Null(Assert.Single(sessions, s => s.Title == "What was CPI in May?").TotalTokens);
     }

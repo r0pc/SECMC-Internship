@@ -6,6 +6,7 @@ import { Card, CardBody, CardHeader, PageHeader, Stat } from "@/components/card"
 import { ApiErrorPanel, EmptyState } from "@/components/states";
 import { attempt, getSources } from "@/lib/api";
 import { formatCount, humanizeEnum } from "@/lib/format";
+import { requireSession } from "@/lib/session";
 
 export const metadata: Metadata = {
   title: "Sources",
@@ -16,11 +17,14 @@ export const metadata: Metadata = {
 /**
  * The data sources (FR-7, SOW 3 — Compliance).
  *
- * Read-only here. The API allows the polling settings to be edited, but not until authentication
- * is in place (FR-9): every endpoint is currently anonymous, and a page that lets any visitor
- * disable collection is not a page worth shipping first.
+ * Read-only here. The API now allows an administrator to edit the polling settings (FR-9), and
+ * this page still does not offer it: the surface worth having is the one that shows what each
+ * publisher is and what its terms are, and the editing endpoint exists for an operator with a
+ * reason to use it rather than for a button on a reference page.
  */
 export default async function SourcesPage() {
+  await requireSession();
+
   const result = await attempt(getSources());
 
   return (

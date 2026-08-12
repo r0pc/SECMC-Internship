@@ -7,20 +7,31 @@
  * fetched fresh on every render: a dashboard whose numbers are quietly cached is indistinguishable
  * from one whose numbers have not changed, which is the failure this platform exists to make
  * visible.
+ *
+ * Since FR-9 every call but the login carries the caller's bearer token, read from the session
+ * cookie. Attached here rather than passed down through every function, because a call that
+ * forgets it does not fail loudly — it fails as a 401 somewhere in a panel, which reads like the
+ * API being down.
  */
 
+import { redirect } from "next/navigation";
+
+import { getAccessToken } from "@/lib/session";
 import type {
   AskQuestionRequest,
   AssistantAnswerDto,
   AssistantSessionSummaryDto,
   AssistantTranscriptDto,
+  AuthenticatedUserDto,
   CollectionRunDto,
   CollectionRunStatus,
+  CreateUserRequest,
   DashboardSummaryDto,
   DataSourceDto,
   Dataset,
   IsoDate,
   IsoUtcTimestamp,
+  LoginResponse,
   ObservationDto,
   PagedResult,
   PeriodType,
@@ -31,6 +42,8 @@ import type {
   SourceHealthDto,
   TrendGranularity,
   TrendSeriesDto,
+  UpdateUserRequest,
+  UserDto,
 } from "@/types/api";
 
 /** Mirrors the API's own default when `NEXT_PUBLIC_API_BASE_URL` is absent. */
@@ -119,6 +132,46 @@ async function readProblem(response: Response, url: string): Promise<ApiError> {
   return new ApiError(response.status, problem, url);
 }
 
+/**
+ * Where a request whose token was refused is sent.
+ *
+ * A Route Handler rather than the login page directly, because the cookie has to be removed and a
+ * Server Component cannot remove it. Skipping that step would loop: `/login` would see a session
+ * cookie, believe the visitor is signed in, and send them back to a page that 401s again.
+ */
+const SIGNED_OUT_PATH = "/logout?reason=expired";
+
+/**
+ * The authorization header for a call, or nothing when signed out.
+ *
+ * Signed-out calls are still made rather than short-circuited here. Only the API knows which
+ * endpoints are public — `/health` is, and the login is — and a frontend that decided for itself
+ * would be a second copy of that rule, free to disagree with the first.
+ */
+async function authorization(): Promise<Record<string, string>> {
+  const token = await getAccessToken();
+
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/**
+ * Turns the API's 401 into a redirect rather than an error panel.
+ *
+ * A 401 here means the token was rejected, and by the time a page is rendering there is exactly
+ * one honest reading of that: the session is over. It expired, the account was disabled, or its
+ * password or roles changed — all of which the API decides, and none of which this app can see
+ * from the token alone. Rendering "Unauthorized" into a panel would tell the reader the platform
+ * is broken when the truth is that they need to sign in again.
+ *
+ * `redirect` throws, which is how it unwinds out of nested calls; `attempt` below rethrows
+ * anything that is not an ApiError, so it passes through untouched.
+ */
+function redirectIfSessionEnded(status: number): void {
+  if (status === 401) {
+    redirect(SIGNED_OUT_PATH);
+  }
+}
+
 async function apiFetch<T>(
   path: string,
   params?: Record<string, QueryValue>,
@@ -129,7 +182,7 @@ async function apiFetch<T>(
 
   try {
     response = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...(await authorization()) },
       // Explicit even though Next 16 does not cache fetches by default: every figure on these
       // pages is an operational reading, and a stale one is worse than a slow one.
       cache: "no-store",
@@ -152,6 +205,8 @@ async function apiFetch<T>(
   }
 
   if (!response.ok) {
+    redirectIfSessionEnded(response.status);
+
     throw await readProblem(response, url);
   }
 
@@ -162,21 +217,30 @@ async function apiFetch<T>(
  * A call that sends a JSON body.
  *
  * Separate from `apiFetch` rather than folded into it with an optional body: every other call in
- * this file is a read, and keeping the one verb that changes something visibly distinct is worth
- * a little duplication. `204 No Content` is answered with `undefined`, since a body would be a
+ * this file is a read, and keeping the verbs that change something visibly distinct is worth a
+ * little duplication. `204 No Content` is answered with `undefined`, since a body would be a
  * contract violation rather than something to parse.
  */
-async function apiPost<T>(path: string, body: unknown): Promise<T> {
+async function apiSend<T>(
+  method: "POST" | "PATCH",
+  path: string,
+  body: unknown,
+  options: { readonly anonymous?: boolean } = {},
+): Promise<T> {
   const url = `${API_BASE_URL}${path}`;
 
   let response: Response;
 
   try {
     response = await fetch(url, {
-      method: "POST",
+      method,
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
+        // The login is the one call with nothing to present yet. Sending a stale token with it
+        // would be harmless but confusing in a log, and asking for one that does not exist is a
+        // cookie read for nothing.
+        ...(options.anonymous ? {} : await authorization()),
       },
       body: JSON.stringify(body),
       cache: "no-store",
@@ -197,6 +261,12 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   }
 
   if (!response.ok) {
+    // Not on the login itself: a 401 there is a wrong password, which the form has to show. Only
+    // a call that presented a token and had it refused means the session is over.
+    if (!options.anonymous) {
+      redirectIfSessionEnded(response.status);
+    }
+
     throw await readProblem(response, url);
   }
 
@@ -355,7 +425,7 @@ export function getCollectionHealth(windowDays?: number) {
  * rather than appearing to have frozen.
  */
 export function askAssistant(request: AskQuestionRequest) {
-  return apiPost<AssistantAnswerDto>("/api/assistant/ask", request);
+  return apiSend<AssistantAnswerDto>("POST", "/api/assistant/ask", request);
 }
 
 /** The caller's past conversations, most recently used first. */
@@ -366,4 +436,63 @@ export function getAssistantSessions(limit?: number) {
 /** One past conversation, in full, for replaying into the chat. */
 export function getAssistantTranscript(sessionId: string) {
   return apiFetch<AssistantTranscriptDto>(`/api/assistant/sessions/${sessionId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Authentication (FR-9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exchanges an email and password for a token.
+ *
+ * The one call made without one. A 401 from here is a wrong password and belongs on the form, not
+ * in a redirect — see the `anonymous` note in `apiSend`.
+ */
+export function login(email: string, password: string) {
+  return apiSend<LoginResponse>(
+    "POST",
+    "/api/auth/login",
+    { email, password },
+    { anonymous: true },
+  );
+}
+
+/**
+ * The caller as the API reads them out of their own token.
+ *
+ * Rarely needed: the same facts are in the session cookie, and reading them there costs no round
+ * trip. Worth calling when the question is "is this token still good", because only the API can
+ * answer that — it re-reads the account and compares its security stamp.
+ */
+export function getCurrentUser() {
+  return apiFetch<AuthenticatedUserDto>("/api/auth/me");
+}
+
+/** Changes the caller's own password. Ends every session, including the one making the call. */
+export function changeOwnPassword(currentPassword: string, newPassword: string) {
+  return apiSend<void>("POST", "/api/auth/password", {
+    currentPassword,
+    newPassword,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// User administration (FR-9) — Administrator only, enforced by the API
+// ---------------------------------------------------------------------------
+
+export function getUsers() {
+  return apiFetch<UserDto[]>("/api/users");
+}
+
+export function createUser(request: CreateUserRequest) {
+  return apiSend<UserDto>("POST", "/api/users", request);
+}
+
+export function updateUser(userId: number, request: UpdateUserRequest) {
+  return apiSend<UserDto>("PATCH", `/api/users/${userId}`, request);
+}
+
+/** Sets someone else's password, for a colleague who has forgotten theirs. */
+export function resetUserPassword(userId: number, newPassword: string) {
+  return apiSend<void>("POST", `/api/users/${userId}/password`, { newPassword });
 }

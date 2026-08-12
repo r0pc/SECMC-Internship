@@ -1,5 +1,6 @@
 ﻿using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Enums;
+using DataIntelligence.Core.Security;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -11,12 +12,16 @@ namespace DataIntelligence.Infrastructure.Persistence;
 /// from this context are the deployment mechanism (NFR Maintainability).
 /// </summary>
 /// <remarks>
-/// The <c>sec</c> schema is not mapped here — it belongs to the authentication work (FR-9) and is
-/// untouched by collection. The <c>ai</c> schema is mapped, because the assistant's audit log is
-/// written through this context (NFR Auditability). Its <c>UserId</c> columns are plain integers
-/// rather than mapped relationships: <c>docs/database-schema.sql</c> gives them a foreign key to
-/// <c>sec.AppUser</c>, and that constraint can only be added once FR-9 creates the table it points
-/// at. Recorded in the migration as a TODO rather than silently dropped.
+/// The <c>sec</c> schema is mapped here as of FR-9. It is untouched by collection, but it is the
+/// table the <c>ai</c> schema's <c>UserId</c> columns point at, and both are written through this
+/// one context — a second context over the same database would buy separation at the cost of a
+/// foreign key EF could no longer see.
+/// <para>
+/// That foreign key is now real: <c>ai.AssistantSession.UserId</c> references
+/// <c>sec.AppUser.UserId</c> exactly as <c>docs/database-schema.sql</c> always said it should. It
+/// was carried as a TODO in the migration that created the audit log, because a constraint cannot
+/// reference a table that does not exist yet.
+/// </para>
 /// </remarks>
 public class DataIntelligenceDbContext : DbContext
 {
@@ -32,6 +37,10 @@ public class DataIntelligenceDbContext : DbContext
     public DbSet<SofrDailyRate> SofrDailyRates => Set<SofrDailyRate>();
     public DbSet<RejectedObservation> RejectedObservations => Set<RejectedObservation>();
     public DbSet<AssistantSession> AssistantSessions => Set<AssistantSession>();
+
+    public DbSet<AppUser> Users => Set<AppUser>();
+    public DbSet<Role> Roles => Set<Role>();
+    public DbSet<UserRole> UserRoles => Set<UserRole>();
 
     /// <summary>Read-only view of the turns inside every session's JSON transcript.</summary>
     public DbSet<AssistantTurn> AssistantTurns => Set<AssistantTurn>();
@@ -59,6 +68,9 @@ public class DataIntelligenceDbContext : DbContext
         ConfigureCpiObservation(modelBuilder.Entity<CpiObservation>());
         ConfigureSofrDailyRate(modelBuilder.Entity<SofrDailyRate>());
         ConfigureRejectedObservation(modelBuilder.Entity<RejectedObservation>());
+        ConfigureAppUser(modelBuilder.Entity<AppUser>());
+        ConfigureRole(modelBuilder.Entity<Role>());
+        ConfigureUserRole(modelBuilder.Entity<UserRole>());
         ConfigureAssistantSession(modelBuilder.Entity<AssistantSession>());
         ConfigureAssistantTurn(modelBuilder.Entity<AssistantTurn>());
         ConfigureAssistantSessionSummary(modelBuilder.Entity<AssistantSessionSummary>());
@@ -72,8 +84,8 @@ public class DataIntelligenceDbContext : DbContext
     }
 
     /// <summary>
-    /// The designated sources (SOW 0.1), seeded through the migration so a fresh deployment has
-    /// something to collect from.
+    /// The designated sources (SOW 0.1) and the three access roles (FR-9), seeded through the
+    /// migration so a fresh deployment has something to collect from and something to sign in as.
     /// </summary>
     /// <remarks>
     /// Reference data rather than user configuration: the platform is commissioned against these
@@ -130,6 +142,30 @@ public class DataIntelligenceDbContext : DbContext
                     "https://www.newyorkfed.org/markets/reference-rates/terms-of-use-for-selected-rate-data",
                 IsEnabled = true,
                 CreatedAtPkt = seededAt
+            });
+
+        // The roles, with the ids and descriptions from docs/database-schema.sql. No user is
+        // seeded alongside them: an account needs a password, a password cannot be committed, and
+        // a migration that invented one would ship every deployment the same known credentials.
+        // The first administrator is created at startup from configuration — see AdminAccountSeeder.
+        modelBuilder.Entity<Role>().HasData(
+            new Role
+            {
+                RoleId = PlatformRoles.AdministratorId,
+                Name = PlatformRoles.Administrator,
+                Description = "Full access: configuration, user management, all data."
+            },
+            new Role
+            {
+                RoleId = PlatformRoles.AnalystId,
+                Name = PlatformRoles.Analyst,
+                Description = "Dashboards, drill-down and the AI query assistant."
+            },
+            new Role
+            {
+                RoleId = PlatformRoles.ViewerId,
+                Name = PlatformRoles.Viewer,
+                Description = "Read-only dashboards."
             });
     }
 
@@ -466,6 +502,71 @@ public class DataIntelligenceDbContext : DbContext
             .HasDatabaseName("IX_RejectedObservation_Run");
     }
 
+    // -------------------------------------------------------------------- sec
+
+    private static void ConfigureAppUser(EntityTypeBuilder<AppUser> entity)
+    {
+        entity.ToTable("AppUser", "sec");
+
+        entity.HasKey(e => e.UserId).HasName("PK_AppUser");
+
+        // Unique rather than merely indexed: the email is the login, and two rows sharing one
+        // would make "which account is this" a question the database could not answer.
+        entity.HasIndex(e => e.Email).IsUnique().HasDatabaseName("UQ_AppUser_Email");
+
+        entity.Property(e => e.Email).HasMaxLength(256).IsRequired();
+        entity.Property(e => e.DisplayName).HasMaxLength(150).IsRequired();
+
+        // 500 is the schema's figure and is generous: an Identity v3 hash is 84 characters. The
+        // headroom is for a future iteration count or algorithm that produces a longer one.
+        entity.Property(e => e.PasswordHash).HasMaxLength(500).IsRequired();
+
+        entity.Property(e => e.SecurityStamp).HasDefaultValueSql("NEWID()");
+        entity.Property(e => e.IsActive).HasDefaultValue(true);
+        entity.Property(e => e.CreatedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+    }
+
+    private static void ConfigureRole(EntityTypeBuilder<Role> entity)
+    {
+        entity.ToTable("Role", "sec");
+
+        entity.HasKey(e => e.RoleId).HasName("PK_Role");
+
+        // Fixed ids, allocated by PlatformRoles rather than by the database. The roles are seeded
+        // reference data that code refers to by name, and an IDENTITY column would let two
+        // environments disagree about which number 'Analyst' is.
+        entity.Property(e => e.RoleId).ValueGeneratedNever();
+
+        entity.HasIndex(e => e.Name).IsUnique().HasDatabaseName("UQ_Role_Name");
+
+        entity.Property(e => e.Name).HasMaxLength(50).IsRequired();
+        entity.Property(e => e.Description).HasMaxLength(250);
+    }
+
+    private static void ConfigureUserRole(EntityTypeBuilder<UserRole> entity)
+    {
+        entity.ToTable("UserRole", "sec");
+
+        entity.HasKey(e => new { e.UserId, e.RoleId }).HasName("PK_UserRole");
+
+        entity.Property(e => e.GrantedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+
+        // Cascade from the user, because a grant is meaningless without the account it was made
+        // to. Nothing cascades from the role: the three roles are reference data and deleting one
+        // is a mistake the constraint should stop rather than propagate.
+        entity.HasOne(e => e.User)
+            .WithMany(u => u.Roles)
+            .HasForeignKey(e => e.UserId)
+            .HasConstraintName("FK_UserRole_User")
+            .OnDelete(DeleteBehavior.Cascade);
+
+        entity.HasOne(e => e.Role)
+            .WithMany(r => r.Users)
+            .HasForeignKey(e => e.RoleId)
+            .HasConstraintName("FK_UserRole_Role")
+            .OnDelete(DeleteBehavior.NoAction);
+    }
+
     // --------------------------------------------------------------------- ai
 
     private static void ConfigureAssistantSession(EntityTypeBuilder<AssistantSession> entity)
@@ -482,6 +583,20 @@ public class DataIntelligenceDbContext : DbContext
         entity.Property(e => e.SessionId).ValueGeneratedNever();
         entity.Property(e => e.StartedAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
         entity.Property(e => e.LastActivityAtPkt).HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+
+        // The constraint FR-9 was always going to add. Declared without a navigation property:
+        // the assistant reads and writes transcripts and has no business loading an account
+        // alongside one, but "this session belongs to a user who exists" is the database's job to
+        // guarantee and not the application's to remember.
+        //
+        // NoAction, so deleting an account is refused while its questions are still on file. Those
+        // rows are the audit record (NFR Auditability); cascading would let one DELETE erase the
+        // evidence of what someone asked. Accounts are retired with IsActive instead.
+        entity.HasOne<AppUser>()
+            .WithMany()
+            .HasForeignKey(e => e.UserId)
+            .HasConstraintName("FK_AssistantSession_User")
+            .OnDelete(DeleteBehavior.NoAction);
 
         entity.HasIndex(e => new { e.UserId, e.StartedAtPkt })
             .IsDescending(false, true)

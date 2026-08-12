@@ -12,6 +12,10 @@
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="10.2.3" />
     <!-- Pinned above the 2.0.0 that Microsoft.AspNetCore.OpenApi pulls in transitively (GHSA-v5pm-xwqc-g5wc). -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.11.0" />
+    <!-- Validates the bearer token on every request (FR-9). The issuing half lives in
+         Infrastructure, which signs with Microsoft.IdentityModel.JsonWebTokens 8.19.2 - the same
+         version this package reads with. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
   </ItemGroup>
 
   <ItemGroup>

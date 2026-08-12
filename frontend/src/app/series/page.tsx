@@ -14,6 +14,7 @@ import {
   formatValue,
   humanizeEnum,
 } from "@/lib/format";
+import { requireSession } from "@/lib/session";
 import { type SearchParams, readEnum, readPage, readParam } from "@/lib/url";
 import type { Dataset } from "@/types/api";
 
@@ -32,6 +33,8 @@ export default async function SeriesPage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
+  await requireSession();
+
   const params = await searchParams;
   const dataset = readEnum(params, "dataset", DATASETS);
   const page = readPage(params);

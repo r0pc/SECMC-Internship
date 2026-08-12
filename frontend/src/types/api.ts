@@ -410,3 +410,57 @@ export interface AssistantTranscriptDto {
   lastActivityAtPkt: IsoUtcTimestamp;
   turns: AssistantTranscriptTurnDto[];
 }
+
+// ---------------------------------------------------------------------------
+// Authentication (FR-9)
+// ---------------------------------------------------------------------------
+
+/**
+ * The three access levels, most privileged first.
+ *
+ * Mirrors `PlatformRoles` in `DataIntelligence.Core/Security`, and the order matters: the API
+ * returns a user's roles in it, so `roles[0]` is the highest one they hold.
+ */
+export type PlatformRole = "Administrator" | "Analyst" | "Viewer";
+
+/** The signed-in caller, as the API reads them out of their token. */
+export interface AuthenticatedUserDto {
+  userId: number;
+  email: string;
+  displayName: string;
+  roles: PlatformRole[];
+}
+
+/** What a correct password buys: the token, when it dies, and who the caller is. */
+export interface LoginResponse {
+  accessToken: string;
+  expiresAtUtc: IsoUtcTimestamp;
+  user: AuthenticatedUserDto;
+}
+
+/** One account, for the administrator's user list. */
+export interface UserDto {
+  userId: number;
+  email: string;
+  displayName: string;
+  roles: PlatformRole[];
+  isActive: boolean;
+  createdAtPkt: IsoUtcTimestamp;
+  /** Null until they have signed in once. */
+  lastLoginAtPkt: IsoUtcTimestamp | null;
+}
+
+export interface CreateUserRequest {
+  email: string;
+  displayName: string;
+  password: string;
+  /** Empty grants Viewer — the API's own default, not this app's. */
+  roles: PlatformRole[];
+}
+
+/** Omitted fields are left unchanged. The email is not editable: it is the login. */
+export interface UpdateUserRequest {
+  displayName?: string;
+  roles?: PlatformRole[];
+  isActive?: boolean;
+}

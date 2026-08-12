@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import { AssistantChat } from "@/components/assistant-chat";
 import { PageHeader } from "@/components/card";
+import { requireRole } from "@/lib/session";
 
 /**
  * The AI query assistant (FR-13 – FR-16).
@@ -18,7 +19,12 @@ export const metadata: Metadata = {
     "Ask questions about the collected CPI and SOFR data in plain language. Every question is turned into a read-only query, shown with its answer, and logged for review.",
 };
 
-export default function AssistantPage() {
+export default async function AssistantPage() {
+  // Analysts and administrators. A Viewer's role is read-only dashboards, and the API answers
+  // their assistant calls with a 403 — sending them to a chat that refuses every question would
+  // be a worse answer than the dashboard they can use.
+  await requireRole("Administrator", "Analyst");
+
   return (
     <div className="space-y-6">
       <PageHeader

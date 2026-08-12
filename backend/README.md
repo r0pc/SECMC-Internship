@@ -6,7 +6,10 @@
 
 ## Current implementation status
 
-The platform's core backend, data collection, database, dashboard APIs, AI assistant,chat history, and token tracking are implemented. The remaining work is authentication(FR-9) and the frontend login page. After authentication is added, user identity can beconnected to assistant sessions and audit records.
+The platform's core backend, data collection, database, dashboard APIs, AI assistant, chat
+history, token tracking and authentication (FR-9) are implemented. Every endpoint but `/health`
+and the login now requires a bearer token, roles gate what each one reaches, and the assistant
+records questions against the account that actually asked them rather than a placeholder.
 
 ## Projects
 
@@ -130,17 +133,86 @@ Every question is written to `ai.AssistantQuery` **before** its SQL is generated
 
 The assistant needs `Assistant:ApiKey`. Without it the API still starts and the dashboards stillwork — `/api/assistant/ask` answers `503` naming the missing setting. A missing LLM key is not areason for the whole API to be down.
 
-Authentication is not wired up yet (FR-9). Every endpoint is currently anonymous, and`/api/assistant/ask` records a placeholder user id — see the TODO in `AssistantEndpoints`.`ai.AssistantSession.UserId` and `ai.AssistantQuery.UserId` carry a foreign key to `sec.AppUser` in`docs/database-schema.sql`, so **a row must exist in `sec.AppUser` for that id before the assistantcan write its audit log**. The EF migration creates the columns and their indexes but not theconstraint, because the table it points at arrives with FR-9.
+### Authentication and authorization (FR-9)
+
+`POST /api/auth/login` exchanges an email and password for a bearer token; every other endpoint
+requires one. The two exceptions are that call itself and `/health`, which is anonymous because a
+load balancer cannot sign in and "the process is up and can see its database" is not worth a
+credential. The requirement is declared once, on the `/api` group, so an endpoint added later is
+protected by being added rather than by someone remembering to protect it.
+
+Three roles, seeded by the migration, and each tier's roles are a subset of the one below it:
+
+| Policy | Roles | Reaches |
+| --- | --- | --- |
+| `ReadDashboards` | all three | Dashboards, catalogue, observations, sources, collection log |
+| `UseAssistant` | Administrator, Analyst | `POST /assistant/ask` and the caller's own conversations |
+| `Administer` | Administrator | `/api/users`, `PATCH /api/sources/{id}`, the assistant audit log |
+
+Viewers are kept out of the assistant deliberately: a question costs model tokens and writes an
+audit record naming who asked, which is more than "read-only dashboards" grants. The audit log is
+administrator-only because it exposes more than the rest of the API does — every question every
+user has asked, and the SQL it became.
+
+Tokens are signed with HMAC-SHA256 (`Auth:SigningKey`) and live eight hours — a working day, so an
+analyst signs in once in the morning. That is affordable only because they are **revocable**: each
+token carries the account's security stamp, and `OnTokenValidated` re-reads the account and
+compares it on every request. Disable someone, change their password, or change their roles, and
+their open sessions stop working on their next call rather than eight hours later. Without that
+check the lifetime would have to be minutes, with refresh tokens to match.
+
+Passwords are hashed by ASP.NET Identity's `PasswordHasher<T>` — PBKDF2, in the v3 format
+`docs/database-schema.sql` specifies for the column. Nothing here computes a hash itself. A
+sign-in for an unknown address still pays for a verification against a throwaway hash, so the
+timing does not reveal whether an address has an account here, and the response is identical
+either way.
+
+Accounts are created by administrators; there is no self-registration. The first one comes from
+`Auth:SeedAdministrator` at startup, which is the bootstrap problem and nothing else — it does
+nothing once any active administrator exists. Two edits are refused: deactivating or demoting
+yourself, and removing the last active administrator, because both leave a platform nobody can
+administer and no endpoint that could fix it.
+
+`ai.AssistantSession.UserId` now has its foreign key to `sec.AppUser`, which
+`docs/database-schema.sql` always specified and the audit-log migration had to leave out. The
+migration that adds it back-fills a deactivated, no-login account for any user id already in the
+assistant's history, so questions asked under the old placeholder id keep their record instead of
+blocking the constraint. Accounts are retired with `IsActive`, never deleted: the rows pointing at
+them are the record of what was asked.
 
 ## Configuration and secrets
 
 Connection strings and API keys are never committed (SOW 3 — Security). `appsettings.json`holds empty placeholders; supply real values through user secrets locally:
 
-```powershelldotnet user-secrets set "ConnectionStrings:DataIntelligenceDb" "<connection string>" --project src\DataIntelligence.Apidotnet user-secrets set "ConnectionStrings:DataIntelligenceDb" "<connection string>" --project src\DataIntelligence.Worker```
+```powershell
+dotnet user-secrets set "ConnectionStrings:DataIntelligenceDb" "<connection string>" --project src\DataIntelligence.Api
+dotnet user-secrets set "ConnectionStrings:DataIntelligenceDb" "<connection string>" --project src\DataIntelligence.Worker
+```
+
+The API **will not start** without `Auth:SigningKey` (FR-9). That is deliberate: every endpoint
+needs it, so a process that booted without one would serve nothing but 401s while looking healthy.
+On a fresh machine, set it and the bootstrap administrator:
+
+```powershell
+# 48 random bytes, base64 — 64 characters, comfortably over the 32-character floor.
+# RNGCryptoServiceProvider, not Get-Random: the latter is a deterministic PRNG seeded from the
+# system clock, which is fine for a sample and is not what a signing key should be drawn from.
+$bytes = New-Object byte[] 48
+$rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+$rng.GetBytes($bytes); $rng.Dispose()
+
+dotnet user-secrets set "Auth:SigningKey" ([Convert]::ToBase64String($bytes)) --project src\DataIntelligence.Api
+dotnet user-secrets set "Auth:SeedAdministrator:Email" "you@example.com" --project src\DataIntelligence.Api
+dotnet user-secrets set "Auth:SeedAdministrator:DisplayName" "Your Name" --project src\DataIntelligence.Api
+dotnet user-secrets set "Auth:SeedAdministrator:Password" "<at least 12 characters>" --project src\DataIntelligence.Api
+```
+
+Start the API once, sign in, change that password, and remove the `SeedAdministrator` settings —
+they are ignored from then on anyway, since an active administrator exists.
 
 Use environment variables in deployed environments.
 
-| Setting | Where | Notes || --- | --- | --- || `ConnectionStrings:DataIntelligenceDb` | Api, Worker | SQL Server connection string. || `Cors:AllowedOrigins` | Api | Frontend origins. Defaults to `http://localhost:3000` in Development. || `Collection:Bls:ApiKey` | Api, Worker | BLS registration key. **Never committed** — user secrets or environment only. Optional: unregistered v2 calls still work under a much smaller daily quota, so an absent key degrades rather than stops collection. || `Collection:IntervalMinutes` | Worker | 60 (hourly, FR-1). Cycles align to the wall clock unless `AlignToClock` is false. || `Collection:Bls:YearsOfHistory` | Worker | 2 — current and previous calendar year per request. || `ConnectionStrings:DataIntelligenceDbReadOnly` | Api | Optional. A login in the `di_ai_readonly` role. Leave empty on a Windows-authentication-only instance, where that role has no login to authenticate as. **Never the app's read-write login** — that removes the second of the two controls without changing anything visible. || `Assistant:ExecuteAsUser` | Api | Database user switched to before generated SQL runs, used when the above is empty. Defaults to `di_ai_user`, created by section 6 of `docs/database-schema.sql`. Set both to empty and the assistant refuses to execute at all. || `Assistant:ApiKey` | Api | DeepSeek platform key. **Never committed.** Used when the DeepSeek API model option is selected. || `Assistant:BaseUrl` · `Assistant:Model` | Api | DeepSeek API endpoint/model configuration. The application also supports the local Qwen 3.5:2B model option. || `Assistant:RequestTimeoutSeconds` · `SqlExecutionTimeoutSeconds` · `MaxOutputTokens` | Api | 30 / 10 / 1024. The response-time budget FR-15 asks for. |
+| Setting | Where | Notes || --- | --- | --- || `ConnectionStrings:DataIntelligenceDb` | Api, Worker | SQL Server connection string. || `Auth:SigningKey` | Api | HMAC key every access token is signed with, 32 characters minimum. **Never committed**, and **required** — the API refuses to start without it. Changing it signs everyone out, which is the lever to pull if it leaks. || `Auth:TokenLifetimeMinutes` | Api | 480. Long because tokens are revocable on every request; see the authentication section. || `Auth:Issuer` · `Auth:Audience` | Api | Written into each token and required to match when one is presented. || `Auth:SeedAdministrator:*` | Api | `Email`, `DisplayName`, `Password` for the first administrator, created at startup when the platform has none. **Never committed.** Ignored once an active administrator exists. || `Cors:AllowedOrigins` | Api | Frontend origins. Defaults to `http://localhost:3000` in Development. || `Collection:Bls:ApiKey` | Api, Worker | BLS registration key. **Never committed** — user secrets or environment only. Optional: unregistered v2 calls still work under a much smaller daily quota, so an absent key degrades rather than stops collection. || `Collection:IntervalMinutes` | Worker | 60 (hourly, FR-1). Cycles align to the wall clock unless `AlignToClock` is false. || `Collection:Bls:YearsOfHistory` | Worker | 2 — current and previous calendar year per request. || `ConnectionStrings:DataIntelligenceDbReadOnly` | Api | Optional. A login in the `di_ai_readonly` role. Leave empty on a Windows-authentication-only instance, where that role has no login to authenticate as. **Never the app's read-write login** — that removes the second of the two controls without changing anything visible. || `Assistant:ExecuteAsUser` | Api | Database user switched to before generated SQL runs, used when the above is empty. Defaults to `di_ai_user`, created by section 6 of `docs/database-schema.sql`. Set both to empty and the assistant refuses to execute at all. || `Assistant:ApiKey` | Api | DeepSeek platform key. **Never committed.** Used when the DeepSeek API model option is selected. || `Assistant:BaseUrl` · `Assistant:Model` | Api | DeepSeek API endpoint/model configuration. The application also supports the local Qwen 3.5:2B model option. || `Assistant:RequestTimeoutSeconds` · `SqlExecutionTimeoutSeconds` · `MaxOutputTokens` | Api | 30 / 10 / 1024. The response-time budget FR-15 asks for. |
 
 SOFR has no window setting: the adapter asks for the current calendar year every cycle, which isthe annual extract the schema is written against and means a gap left by an outage or a laterevision is repaired by the next run.
 

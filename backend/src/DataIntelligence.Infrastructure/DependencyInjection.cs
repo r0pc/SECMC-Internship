@@ -1,8 +1,11 @@
+using DataIntelligence.Core.Entities;
 using DataIntelligence.Core.Interfaces;
 using DataIntelligence.Infrastructure.Ai;
 using DataIntelligence.Infrastructure.Analytics;
 using DataIntelligence.Infrastructure.Collection;
 using DataIntelligence.Infrastructure.Persistence;
+using DataIntelligence.Infrastructure.Security;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -114,6 +117,43 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds * 2);
         }
     }
+    /// <summary>
+    /// Registers accounts, password hashing and token issuance (FR-9).
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="AddAssistant"/>, this validates on start. A missing assistant key costs
+    /// one endpoint; a missing signing key means no caller can authenticate against any of them,
+    /// and every endpoint now requires it — a process that boots into that state is a process that
+    /// serves nothing but 401s while looking healthy.
+    /// </remarks>
+    public static IServiceCollection AddSecurity(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<AuthOptions>()
+            .Bind(configuration.GetSection(AuthOptions.SectionName))
+            .ValidateDataAnnotations()
+            .Validate(
+                options => !string.IsNullOrWhiteSpace(options.SigningKey),
+                "Auth:SigningKey is not configured. Set it via user secrets locally or an "
+                + "environment variable in deployed environments; it must be at least 32 "
+                + "characters. Secrets are supplied outside source control (SOW 3 - Security).")
+            .ValidateOnStart();
+
+        services.TryAddSingleton(TimeProvider.System);
+
+        // ASP.NET Identity's PBKDF2 hasher, and nothing else from Identity. Singleton because it
+        // holds only its options and is safe to share.
+        services.TryAddSingleton<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
+
+        services.AddSingleton<IAccessTokenIssuer, JwtAccessTokenIssuer>();
+        services.AddScoped<IUserService, UserService>();
+
+        services.AddHostedService<AdminAccountSeeder>();
+
+        return services;
+    }
+
     /// <summary>Registers the AI query assistant (FR-13 – FR-16).</summary>
     /// <remarks>
     /// Deliberately does not <c>ValidateOnStart</c>: the assistant's API key is not required for

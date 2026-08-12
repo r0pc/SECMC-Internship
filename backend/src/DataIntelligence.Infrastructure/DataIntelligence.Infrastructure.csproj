@@ -13,6 +13,15 @@
     <!-- Binds and validates the Collection options section at startup. -->
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.10" />
+    <!-- PasswordHasher<T> only: the Identity v3 hash format sec.AppUser.PasswordHash is specified
+         in. None of Identity's stores, managers or schema are used - accounts live in sec.AppUser,
+         which docs/database-schema.sql designed, not in AspNetUsers. -->
+    <PackageReference Include="Microsoft.Extensions.Identity.Core" Version="10.0.10" />
+    <!-- Signs the access token. 8.19.2 is what Microsoft.AspNetCore.Authentication.JwtBearer
+         10.0.10 validates with in the API project; the writer and the reader have to agree. -->
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.19.2" />
+    <!-- IHostedService, for the one-shot first-administrator seeder. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
     <!-- HtmlAgilityPack was dropped when the confirmed sources turned out to publish official
          JSON APIs (SOW 9). System.Text.Json in the base library covers both adapters. -->
   </ItemGroup>

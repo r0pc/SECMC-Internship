@@ -42,6 +42,8 @@ still needs this app's origin in it before anything moves client-side.
 | `/assistant` | Ask questions in plain language. Each answer carries the SQL that produced it, its bound parameters, and the model's explanation (FR-13 – FR-16) |
 | `/collection` | Collection health and the log of every attempt, filterable by status and source (FR-2) |
 | `/sources` | Publishers, polling settings and terms-of-use links (FR-7, SOW 3) |
+| `/admin/users` | Accounts, roles, deactivation and password resets. Administrator only (FR-9) |
+| `/login` · `/logout` | Sign in, and the Route Handler that clears the session cookie (FR-9) |
 
 Every route is server-rendered on demand. Filters live in the query string, so any view is
 a link that can be pasted into a ticket.
@@ -54,6 +56,34 @@ to the backend and means no CORS allowance is needed for the app's first interac
 The transcript is deliberately not persisted to `localStorage`. Sessions are server-side and the
 audit log is the durable record; a second copy in the browser would put users' questions somewhere
 nobody has agreed they should be, for no benefit a reload does not already provide.
+
+## Authentication (FR-9)
+
+Sign-in posts to a Server Function, which calls the API and stores the returned bearer token in an
+**HttpOnly** cookie. The token never reaches the browser as script-readable state, so an XSS bug in
+a chart component cannot walk off with a valid credential, and `src/lib/api.ts` attaches it to
+every server-side call.
+
+Three layers, and only one of them is a control:
+
+| Layer | What it does | What it is worth |
+| --- | --- | --- |
+| `src/proxy.ts` | Redirects a visitor with no session cookie to `/login` | A redirect, not a guard. It reads the cookie and nothing else — it runs on every request including prefetches, so it must not call the API, and it cannot verify a signature because the signing key belongs to the API alone |
+| `requireSession` / `requireRole` in each page and Server Function | Decides what to render, and refuses to act | Close to the data, as the Next.js guide asks. Server Functions check for themselves because each one is a public endpoint with a generated name — reaching it does not mean anyone rendered the page that offers it |
+| The API | Verifies the signature, re-reads the account, compares its security stamp | **This is the control.** A forged cookie earns a rendered login page and 401s from everything behind it |
+
+`proxy.ts`, not `middleware.ts`: Next 16 renamed the convention.
+
+When the API refuses a token this app still holds — the session expired, or an administrator
+disabled the account, or its password or roles changed — `src/lib/api.ts` redirects to `/logout`,
+which clears the cookie and sends the visitor to `/login` with a message saying the session ended.
+The detour through a Route Handler is not decoration: a Server Component cannot delete a cookie, so
+redirecting straight to `/login` would leave the dead cookie in place and bounce the visitor
+between the two pages.
+
+Roles decide what the navigation offers — Viewers see no Assistant link, non-administrators no
+Users link — which is a courtesy to the person who cannot use them rather than a control. The API
+refuses the request either way.
 
 ## Layout
 
@@ -91,6 +121,11 @@ dead endpoint costs its own panel and not the page.
 
 ## Not built yet
 
-- Authentication (FR-9). Every API endpoint is anonymous, which is why `/sources` is
-  read-only here even though the API accepts `PATCH` on a source's polling settings.
+- Editing a source's polling settings. The API accepts `PATCH` from an administrator (FR-9) and
+  `/sources` still only reads: the surface worth having there is what each publisher is and what
+  its terms are, and the editing endpoint exists for an operator with a reason to use it rather
+  than for a button on a reference page.
+- A "change my own password" screen. `POST /api/auth/password` exists and is wired into
+  `src/lib/api.ts`; what is missing is the page. An administrator setting a password on someone's
+  behalf is covered by `/admin/users`.
   

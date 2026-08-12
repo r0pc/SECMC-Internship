@@ -20,6 +20,7 @@ import {
   formatTimestamp,
   humanizeEnum,
 } from "@/lib/format";
+import { requireSession } from "@/lib/session";
 import {
   type SearchParams,
   readEnum,
@@ -59,6 +60,8 @@ export default async function CollectionPage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
+  await requireSession();
+
   const params = await searchParams;
 
   return (

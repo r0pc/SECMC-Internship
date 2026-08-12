@@ -186,7 +186,7 @@ pipeline is running against both live APIs.
 | Database schema + ERD | Delivered. DDL verified against SQL Server, loaded with the real published extracts, and diffed against the EF migration |
 | Data collection (FR-1 – FR-4, FR-8) | Implemented. Hourly, per source, with failure categories, deduplication and revision history |
 | Read API (FR-7, FR-10 – FR-12) | Dashboard, catalogue, observation and collection-log endpoints |
-| Authentication (FR-9) | Not started — every endpoint is currently anonymous |
+| Authentication (FR-9) | Delivered. Bearer tokens, three roles, admin-created accounts, and a login page. Every endpoint but `/health` and the login itself requires a token |
 | AI query assistant (FR-13 – FR-16) | Delivered. Question to SQL, safety validation, read-only execution, natural-language answer, and a full audit record of every turn |
 | Frontend dashboards (FR-10 – FR-12) | Delivered. Dashboard, series catalogue, series detail, collection log and sources, server-rendered against the live API |
 | Frontend assistant (FR-13 – FR-16) | Delivered. Chat with resumable conversations, the generated SQL behind a disclosure, and per-chat token cost. Answers are prose only — no result table, no chart — and the model is told to write them that way |
@@ -197,6 +197,18 @@ rows that came back — a question that cannot be expressed against the data is 
 answered from the model's own memory. Every turn is recorded, refusals included: the question, the
 SQL, the parameters, the outcome, the answer, token usage and timings (NFR Auditability). Both are
 visible in the UI — the SQL behind each answer, and what each conversation has cost in tokens.
+
+Everything above is now behind a sign-in. A password buys a bearer token good for a working day,
+and one of three roles decides what it reaches: a Viewer reads dashboards, an Analyst also asks the
+assistant, an Administrator also manages accounts and sources. Accounts are created by
+administrators — there is no self-registration, so reaching the login page entitles a visitor to
+nothing.
+
+The tokens are long-lived because they are revocable rather than in spite of it: each one carries
+the account's security stamp, and the API re-reads the account and compares it on **every** request.
+Disable someone, reset their password, or change their roles, and their open sessions stop working
+on their next call. The frontend holds the token in an HttpOnly cookie no script can read, and
+still makes every API call from the server.
 
 Timestamps in the database are Pakistan Standard Time (UTC+05:00) wall-clock readings, named with
 an `...AtPkt` suffix. The frontend offers a light/dark theme toggle, remembered per browser and
@@ -214,6 +226,10 @@ Known gaps worth tracking:
   artifact under `docs/`.
 - No performance measurement has been taken against the 3-second dashboard budget; there is no
   seeded staging environment to take it in yet.
+- There is no rate limit on `POST /api/auth/login`. Passwords are PBKDF2-hashed, so guessing is
+  expensive per attempt, and nothing yet stops a caller from making a great many of them.
+- No page for changing your own password. The endpoint exists (`POST /api/auth/password`) and an
+  administrator can set one for someone; what is missing is the screen.
 
 ## Team
 

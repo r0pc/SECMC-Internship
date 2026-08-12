@@ -24,6 +24,59 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
 
             modelBuilder.HasSequence("AssistantTurnId", "ai");
 
+            modelBuilder.Entity("DataIntelligence.Core.Entities.AppUser", b =>
+                {
+                    b.Property<int>("UserId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("UserId"));
+
+                    b.Property<DateTime>("CreatedAtPkt")
+                        .ValueGeneratedOnAdd()
+                        .HasPrecision(3)
+                        .HasColumnType("datetime2(3)")
+                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(true);
+
+                    b.Property<DateTime?>("LastLoginAtPkt")
+                        .HasPrecision(3)
+                        .HasColumnType("datetime2(3)");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("SecurityStamp")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.HasKey("UserId")
+                        .HasName("PK_AppUser");
+
+                    b.HasIndex("Email")
+                        .IsUnique()
+                        .HasDatabaseName("UQ_AppUser_Email");
+
+                    b.ToTable("AppUser", "sec");
+                });
+
             modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantSession", b =>
                 {
                     b.Property<Guid>("SessionId")
@@ -673,6 +726,50 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DataIntelligence.Core.Entities.Role", b =>
+                {
+                    b.Property<byte>("RoleId")
+                        .HasColumnType("tinyint");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(250)
+                        .HasColumnType("nvarchar(250)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.HasKey("RoleId")
+                        .HasName("PK_Role");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("UQ_Role_Name");
+
+                    b.ToTable("Role", "sec");
+
+                    b.HasData(
+                        new
+                        {
+                            RoleId = (byte)1,
+                            Description = "Full access: configuration, user management, all data.",
+                            Name = "Administrator"
+                        },
+                        new
+                        {
+                            RoleId = (byte)2,
+                            Description = "Dashboards, drill-down and the AI query assistant.",
+                            Name = "Analyst"
+                        },
+                        new
+                        {
+                            RoleId = (byte)3,
+                            Description = "Read-only dashboards.",
+                            Name = "Viewer"
+                        });
+                });
+
             modelBuilder.Entity("DataIntelligence.Core.Entities.SofrDailyRate", b =>
                 {
                     b.Property<long>("SofrDailyRateId")
@@ -793,6 +890,38 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DataIntelligence.Core.Entities.UserRole", b =>
+                {
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("RoleId")
+                        .HasColumnType("tinyint");
+
+                    b.Property<DateTime>("GrantedAtPkt")
+                        .ValueGeneratedOnAdd()
+                        .HasPrecision(3)
+                        .HasColumnType("datetime2(3)")
+                        .HasDefaultValueSql("DATEADD(hour, 5, SYSUTCDATETIME())");
+
+                    b.HasKey("UserId", "RoleId")
+                        .HasName("PK_UserRole");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("UserRole", "sec");
+                });
+
+            modelBuilder.Entity("DataIntelligence.Core.Entities.AssistantSession", b =>
+                {
+                    b.HasOne("DataIntelligence.Core.Entities.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_AssistantSession_User");
+                });
+
             modelBuilder.Entity("DataIntelligence.Core.Entities.CollectionRun", b =>
                 {
                     b.HasOne("DataIntelligence.Core.Entities.DataSource", "DataSource")
@@ -848,11 +977,42 @@ namespace DataIntelligence.Infrastructure.Persistence.Migrations
                     b.Navigation("Run");
                 });
 
+            modelBuilder.Entity("DataIntelligence.Core.Entities.UserRole", b =>
+                {
+                    b.HasOne("DataIntelligence.Core.Entities.Role", "Role")
+                        .WithMany("Users")
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_UserRole_Role");
+
+                    b.HasOne("DataIntelligence.Core.Entities.AppUser", "User")
+                        .WithMany("Roles")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("FK_UserRole_User");
+
+                    b.Navigation("Role");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("DataIntelligence.Core.Entities.AppUser", b =>
+                {
+                    b.Navigation("Roles");
+                });
+
             modelBuilder.Entity("DataIntelligence.Core.Entities.CollectionRun", b =>
                 {
                     b.Navigation("RawPayloads");
 
                     b.Navigation("RejectedObservations");
+                });
+
+            modelBuilder.Entity("DataIntelligence.Core.Entities.Role", b =>
+                {
+                    b.Navigation("Users");
                 });
 #pragma warning restore 612, 618
         }

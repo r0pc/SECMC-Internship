@@ -1,3 +1,4 @@
+using DataIntelligence.Api.Security;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Interfaces;
 
@@ -49,13 +50,18 @@ public static class SourceEndpoints
 
                 return result.ToHttpResult(Results.Ok);
             })
+            // Administrator only. Everything else in this file is a read that any signed-in user
+            // may make; this one can switch off collection from a publisher, which is the whole
+            // platform quietly going stale.
+            .RequireAuthorization(AuthorizationPolicies.Administer)
             .WithName("UpdateSource")
             .WithSummary("Updates the polling settings of a source.")
             .WithDescription(
-                "Only fields the platform owns are editable — enabled state, interval, timeout, "
-                + "retries, user agent, terms-of-use link. Endpoint, HTTP method and access method "
-                + "are fixed by the adapter compiled against that publisher, so changing them here "
-                + "could only break collection. Omitted fields are left unchanged.")
+                "Administrator only. Only fields the platform owns are editable — enabled state, "
+                + "interval, timeout, retries, user agent, terms-of-use link. Endpoint, HTTP "
+                + "method and access method are fixed by the adapter compiled against that "
+                + "publisher, so changing them here could only break collection. Omitted fields "
+                + "are left unchanged.")
             .Produces<DataSourceDto>()
             .ProducesValidationProblem()
             .ProducesProblem(StatusCodes.Status404NotFound);

@@ -1,4 +1,6 @@
 ﻿// backend/src/DataIntelligence.Api/Endpoints/AssistantEndpoints.cs
+using System.Security.Claims;
+using DataIntelligence.Api.Security;
 using DataIntelligence.Core.Dtos;
 using DataIntelligence.Core.Enums;
 using DataIntelligence.Core.Exceptions;
@@ -8,8 +10,13 @@ namespace DataIntelligence.Api.Endpoints;
 
 /// <summary>The AI query assistant (FR-13 – FR-17).</summary>
 /// <remarks>
-/// TODO: userId is hard-coded until FR-9 authentication lands; replace with the authenticated
-/// user's id once that work merges.
+/// Every question is recorded against the caller's own id, read from their token. It used to be
+/// hard-coded to 1 against a placeholder account, because FR-9 did not exist yet; the scoping that
+/// was written around that placeholder is what made this a one-line change rather than a rewrite.
+/// <para>
+/// Viewers are excluded. A question costs model tokens and writes an audit record naming who asked,
+/// which is more than "read-only dashboards" grants — see <see cref="AuthorizationPolicies"/>.
+/// </para>
 /// </remarks>
 public static class AssistantEndpoints
 {
@@ -33,11 +40,14 @@ public static class AssistantEndpoints
 
     public static RouteGroupBuilder MapAssistantEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/assistant").WithTags("Assistant");
+        var group = app.MapGroup("/assistant")
+            .WithTags("Assistant")
+            .RequireAuthorization(AuthorizationPolicies.UseAssistant);
 
         group.MapPost("/ask", async (
                 AskQuestionRequest request,
                 HttpContext http,
+                ClaimsPrincipal caller,
                 IAssistantService assistant,
                 CancellationToken cancellationToken) =>
             {
@@ -66,7 +76,8 @@ public static class AssistantEndpoints
 
                 try
                 {
-                    var answer = await assistant.AskAsync(userId: 1, request, clientIp, cancellationToken);
+                    var answer = await assistant.AskAsync(
+                        caller.UserId(), request, clientIp, cancellationToken);
                     return Results.Ok(answer);
                 }
                 catch (AssistantNotConfiguredException ex)
@@ -115,16 +126,17 @@ public static class AssistantEndpoints
     /// Listing and reopening a user's own conversations.
     /// </summary>
     /// <remarks>
-    /// The user id is hard-coded to 1 here exactly as it is on /ask, and every one of these calls
-    /// is scoped by it. That scoping does nothing today — one placeholder user owns everything —
-    /// and is written now rather than later because the day FR-9 makes it real is the day it has
-    /// to already be right: an endpoint that returns a conversation by GUID alone hands one user
-    /// another's chat history the moment there is more than one user.
+    /// Every one of these calls is scoped by the caller's id, exactly as /ask is. The scoping was
+    /// written while one placeholder user owned everything and it did nothing at all, because the
+    /// day FR-9 made it real was the day it had to already be right: an endpoint that returns a
+    /// conversation by GUID alone hands one user another's chat history the moment there is more
+    /// than one user. That day has arrived, and the only change here was where the id comes from.
     /// </remarks>
     private static void MapSessionEndpoints(RouteGroupBuilder group)
     {
         group.MapGet("/sessions", async (
                 int? limit,
+                ClaimsPrincipal caller,
                 IAssistantService assistant,
                 CancellationToken cancellationToken) =>
             {
@@ -133,7 +145,7 @@ public static class AssistantEndpoints
                 var take = Math.Clamp(limit ?? 20, 1, 100);
 
                 return Results.Ok(
-                    await assistant.GetSessionsAsync(userId: 1, take, cancellationToken));
+                    await assistant.GetSessionsAsync(caller.UserId(), take, cancellationToken));
             })
             .WithName("GetAssistantSessions")
             .WithSummary("The caller's past conversations, most recently used first.")
@@ -146,11 +158,12 @@ public static class AssistantEndpoints
 
         group.MapGet("/sessions/{sessionId:guid}", async (
                 Guid sessionId,
+                ClaimsPrincipal caller,
                 IAssistantService assistant,
                 CancellationToken cancellationToken) =>
             {
                 var transcript = await assistant.GetTranscriptAsync(
-                    userId: 1, sessionId, cancellationToken);
+                    caller.UserId(), sessionId, cancellationToken);
 
                 // A conversation belonging to someone else is reported as missing, not as
                 // forbidden. Telling a caller that a session exists but is not theirs is telling
@@ -173,14 +186,17 @@ public static class AssistantEndpoints
     /// The audit-log review surface (NFR Auditability — "logged for review").
     /// </summary>
     /// <remarks>
-    /// TODO: these must be restricted to an administrator once FR-9 lands. They are anonymous
-    /// today because every endpoint is, and they expose more than the rest of the API does — the
-    /// questions users asked and the SQL those produced. Restricting them is the first thing to do
-    /// when roles exist, and this comment is the reminder.
+    /// Administrator only. These expose more than the rest of the API does — the questions every
+    /// user asked and the SQL those produced — so they are not merely "signed in" endpoints. This
+    /// was the first thing FR-9 was asked to fix, and the requirement is declared on the subgroup
+    /// rather than on each endpoint so a third review endpoint inherits it.
     /// </remarks>
     private static void MapReviewEndpoints(RouteGroupBuilder group)
     {
-        group.MapGet("/queries", async (
+        var review = group.MapGroup(string.Empty)
+            .RequireAuthorization(AuthorizationPolicies.Administer);
+
+        review.MapGet("/queries", async (
                 DateTime? fromUtc,
                 DateTime? toUtc,
                 int? userId,
@@ -222,7 +238,7 @@ public static class AssistantEndpoints
             .Produces<PagedResult<AssistantQueryLogDto>>()
             .ProducesProblem(StatusCodes.Status400BadRequest);
 
-        group.MapGet("/queries/{assistantQueryId:long}", async (
+        review.MapGet("/queries/{assistantQueryId:long}", async (
                 long assistantQueryId,
                 IAssistantService assistant,
                 CancellationToken cancellationToken) =>

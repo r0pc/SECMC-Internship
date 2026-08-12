@@ -27,6 +27,7 @@ import {
   subtractMonths,
   todayPkt,
 } from "@/lib/format";
+import { requireSession } from "@/lib/session";
 import { DEFAULT_RANGE_MONTHS } from "@/lib/series";
 import { type SearchParams, readEnum, readFlag, readPage } from "@/lib/url";
 import type {
@@ -122,6 +123,8 @@ export default async function SeriesDetailPage({
   params: Promise<{ seriesKey: string }>;
   searchParams: Promise<SearchParams>;
 }) {
+  await requireSession();
+
   const [{ seriesKey }, query] = await Promise.all([params, searchParams]);
   const series = await loadSeries(seriesKey);
 

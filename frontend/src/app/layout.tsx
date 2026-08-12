@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
+import { Suspense } from "react";
 
-import { SiteNav } from "@/components/site-nav";
+import { SessionNav } from "@/components/session-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { UserMenu } from "@/components/user-menu";
 
 import "./globals.css";
 
@@ -60,8 +62,18 @@ export default function RootLayout({
                 Phase 4
               </span> */}
             </Link>
+            {/* Both halves read the session cookie, which is request-time data. Suspended rather
+                than awaited in the layout so the page below streams first: without this, every
+                route would hold its first byte behind a cookie read that only the header needs.
+                No fallback, because the header settling into place is quieter than a placeholder
+                flashing where a name is about to be. */}
             <div className="flex items-center gap-2">
-              <SiteNav />
+              <Suspense>
+                <SessionNav />
+              </Suspense>
+              <Suspense>
+                <UserMenu />
+              </Suspense>
               <ThemeToggle />
             </div>
           </div>

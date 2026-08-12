@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
+using DataIntelligence.Api.Security;
 using DataIntelligence.Core.Dtos;
 
 namespace DataIntelligence.Api.Endpoints;
@@ -11,6 +12,13 @@ namespace DataIntelligence.Api.Endpoints;
 /// Everything lives under <c>/api</c>. Failures are returned as
 /// <see href="https://datatracker.ietf.org/doc/html/rfc9457">ProblemDetails</see> so the
 /// frontend has one error shape to handle rather than one per endpoint.
+/// <para>
+/// Every endpoint in the group requires a token (FR-9 — "authentication/authorization for all
+/// non-public endpoints"). The requirement is declared once, here, so an endpoint added later is
+/// protected by being added rather than by someone remembering to protect it; the two exceptions
+/// are <c>/api/auth/login</c>, which is how a token is obtained in the first place, and
+/// <c>/health</c>, which is outside this group because a load balancer cannot sign in.
+/// </para>
 /// </remarks>
 public static class ApiEndpoints
 {
@@ -22,8 +30,11 @@ public static class ApiEndpoints
 
     public static IEndpointRouteBuilder MapDataIntelligenceApi(this IEndpointRouteBuilder app)
     {
-        var api = app.MapGroup("/api");
+        var api = app.MapGroup("/api")
+            .RequireAuthorization(AuthorizationPolicies.ReadDashboards);
 
+        api.MapAuthEndpoints();
+        api.MapUserEndpoints();
         api.MapSourceEndpoints();
         api.MapSeriesEndpoints();
         api.MapDashboardEndpoints();

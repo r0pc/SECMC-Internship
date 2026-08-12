@@ -11,6 +11,10 @@
  * They all return an outcome rather than throwing. A rejected question is an ordinary result here —
  * the assistant refusing to answer is the system working — and an unreachable API needs to render
  * as a message in the transcript, not as a blown-up route.
+ *
+ * Each one checks the caller's role first (FR-9). The page checks too, and the API checks again;
+ * that is not redundancy to trim. A Server Function is a public endpoint with a generated name,
+ * and reaching it does not mean anyone rendered the page that normally offers it.
  */
 
 import {
@@ -19,6 +23,7 @@ import {
   getAssistantSessions,
   getAssistantTranscript,
 } from "@/lib/api";
+import { requireRole } from "@/lib/session";
 import {
   MAX_QUESTION_LENGTH,
   MAX_QUESTION_WORDS,
@@ -40,6 +45,8 @@ export async function ask(
   sessionId: string | null,
   model: AssistantModelChoice,
 ): Promise<AskResult> {
+  await requireRole("Administrator", "Analyst");
+
   const trimmed = question.trim();
 
   if (trimmed.length === 0) {
@@ -103,6 +110,8 @@ export async function ask(
  * question, and an error banner over a sidebar would be louder than the problem.
  */
 export async function listChats(): Promise<AssistantSessionSummaryDto[]> {
+  await requireRole("Administrator", "Analyst");
+
   try {
     return await getAssistantSessions();
   } catch (error) {
@@ -125,6 +134,8 @@ export type ResumeResult =
  * silently showing them an empty chat would look like the conversation had been lost.
  */
 export async function resumeChat(sessionId: string): Promise<ResumeResult> {
+  await requireRole("Administrator", "Analyst");
+
   try {
     return { ok: true, transcript: await getAssistantTranscript(sessionId) };
   } catch (error) {
