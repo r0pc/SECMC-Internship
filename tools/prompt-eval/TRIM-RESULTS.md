@@ -20,9 +20,11 @@ prompt, plus a brevity rule. Measured live against the running API, same questio
 comes to ~574 token-equivalents against ~669, because the tokens removed were the cheap cached ones.
 
 **The trade-off, accepted knowingly:** this trim is verified on `deepseek-v4-flash` at 27/28,
-unchanged from baseline. On the local model it is **worse than baseline** — `qwen3.5:4b` loses
+unchanged from baseline. On the local model it is **worse than baseline** — over the 24 of 28 cases
+that ran before the run was interrupted, `qwen3.5:4b` scores 15 against baseline's 18, losing
 `explicit-month`, `interest-rate-wording` and `parameters-not-literals`, three cases it passes with
-the full prompt. `explicit-month` is the "cpi in june 2025" bug that caused the local default to be
+the full prompt. The last four cases — `year-to-date` and the three follow-ups — were never
+measured under the applied prompt. `explicit-month` is the "cpi in june 2025" bug that caused the local default to be
 raised from 2b to 4b in the first place; cutting the dates block reintroduces it.
 
 Cloud is the default and Local is opt-in per question, and the owner chose to accept that rather
@@ -178,9 +180,28 @@ prefix cache at a fraction of the input rate. Cutting 1,500 cached tokens saves 
 token-equivalents per question against a total of ~500. Real, and an order of magnitude smaller
 than the headline suggests.
 
-**3. Local latency and context — the largest real effect.** On the CPU-served local model, reading
-the prompt is 1,941s of a 2,641s run: **73% of the wall clock, at 14 tokens/sec.** Prefill is what
-a shorter prompt actually buys. See the local results below for what it measured.
+**3. Local latency — measured, and almost nothing.** This was predicted to be the largest real
+effect and it is not. Reading the prompt is 1,941s of a 2,641s local run — **74% of the wall
+clock, at 14 tokens/sec** — so a shorter prompt looked like the obvious win. Measured over 23
+shared warm cases:
+
+| | prompt | prefill/case |
+| --- | ---: | ---: |
+| baseline | 12,382 chars | 62.5s |
+| applied trim | 7,814 chars | 59.1s |
+| | **−37%** | **−5%** |
+
+A 37% shorter prompt bought 5% less prefill. Ollama restores a prefix checkpoint per question, so
+the marginal work is re-reading the *suffix* between the last checkpoint and the question — and
+that does not shrink when the cached prefix does. The first question of a run is the exception: it
+pays 241s against ~62s for every one after it, and that one does scale with prompt length.
+
+The earlier claim in this file that local latency was the big payoff came from averaging the first
+nine cases, which include the cold load. It was wrong.
+
+**So the honest summary: the prompt trim is worth ~14% of the bill and little else.** The brevity
+rule, which is about completion tokens, is the change that pays — those bill at several times
+input, never cache, and are the whole of what a shorter answer saves.
 
 And one cost: shipping any prompt change invalidates the cache once. One request at full price.
 
@@ -207,7 +228,7 @@ committed cloud dump on `main` was produced against that wrong prompt.
 
 ## Reproducing
 
-```
+```shell
 python variants.py --list                       # every block, its size, what it costs
 python variants.py --write all                  # regenerate the probes from the C# sources
 ASSISTANT_BASE_URL=... ASSISTANT_API_KEY=... ./run_probes.sh

@@ -221,5 +221,5 @@ Known gaps worth tracking:
 | --- | --- |
 | Project Sponsor / Reviewer | Jalab Khan |
 | .NET / Backend Developer | Rafay & Sahil |
-| Frontend Developer & Database Owner | Sahil & Rafay |
+| Frontend Developer & Database Owner | Rafay & Sahil |
 | QA / DevOps (shared) | Rafay & Sahil |

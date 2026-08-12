@@ -25,3 +25,4 @@ system prompt: 7814 chars  [shipping prompt]
   pass  no-dedup   57.0s read +  23.8s gen
   FAIL  revision-history   49.6s read +  17.8s gen
   FAIL  rolling-week   54.1s read +  27.0s gen
+EXIT=1

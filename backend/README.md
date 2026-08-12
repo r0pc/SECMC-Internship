@@ -207,9 +207,3 @@ These catch what a hand-written fixture cannot: a period column read one place t
 **What this does not prove:** that the JSON field names match the live APIs. The extracts are CSVdownloads, so the payloads are reconstructed from them — the figures are real, the envelope isnot. Field names are confirmed by running against the live endpoints, which has been done; astored `collect.RawPayload` can be decompressed to check what a publisher actually sent.
 
 Two differences between the CSV downloads and the JSON APIs are worth knowing, both found thatway: the SOFR API returns SOFR rows only where the CSV carries all five rates, and it sends nofootnote field where the CSV has a Footnote ID column, so `FootnoteId` is always null from theAPI path.
-
-## Not yet implemented
-
-Authentication (FR-9) is the remaining backend work for Phase 4. The AI assistant(FR-13 – FR-16) is complete but depends on it in three ways:
-
-- Every question is attributed to a hard-coded user id.- The audit log's foreign key to `sec.AppUser` cannot be created until that table exists.- `GET /api/assistant/queries` is anonymous like the rest of the API, and should not stay that  way: it exposes the questions users asked and the SQL those produced. Restricting it to an  administrator is the first thing to do once roles exist.
