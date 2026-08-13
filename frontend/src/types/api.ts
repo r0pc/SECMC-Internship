@@ -377,6 +377,10 @@ export interface AssistantSessionSummaryDto {
   /**
    * Tokens the whole conversation has cost the model. Null when none of its turns reported
    * usage — unknown, which is not the same as free, so it must not be rendered as 0.
+   *
+   * Nothing in the UI reads this any more. Kept because this file mirrors the API contract, and
+   * the API still returns the field; dropping it here would make the mirror wrong rather than
+   * make the response smaller.
    */
   totalTokens: number | null;
 }

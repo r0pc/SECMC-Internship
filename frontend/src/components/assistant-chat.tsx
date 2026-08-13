@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 
 import { ask, listChats, resumeChat } from "@/app/assistant/actions";
-import { formatCount, formatTimestamp } from "@/lib/format";
+import { formatTimestamp } from "@/lib/format";
 import { MAX_QUESTION_WORDS, countWords } from "@/lib/question";
 import type {
   AssistantAnswerDto,
@@ -62,6 +62,19 @@ export function AssistantChat() {
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
+  // Two flags rather than one, because the sidebar is two different things at two widths and they
+  // want opposite defaults. On a wide screen it is a column that is there until someone collapses
+  // it; on a phone it is a drawer over the conversation that must start shut, since a chat list
+  // covering the chat is not a useful first screen. One shared boolean would have to be wrong at
+  // one of the two sizes.
+  //
+  // Neither is persisted. The theme toggle earns its localStorage entry by being a choice about
+  // every page and every visit; this is a choice about the width of one panel, and remembering it
+  // would mean an inline script in <head> to avoid the layout jumping on first paint — the same
+  // machinery the theme needs, for a great deal less.
+  const [expanded, setExpanded] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
   // Per question, not per conversation, and deliberately not reset by starting or resuming a chat:
   // someone who has switched to the local model has said something about how they want to work,
   // not about the conversation they happened to be in. Which model actually answered is recorded
@@ -100,6 +113,8 @@ export function AssistantChat() {
       return;
     }
 
+    // On a phone the drawer is covering the conversation the user just asked for.
+    setDrawerOpen(false);
     setResumeError(null);
 
     startTransition(async () => {
@@ -125,6 +140,7 @@ export function AssistantChat() {
       return;
     }
 
+    setDrawerOpen(false);
     setTurns([]);
     setSessionId(null);
     setResumeError(null);
@@ -181,91 +197,124 @@ export function AssistantChat() {
   const words = countWords(draft);
   const tooLong = words > MAX_QUESTION_WORDS;
 
-  return (
-    <div className="flex flex-col gap-4">
-      <ChatPicker
-        chats={chats}
-        currentSessionId={sessionId}
-        disabled={pending}
-        onResume={resume}
-        onNew={startNewChat}
-      />
+  const sidebar = {
+    chats,
+    currentSessionId: sessionId,
+    disabled: pending,
+    onResume: resume,
+    onNew: startNewChat,
+  };
 
-      {resumeError ? (
-        <p className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
-          {resumeError}
-        </p>
+  return (
+    <div className="flex gap-6">
+      {/* The column, on anything wider than a phone. Sticky and independently scrollable, so a
+          long history scrolls inside the panel rather than dragging the conversation with it. */}
+      {expanded ? (
+        <aside
+          id="assistant-chat-list"
+          className="hidden shrink-0 md:sticky md:top-20 md:block md:h-[calc(100vh-9rem)] md:w-72"
+        >
+          <ChatSidebar {...sidebar} onDismiss={() => setExpanded(false)} dismissLabel="Hide chats" />
+        </aside>
       ) : null}
 
-      <div
-        className="min-h-[24rem] space-y-6"
-        aria-live="polite"
-        aria-busy={pending}
-      >
-        {turns.length === 0 ? (
-          <Welcome onPick={submit} disabled={pending} />
-        ) : (
-          turns.map((turn) => <TurnView key={turn.key} turn={turn} />)
-        )}
+      {/* The same panel as a drawer, on a phone. Rendered only while open — an off-screen copy
+          would put a second set of the same buttons in the tab order, so a keyboard user would
+          tab through a chat list they cannot see. */}
+      {drawerOpen ? (
+        <ChatDrawer onClose={() => setDrawerOpen(false)}>
+          <ChatSidebar
+            {...sidebar}
+            onDismiss={() => setDrawerOpen(false)}
+            dismissLabel="Close chat list"
+          />
+        </ChatDrawer>
+      ) : null}
 
-        {pending ? <Thinking model={model} /> : null}
-
-        <div ref={transcriptEnd} />
-      </div>
-
-      <form
-        className="sticky bottom-4 rounded-lg border border-zinc-200 bg-white p-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-950"
-        onSubmit={(event) => {
-          event.preventDefault();
-          submit(draft);
-        }}
-      >
-        <label className="sr-only" htmlFor="assistant-question">
-          Ask a question about the collected data, in {MAX_QUESTION_WORDS} words
-          or fewer
-        </label>
-        <textarea
-          id="assistant-question"
-          ref={input}
-          rows={2}
-          value={draft}
-          disabled={pending}
-          // The character cap is a hard stop because it is a storage bound — past it the audit log
-          // would keep a truncated question. The word limit is not: an over-long draft is left
-          // intact and refused, so the sentence being cut is chosen by the person who wrote it.
-          maxLength={2000}
-          aria-invalid={tooLong || undefined}
-          placeholder="Ask about CPI, SOFR, or collection health…"
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            // Enter sends, Shift+Enter breaks the line. A question is usually one line, and
-            // reaching for the mouse to send each one gets old immediately.
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              submit(draft);
-            }
-          }}
-          className="w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 dark:text-zinc-100 dark:placeholder:text-zinc-600"
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
+        <ChatListToggle
+          count={chats.length}
+          expanded={expanded}
+          onToggleColumn={() => setExpanded((open) => !open)}
+          onOpenDrawer={() => setDrawerOpen(true)}
         />
-        <div className="flex flex-wrap items-center justify-between gap-3 px-3 pb-1">
-          <div className="flex items-center gap-3">
-            <ModelPicker value={model} onChange={setModel} disabled={pending} />
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Answers come from collected data only. Every question is logged.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <WordCount words={words} />
-            <button
-              type="submit"
-              disabled={pending || draft.trim().length === 0 || tooLong}
-              className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-            >
-              {pending ? "Asking…" : "Ask"}
-            </button>
-          </div>
+
+        {resumeError ? (
+          <p className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
+            {resumeError}
+          </p>
+        ) : null}
+
+        <div
+          className="min-h-[24rem] space-y-6"
+          aria-live="polite"
+          aria-busy={pending}
+        >
+          {turns.length === 0 ? (
+            <Welcome onPick={submit} disabled={pending} />
+          ) : (
+            turns.map((turn) => <TurnView key={turn.key} turn={turn} />)
+          )}
+
+          {pending ? <Thinking model={model} /> : null}
+
+          <div ref={transcriptEnd} />
         </div>
-      </form>
+
+        <form
+          className="sticky bottom-4 rounded-lg border border-zinc-200 bg-white p-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-950"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit(draft);
+          }}
+        >
+          <label className="sr-only" htmlFor="assistant-question">
+            Ask a question about the collected data, in {MAX_QUESTION_WORDS} words
+            or fewer
+          </label>
+          <textarea
+            id="assistant-question"
+            ref={input}
+            rows={2}
+            value={draft}
+            disabled={pending}
+            // The character cap is a hard stop because it is a storage bound — past it the audit log
+            // would keep a truncated question. The word limit is not: an over-long draft is left
+            // intact and refused, so the sentence being cut is chosen by the person who wrote it.
+            maxLength={2000}
+            aria-invalid={tooLong || undefined}
+            placeholder="Ask about CPI, SOFR, or collection health…"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter sends, Shift+Enter breaks the line. A question is usually one line, and
+              // reaching for the mouse to send each one gets old immediately.
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                submit(draft);
+              }
+            }}
+            className="w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 dark:text-zinc-100 dark:placeholder:text-zinc-600"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-3 px-3 pb-1">
+            <div className="flex items-center gap-3">
+              <ModelPicker value={model} onChange={setModel} disabled={pending} />
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Answers come from collected data only. Every question is logged.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <WordCount words={words} />
+              <button
+                type="submit"
+                disabled={pending || draft.trim().length === 0 || tooLong}
+                className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+              >
+                {pending ? "Asking…" : "Ask"}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -307,86 +356,225 @@ function replay(turn: AssistantTranscriptTurnDto, key: number): Turn {
 }
 
 /**
- * The bar above the transcript: start a new conversation, or reopen one.
+ * The chat list: start a new conversation, or reopen one.
  *
- * A `<details>` rather than a managed dropdown. The list is closed most of the time and opening it
- * is not application state — the browser already does this, keyboard and screen reader included,
- * and reimplementing it with `useState` would be more code that behaves slightly worse.
+ * One component for both placements — the column beside the conversation and the drawer over it —
+ * because it is the same panel at two widths, and a second copy would be two things to keep in
+ * agreement. Only the dismiss control differs, which is why the caller names it: "Hide chats"
+ * collapses a column that is still there to be brought back, while "Close chat list" shuts an
+ * overlay, and a button that says the wrong one of those is a button people stop trusting.
  */
-function ChatPicker({
+function ChatSidebar({
   chats,
   currentSessionId,
   disabled,
   onResume,
   onNew,
+  onDismiss,
+  dismissLabel,
 }: {
   chats: AssistantSessionSummaryDto[];
   currentSessionId: string | null;
   disabled: boolean;
   onResume: (sessionId: string) => void;
   onNew: () => void;
+  onDismiss: () => void;
+  dismissLabel: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <details className="group relative">
-        <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900">
-          Previous chats
-          <span className="text-zinc-400 dark:text-zinc-600">
+    <div className="flex h-full flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Chats
+          <span className="ml-1.5 font-normal text-zinc-400 dark:text-zinc-600">
             {chats.length === 0 ? "—" : chats.length}
           </span>
-        </summary>
+        </h2>
 
-        <div className="absolute left-0 z-10 mt-2 max-h-80 w-80 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
-          {chats.length === 0 ? (
-            <p className="px-3 py-4 text-xs text-zinc-500 dark:text-zinc-400">
-              Nothing yet. Conversations appear here once they have an answer,
-              and stay after you close the page.
-            </p>
-          ) : (
-            <ul>
-              {chats.map((chat) => (
-                <li key={chat.sessionId}>
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => onResume(chat.sessionId)}
-                    aria-current={
-                      chat.sessionId === currentSessionId ? "true" : undefined
-                    }
-                    className="w-full rounded-md px-3 py-2 text-left transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 aria-[current]:bg-zinc-100 dark:hover:bg-zinc-900 dark:aria-[current]:bg-zinc-900"
-                  >
-                    {/* The first question, clamped. A conversation is recognised by how it opened. */}
-                    <span className="line-clamp-2 text-xs text-zinc-800 dark:text-zinc-200">
-                      {chat.title ?? "Untitled conversation"}
-                    </span>
-                    <span className="mt-0.5 block text-[11px] text-zinc-500 dark:text-zinc-400">
-                      {chat.turnCount}
-                      {chat.turnCount === 1 ? " question" : " questions"} ·{" "}
-                      {formatTimestamp(chat.lastActivityAtPkt)}
-                      {/* Omitted rather than shown as a dash when unknown. A chat whose turns
-                          never reported usage is a gap in our records, not a fact about the
-                          conversation, and this line is read at a glance. */}
-                      {chat.totalTokens !== null && (
-                        <> · {formatCount(chat.totalTokens)} tokens</>
-                      )}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </details>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label={dismissLabel}
+          title={dismissLabel}
+          className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+        >
+          <PanelIcon />
+        </button>
+      </div>
 
+      {/* Above the list rather than below it: it is the one thing here that is always available,
+          including when there is no history for the list to hold. */}
       <button
         type="button"
         onClick={onNew}
         disabled={disabled}
-        className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
+        className="flex items-center gap-2 rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
       >
+        <span aria-hidden className="text-sm leading-none">
+          +
+        </span>
         New chat
       </button>
+
+      {chats.length === 0 ? (
+        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          Nothing yet. Conversations appear here once they have an answer, and
+          stay after you close the page.
+        </p>
+      ) : (
+        // min-h-0 is what lets this scroll inside a flex column: without it the list sets the
+        // panel's height instead of fitting within it, and a long history runs off the screen.
+        <ul className="-mr-1 min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-1">
+          {chats.map((chat) => (
+            <li key={chat.sessionId}>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onResume(chat.sessionId)}
+                aria-current={
+                  chat.sessionId === currentSessionId ? "true" : undefined
+                }
+                className="w-full rounded-md px-3 py-2 text-left transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 aria-[current]:bg-zinc-100 dark:hover:bg-zinc-900 dark:aria-[current]:bg-zinc-900"
+              >
+                {/* The first question, clamped. A conversation is recognised by how it opened. */}
+                <span className="line-clamp-2 text-xs text-zinc-800 dark:text-zinc-200">
+                  {chat.title ?? "Untitled conversation"}
+                </span>
+                {/* Token cost is deliberately not shown. It is still recorded on every turn
+                    and still readable in the audit log, which is where a question about what
+                    the assistant costs belongs — a running total beside someone's own chat
+                    history reads as a budget they are being measured against, and none of
+                    them can act on it. */}
+                <span className="mt-0.5 block text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {chat.turnCount}
+                  {chat.turnCount === 1 ? " question" : " questions"} ·{" "}
+                  {formatTimestamp(chat.lastActivityAtPkt)}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
+  );
+}
+
+/**
+ * The chat list as an overlay, for widths with no room to put it beside the conversation.
+ *
+ * Escape closes it and the backdrop is a real button, so the two ways every overlay is expected to
+ * be dismissed both work. Focus is not trapped: what is behind it is the conversation this panel
+ * came from, and tabbing into it is a reasonable thing to have happen — trapping would be more
+ * machinery than a list of links needs.
+ */
+function ChatDrawer({
+  onClose,
+  children,
+}: {
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Previous chats"
+      className="fixed inset-0 z-40 md:hidden"
+    >
+      <button
+        type="button"
+        aria-label="Close chat list"
+        onClick={onClose}
+        className="absolute inset-0 bg-zinc-950/40"
+      />
+
+      <div className="absolute inset-y-0 left-0 flex w-80 max-w-[85%] flex-col border-r border-zinc-200 bg-white p-4 shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Brings the chat list back.
+ *
+ * Two buttons rather than one, swapped by width: on a phone the list is an overlay that is opened,
+ * on a wider screen a column that is shown, and `aria-expanded` is only true of the second. One
+ * button carrying both meanings would have to describe itself wrongly at one of the two sizes.
+ *
+ * The column's button stays visible while the column is open, as the way to collapse it — the
+ * matching control inside the panel does the same thing, and losing the toggle the moment it worked
+ * is how a panel becomes something people are reluctant to close.
+ */
+function ChatListToggle({
+  count,
+  expanded,
+  onToggleColumn,
+  onOpenDrawer,
+}: {
+  count: number;
+  expanded: boolean;
+  onToggleColumn: () => void;
+  onOpenDrawer: () => void;
+}) {
+  const label = `Previous chats${count === 0 ? "" : ` (${count})`}`;
+
+  const className =
+    "inline-flex items-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900";
+
+  return (
+    <div className="flex items-center">
+      <button
+        type="button"
+        onClick={onOpenDrawer}
+        className={`${className} md:hidden`}
+      >
+        <PanelIcon />
+        {label}
+      </button>
+
+      <button
+        type="button"
+        onClick={onToggleColumn}
+        aria-expanded={expanded}
+        // Only while the panel is actually in the document. A collapsed column is not rendered at
+        // all, and aria-controls naming an id that is not there is a dangling reference rather
+        // than a helpful one.
+        aria-controls={expanded ? "assistant-chat-list" : undefined}
+        className={`hidden ${className} md:inline-flex`}
+      >
+        <PanelIcon />
+        {expanded ? "Hide chats" : label}
+      </button>
+    </div>
+  );
+}
+
+/** A panel beside a page, in the shape every sidebar toggle is already drawn as. */
+function PanelIcon() {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 16 16"
+      className="size-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+      <line x1="6" y1="2.5" x2="6" y2="13.5" />
+    </svg>
   );
 }
 

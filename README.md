@@ -189,14 +189,16 @@ pipeline is running against both live APIs.
 | Authentication (FR-9) | Delivered. Bearer tokens, three roles, admin-created accounts, and a login page. Every endpoint but `/health` and the login itself requires a token |
 | AI query assistant (FR-13 – FR-16) | Delivered. Question to SQL, safety validation, read-only execution, natural-language answer, and a full audit record of every turn |
 | Frontend dashboards (FR-10 – FR-12) | Delivered. Dashboard, series catalogue, series detail, collection log and sources, server-rendered against the live API |
-| Frontend assistant (FR-13 – FR-16) | Delivered. Chat with resumable conversations, the generated SQL behind a disclosure, and per-chat token cost. Answers are prose only — no result table, no chart — and the model is told to write them that way |
+| Frontend assistant (FR-13 – FR-16) | Delivered. Chat with resumable conversations and the generated SQL behind a disclosure. Answers are prose only — no result table, no chart — and the model is told to write them that way |
 
 The assistant answers only from collected data. A question becomes a read-only `SELECT` over the
 `analytics.*` views, the statement is validated before it runs, and the answer is written from the
 rows that came back — a question that cannot be expressed against the data is refused rather than
 answered from the model's own memory. Every turn is recorded, refusals included: the question, the
-SQL, the parameters, the outcome, the answer, token usage and timings (NFR Auditability). Both are
-visible in the UI — the SQL behind each answer, and what each conversation has cost in tokens.
+SQL, the parameters, the outcome, the answer, token usage and timings (NFR Auditability). The SQL
+behind each answer is visible in the UI; token usage is not, and is read from the audit log
+instead — a running cost beside someone's own chat history reads as a budget they are being
+measured against, and is not a number the person asking the question can act on.
 
 Everything above is now behind a sign-in. A password buys a bearer token good for a working day,
 and one of three roles decides what it reaches: a Viewer reads dashboards, an Analyst also asks the
