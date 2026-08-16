@@ -166,13 +166,15 @@ public sealed class JwtAccessTokenIssuerTests
             ClockSkew = TimeSpan.FromSeconds(30)
         };
 
-        if (readAt is { } instant)
-        {
-            // The handler reads the clock through LifetimeValidator when one is supplied, which is
-            // how an expiry is asserted without waiting for it.
-            parameters.LifetimeValidator = (notBefore, expires, _, _) =>
-                (notBefore is null || notBefore <= instant) && (expires is null || expires > instant);
-        }
+        // The handler reads the clock through LifetimeValidator when one is supplied, which is how
+        // an expiry is asserted without waiting for it. One is always supplied: the issuer mints
+        // against a fixed clock, so a verifier left on the machine clock would start rejecting
+        // every token the moment the wall clock walked past Now — a failure of the calendar rather
+        // than of the code. Tests asserting an expiry move this instant instead.
+        var instant = readAt ?? Now.UtcDateTime;
+
+        parameters.LifetimeValidator = (notBefore, expires, _, _) =>
+            (notBefore is null || notBefore <= instant) && (expires is null || expires > instant);
 
         return await new JsonWebTokenHandler().ValidateTokenAsync(token, parameters);
     }

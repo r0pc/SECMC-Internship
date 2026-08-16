@@ -38,8 +38,9 @@ information, not a broken suite.
 
 ## Trimming a rule
 
-1. `python eval.py > before.txt` — baseline. Fix or delete anything already failing; a suite that is
-   red before you start cannot tell you anything about your change.
+1. `python eval.py > before.txt`, and diff it against the recorded run in `baseline/` for the same
+   model. Neither baseline is green, so "did anything fail" is the wrong question — the one that
+   matters is whether the *same* cases failed. A new name in that list is your change.
 2. Copy the `Semantics` block out of `SchemaContextProvider.cs` into a file and cut one rule.
 3. `python eval.py --semantics that-file.txt` and compare.
 4. **Re-run against both models before believing it.** A rule a 4B model no longer needs may be the
@@ -66,26 +67,42 @@ question through the API with `Information` logging on.
 
 ## Baseline
 
-`deepseek-v4-flash`, 16/16, with `reasoning_effort: none` as production sends:
+Recorded runs live in `baseline/` and are the thing to compare against. Both were taken with
+`reasoning_effort: none`, as production sends.
 
-```
-16 passed / 0 failed / 0 errored
-cost: 52,088 prompt tokens, 51,200 of them cached + 1,579 completion
-```
+| Suite | Model | Result | Cost |
+| --- | --- | --- | --- |
+| `baseline/cloud-deepseek.txt` | `deepseek-v4-flash` | **27 passed / 1 failed** of 28 | 91,611 prompt (86,400 cached) + 2,474 completion = 94,085 — 3,271 prompt per case |
+| `baseline/qwen4b.txt` | `qwen3.5:4b`, local | **21 passed / 7 failed** of 28 | 94,636 prompt + 2,413 completion = 97,049 — 3,379 prompt per case |
+| `baseline/cloud-summariser.txt` | `deepseek-v4-flash` | **10 passed / 0 failed** of 10 | — |
 
-Two things that baseline settles. **Caching works** — 98% of the prompt served from cache, which is
-what the prompt ordering was for. And **reasoning is waste**: the same 16 cases with reasoning left
-on cost 8,305 completion tokens instead of 1,579, for exactly the same 16 passes.
+Two things those settle. **Caching works** — 94% of the cloud prompt served from cache, which is
+what the prompt ordering was for. And **reasoning is waste**: measured on the 16-case suite this
+grew out of, the same cases with reasoning left on cost 8,305 completion tokens against 1,579
+with it off, for exactly the same passes.
 
-There is a second suite, `eval_summariser.py`, for the answer-writing call — 6/6 on the same model.
-That one covers the rules that stand between an empty result and a false claim that data is missing.
+**Neither baseline is green, and that is the point of checking them in.** A recorded failure is a
+known gap you can diff against; a suite nobody has run is not a baseline at all.
+
+- Cloud fails `follow-up-unresolvable` — a referent that is not in the conversation at all should
+  be refused rather than guessed at, and the model guesses.
+- The local model fails seven, and they cluster: `year-to-date`, `rolling-week` and
+  `half-open-range` are all relative-date resolution, `semiannual-code` and `revision-history` are
+  schema detail the prompt spells out. That gap between 4B and the hosted model is the trade the
+  local option makes, stated in cases rather than in adjectives.
+
+The second suite, `eval_summariser.py` over `summariser_cases.json`, covers the answer-writing
+call — the rules that stand between an empty result and a false claim that data is missing.
+
+`diff.py` compares two runs' produced statements: `python diff.py baseline/cloud-deepseek.txt
+produced-baseline-cloud.json`.
 
 ## Cases
 
-`cases.json`. Each carries a `guards` line naming the rule it protects — a case nobody can trace
-back to a rule is a case nobody can act on, so keep that filled in. `global` holds the assertions
-that apply to every case returning SQL: no `LIMIT`, no leading `WITH`, no fenced output, and no
-object outside the allow-list.
+`cases.json` — 28 of them, plus 10 in `summariser_cases.json`. Each carries a `guards` line naming
+the rule it protects — a case nobody can trace back to a rule is a case nobody can act on, so keep
+that filled in. `global` holds the assertions that apply to every case returning SQL: no `LIMIT`,
+no leading `WITH`, no fenced output, and no object outside the allow-list.
 
 Assertions check properties rather than exact SQL, because many statements are correct: which views
 were read, which fragments appear (`LAG`, `TOP`, `AVG`), which values got bound, and whether a
