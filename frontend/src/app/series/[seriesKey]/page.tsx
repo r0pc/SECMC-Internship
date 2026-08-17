@@ -28,7 +28,7 @@ import {
   todayPkt,
 } from "@/lib/format";
 import { requireSession } from "@/lib/session";
-import { DEFAULT_RANGE_MONTHS } from "@/lib/series";
+import { DEFAULT_RANGE_MONTHS, rangeEnd } from "@/lib/series";
 import { type SearchParams, readEnum, readFlag, readPage } from "@/lib/url";
 import type {
   PeriodType,
@@ -144,7 +144,11 @@ export default async function SeriesDetailPage({
     ? (readEnum(query, "periodType", PERIOD_TYPES) ?? "Month")
     : undefined;
 
-  const to = todayPkt();
+  // The window ends at the last period this series has, not at today — see `rangeEnd`. For CPI,
+  // which arrives about two months late, counting "3M" back from the clock left three month slots
+  // holding one published figure.
+  const today = todayPkt();
+  const to = rangeEnd(series.latest?.referenceDate, today);
   const from = range === "max" ? EARLIEST_POSSIBLE : subtractMonths(to, Number(range));
 
   const [kpiResult, trendResult, observationsResult] = await Promise.all([
@@ -165,10 +169,14 @@ export default async function SeriesDetailPage({
     ),
   ]);
 
+  // Says so when the window stops short of today, because otherwise a "3M" range ending in June
+  // reads as a bug rather than as the newest month the publisher has released.
   const rangeLabel =
     range === "max"
       ? "all stored history"
-      : `${formatReferenceDate(from)} to ${formatReferenceDate(to)}`;
+      : `${formatReferenceDate(from)} to ${formatReferenceDate(to)}${
+          to === today ? "" : ", the latest period published"
+        }`;
 
   return (
     <div className="space-y-6">

@@ -6,7 +6,7 @@
  * find out what exists; anything a user picks comes from the API.
  */
 
-import type { TrendSeriesDto } from "@/types/api";
+import type { IsoDate, TrendSeriesDto } from "@/types/api";
 
 export const CPI_SERIES_KEY = "cpi";
 export const SOFR_SERIES_KEY = "sofr";
@@ -76,7 +76,30 @@ export function groupByUnit(
   return [...groups].map(([unit, lines]) => ({ unit, series: lines }));
 }
 
-/** Range presets offered on the trend controls, as whole months back from today. */
+/**
+ * The date a range preset counts back from.
+ *
+ * The clock is the wrong anchor for a series its publisher releases late. BLS publishes a CPI
+ * month roughly two months after the month it describes, so "3M" measured from today spans three
+ * month starts of which only the earliest has been released — a three-month chart holding a single
+ * point, and an observations table holding a single row. Counting back from the last reference
+ * date the series actually has makes the presets mean three months *of data*, which is what they
+ * are being asked for. A series published without delay, like SOFR, lands within a day of the
+ * clock either way, so nothing changes for it.
+ */
+export function rangeEnd(
+  latestReferenceDate: IsoDate | null | undefined,
+  today: IsoDate,
+): IsoDate {
+  // `yyyy-MM-dd` sorts lexicographically in date order, so this needs no parsing. Never later
+  // than today: a reference date ahead of the clock would be a collector bug, and honouring it
+  // would quietly move the window into the future.
+  return latestReferenceDate && latestReferenceDate < today
+    ? latestReferenceDate
+    : today;
+}
+
+/** Range presets offered on the trend controls, as whole months back from the range end. */
 export const RANGE_PRESETS = [
   { label: "3M", months: 3 },
   { label: "6M", months: 6 },

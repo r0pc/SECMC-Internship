@@ -51,7 +51,7 @@ export function TrendChart({
   );
   const minTime = Math.min(...times);
   const maxTime = Math.max(...times);
-  const timeSpan = maxTime - minTime || 1;
+  const timeSpan = maxTime - minTime;
 
   const lows = drawable.flatMap((line) =>
     line.points.map((point) => point.minimum),
@@ -63,8 +63,13 @@ export function TrendChart({
   const scale = niceScale(Math.min(...lows), Math.max(...highs));
   const valueSpan = scale.max - scale.min || 1;
 
+  // A chart with one observation, or with several sharing a bucket, has no span to place anything
+  // along. Centring it reads as the single reading it is; dividing by a span of 1ms pinned it to
+  // the left edge, where it looked like the start of a line whose rest had failed to load.
   const toX = (time: number) =>
-    plot.x + ((time - minTime) / timeSpan) * plot.width;
+    timeSpan === 0
+      ? plot.x + plot.width / 2
+      : plot.x + ((time - minTime) / timeSpan) * plot.width;
   const toY = (value: number) =>
     plot.y + plot.height - ((value - scale.min) / valueSpan) * plot.height;
 
