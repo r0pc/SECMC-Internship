@@ -126,13 +126,3 @@ platform exists to make visible.
 
 **Panels fail independently.** `attempt()` returns a result rather than throwing, so one
 dead endpoint costs its own panel and not the page.
-
-## Not built yet
-
-- Editing a source's polling settings. The API accepts `PATCH` from an administrator (FR-9) and
-  `/sources` still only reads: the surface worth having there is what each publisher is and what
-  its terms are, and the editing endpoint exists for an operator with a reason to use it rather
-  than for a button on a reference page.
-- A "change my own password" screen. `POST /api/auth/password` exists and is wired into
-  `src/lib/api.ts`; what is missing is the page. An administrator setting a password on someone's
-  behalf is covered by `/admin/users`.

@@ -5,7 +5,7 @@ Home for the Phase 3 and Phase 6 artifacts called for in the Scope of Work.
 | Document | SOW reference | Status |
 | --- | --- | --- |
 | [Database schema (DDL)](database-schema.sql) | Phase 3 deliverable | Drafted — created on SQL Server 2025, loaded with the sample extracts below, and verified against the EF migration. 10 tables across `collect`, `core`, `sec` and `ai`, plus nine `analytics.*` views |
-| ERD — [SVG](database-erd.svg) · [PDF](database-erd.pdf) | Phase 3 deliverable | **Stale** — drawn at 12 tables and 11 relationships, against a schema that now has 10 and 8. See below |
+| ERD — [SVG](database-erd.svg) · [PDF](database-erd.pdf) | Phase 3 deliverable | Drafted — regenerated against the current schema: 10 tables, 8 relationships |
 | Architecture document | Phase 3 deliverable | Not started |
 | Risk log | Phase 3 deliverable | Not started |
 | API contract (published from Swagger) | SOW 3 — Maintainability | Not started |
@@ -19,12 +19,15 @@ and the PDF from one model so the two cannot disagree. Re-run it after any schem
 python docs\erd\generate_erd.py
 ```
 
-**The generator is behind the schema.** It still models `ai.AssistantQuery` and
-`ai.AssistantFeedback`, both of which are gone — a conversation is now one JSON document in
-`ai.AssistantSession.TranscriptJson`, and turn ids come from the `ai.AssistantTurnId` sequence
-rather than an identity column. Regenerating without editing the model first would only redraw
-the same two dead tables, so fix `generate_erd.py` and then re-run. Nothing reads the ERD at
-build time, so this is a documentation defect rather than a broken deployment.
+The model in that script is the thing to edit — the layout is hand-placed, not auto-routed, so a
+column added to a card moves nothing else and the diff stays readable. It self-checks before
+writing: overlapping cards, a card running into the footer, and text too wide for the canvas all
+fail the run rather than producing a quietly clipped diagram.
+
+Three things are deliberately not drawn, and the diagram's own footer says so: the `analytics.*`
+views, `ai.AssistantTurns` (an `OPENJSON` view over `TranscriptJson` rather than a table), and
+the `ai.AssistantTurnId` sequence. `collect.DataSource`, `collect.CollectionRun` and
+`core.SofrDailyRate` are shown abbreviated; every other table lists all of its columns.
 
 ## What the platform stores
 

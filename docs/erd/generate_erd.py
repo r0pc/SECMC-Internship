@@ -26,8 +26,9 @@ COL_W = 340.0
 COL_X = [60.0, 460.0, 860.0]
 
 CANVAS_W = 1300.0
-# Grown with ai.AssistantQuery, which gained SqlParametersJson and Explanation (FR-13/FR-14).
-CANVAS_H = 1580.0
+# Shrunk when ai.AssistantQuery and ai.AssistantFeedback were dropped: the assistant's
+# turns live in ai.AssistantSession.TranscriptJson now, so the ai band is one table.
+CANVAS_H = 1570.0
 
 # The legend sits under the subtitle rather than beside the title: at this width the
 # title would run into it.
@@ -120,9 +121,9 @@ class Edge:
 # --------------------------------------------------------------------------- model
 
 Y_COLLECT = 190.0
-Y_CORE = 530.0
-Y_SEC = 940.0
-Y_AI = 1190.0
+Y_CORE = 545.0
+Y_SEC = 985.0
+Y_AI = 1270.0
 
 TABLES: list[Table] = [
     # ---- collect: ingestion -------------------------------------------------
@@ -134,18 +135,22 @@ TABLES: list[Table] = [
         Column("ApiEndpoint", "NVARCHAR(1000)"),
         Column("AccessMethod", "VARCHAR(20)"),
         Column("HttpMethod", "VARCHAR(6)"),
+        Column("RequiresApiKey", "BIT"),
         Column("PublicationCadence", "VARCHAR(20)"),
+        Column("CollectionIntervalMinutes", "SMALLINT"),
         Column("IsEnabled", "BIT"),
     ], note="2 rows: BLS_CPI, NYFED_SOFR"),
 
     Table("CollectionRun", "collect", "CollectionRun", COL_X[1], Y_COLLECT, [
         Column("CollectionRunId", "BIGINT", ("PK",)),
         Column("DataSourceId", "TINYINT", ("FK", "UQ")),
-        Column("ScheduledForUtc", "DATETIME2(0)", ("UQ",)),
+        Column("ScheduledForPkt", "DATETIME2(0)", ("UQ",)),
         Column("Attempt", "TINYINT", ("UQ",)),
+        Column("TriggerType", "VARCHAR(20)"),
         Column("Status", "VARCHAR(20)"),
-        Column("StartedAtUtc", "DATETIME2(3)"),
-        Column("CompletedAtUtc", "DATETIME2(3)"),
+        Column("StartedAtPkt", "DATETIME2(3)"),
+        Column("CompletedAtPkt", "DATETIME2(3)"),
+        Column("DurationMs", "BIGINT (computed)"),
         Column("ObservationsInserted", "INT"),
         Column("ObservationsRevised", "INT"),
         Column("FailureCategory", "VARCHAR(30)"),
@@ -154,7 +159,8 @@ TABLES: list[Table] = [
     Table("RawPayload", "collect", "RawPayload", COL_X[2], Y_COLLECT, [
         Column("RawPayloadId", "BIGINT", ("PK",)),
         Column("CollectionRunId", "BIGINT", ("FK",)),
-        Column("FetchedAtUtc", "DATETIME2(3)"),
+        Column("FetchedAtPkt", "DATETIME2(3)"),
+        Column("ContentType", "NVARCHAR(100)"),
         Column("ContentHash", "BINARY(32)"),
         Column("SizeBytes", "INT"),
         Column("CompressedContent", "VARBINARY(MAX)"),
@@ -172,9 +178,9 @@ TABLES: list[Table] = [
         Column("Footnotes", "VARCHAR(100)"),
         Column("RevisionNumber", "SMALLINT", ("UQ",)),
         Column("IsCurrent", "BIT"),
-        Column("SupersededAtUtc", "DATETIME2(3)"),
+        Column("SupersededAtPkt", "DATETIME2(3)"),
         Column("CollectionRunId", "BIGINT", ("FK",)),
-        Column("CollectedAtUtc", "DATETIME2(3)"),
+        Column("CollectedAtPkt", "DATETIME2(3)"),
         Column("RowHash", "BINARY(32)"),
     ], note="BLS CUUR0000SA0 only; one row per (year, period)"),
 
@@ -191,9 +197,9 @@ TABLES: list[Table] = [
         Column("FootnoteId", "VARCHAR(20)"),
         Column("RevisionNumber", "SMALLINT", ("UQ",)),
         Column("IsCurrent", "BIT"),
-        Column("SupersededAtUtc", "DATETIME2(3)"),
+        Column("SupersededAtPkt", "DATETIME2(3)"),
         Column("CollectionRunId", "BIGINT", ("FK",)),
-        Column("CollectedAtUtc", "DATETIME2(3)"),
+        Column("CollectedAtPkt", "DATETIME2(3)"),
         Column("RowHash", "BINARY(32)"),
     ], note="rate type SOFR only; one row per business day"),
 
@@ -202,9 +208,10 @@ TABLES: list[Table] = [
         Column("CollectionRunId", "BIGINT", ("FK",)),
         Column("SeriesCode", "NVARCHAR(100)"),
         Column("ReferenceDateText", "NVARCHAR(50)"),
+        Column("RejectedAtPkt", "DATETIME2(3)"),
         Column("Reason", "VARCHAR(30)"),
         Column("ReasonDetail", "NVARCHAR(1000)"),
-        Column("RejectedAtUtc", "DATETIME2(3)"),
+        Column("RawFragment", "NVARCHAR(MAX)"),
     ], note="quarantine; EFFR / OBFR / TGCR / BGCR land here"),
 
     # ---- sec: identity (FR-9) ----------------------------------------------
@@ -213,13 +220,16 @@ TABLES: list[Table] = [
         Column("Email", "NVARCHAR(256)", ("UQ",)),
         Column("DisplayName", "NVARCHAR(150)"),
         Column("PasswordHash", "NVARCHAR(500)"),
+        Column("SecurityStamp", "UNIQUEIDENTIFIER"),
         Column("IsActive", "BIT"),
-    ]),
+        Column("CreatedAtPkt", "DATETIME2(3)"),
+        Column("LastLoginAtPkt", "DATETIME2(3)"),
+    ], note="SecurityStamp is in the token; rotating it revokes"),
 
     Table("UserRole", "sec", "UserRole", COL_X[1], Y_SEC, [
         Column("UserId", "INT", ("PK", "FK")),
         Column("RoleId", "TINYINT", ("PK", "FK")),
-        Column("GrantedAtUtc", "DATETIME2(3)"),
+        Column("GrantedAtPkt", "DATETIME2(3)"),
     ]),
 
     Table("Role", "sec", "Role", COL_X[2], Y_SEC, [
@@ -229,34 +239,27 @@ TABLES: list[Table] = [
     ], note="Administrator / Analyst / Viewer"),
 
     # ---- ai: assistant audit ------------------------------------------------
+    # One table. ai.AssistantQuery held a row per turn and ai.AssistantFeedback hung off
+    # it; both are dropped. A conversation is now one document in TranscriptJson, so the
+    # turns have no table to appear in here — see the footer.
     Table("AssistantSession", "ai", "AssistantSession", COL_X[0], Y_AI, [
         Column("SessionId", "UNIQUEIDENTIFIER", ("PK",)),
         Column("UserId", "INT", ("FK",)),
-        Column("StartedAtUtc", "DATETIME2(3)"),
-    ]),
-
-    Table("AssistantQuery", "ai", "AssistantQuery", COL_X[1], Y_AI, [
-        Column("AssistantQueryId", "BIGINT", ("PK",)),
-        Column("SessionId", "UNIQUEIDENTIFIER", ("FK",)),
-        Column("UserId", "INT", ("FK",)),
-        Column("QuestionText", "NVARCHAR(2000)"),
-        Column("GeneratedSql", "NVARCHAR(MAX)"),
-        Column("SqlParametersJson", "NVARCHAR(MAX)"),
-        Column("Explanation", "NVARCHAR(2000)"),
-        Column("ValidationOutcome", "VARCHAR(30)"),
-        Column("WasExecuted", "BIT"),
-        Column("AnswerText", "NVARCHAR(MAX)"),
-        Column("AskedAtUtc", "DATETIME2(3)"),
-    ], note="every generated statement logged (auditability)"),
-
-    Table("AssistantFeedback", "ai", "AssistantFeedback", COL_X[2], Y_AI, [
-        Column("AssistantQueryId", "BIGINT", ("PK", "FK")),
-        Column("IsHelpful", "BIT"),
-        Column("Comment", "NVARCHAR(1000)"),
-    ]),
+        Column("StartedAtPkt", "DATETIME2(3)"),
+        Column("LastActivityAtPkt", "DATETIME2(3)"),
+        Column("TranscriptJson", "NVARCHAR(MAX)"),
+        Column("TotalTokens", "INT"),
+    ], note="the whole conversation as one JSON document (auditability)"),
 ]
 
 BY_KEY = {t.key: t for t in TABLES}
+
+# The horizontal lane the CollectionRun -> core edges share on their way down. Derived from
+# the tallest card in the collect band rather than fixed: CollectionRun grows as columns are
+# added, and a lane drawn above its lower edge puts the horizontal run alongside DataSource,
+# where the CpiObservation route reads as leaving DataSource instead. validate() keeps it
+# between the two bands.
+BUS_Y = max(t.y + t.h for t in TABLES if t.schema == "collect") + 22
 
 
 def build_edges() -> list[Edge]:
@@ -264,11 +267,7 @@ def build_edges() -> list[Edge]:
     ds, run, raw = t["DataSource"], t["CollectionRun"], t["RawPayload"]
     cpi, sofr, rej = t["CpiObservation"], t["SofrDailyRate"], t["RejectedObservation"]
     usr, ur, rol = t["AppUser"], t["UserRole"], t["Role"]
-    ses, qry, fb = t["AssistantSession"], t["AssistantQuery"], t["AssistantFeedback"]
-
-    # A horizontal bus between the collect and core bands keeps the three edges that
-    # descend from CollectionRun from overlapping each other.
-    bus = Y_CORE - 46
+    ses = t["AssistantSession"]
 
     edges = [
         Edge([ds.right(0.35), run.left(0.35)], "1 : N"),
@@ -277,27 +276,21 @@ def build_edges() -> list[Edge]:
         # CollectionRun is the only parent the core tables have: every stored row says
         # which attempt produced it. Fanned out along the bus so the three routes stay
         # individually traceable.
-        Edge([run.bottom(0.22), (run.x + run.w * 0.22, bus - 30),
-              (cpi.x + cpi.w * 0.55, bus - 30), cpi.top(0.55)], "1 : N",
+        Edge([run.bottom(0.22), (run.x + run.w * 0.22, BUS_Y),
+              (cpi.x + cpi.w * 0.55, BUS_Y), cpi.top(0.55)], "1 : N",
              label_offset=(-6, -6)),
         Edge([run.bottom(0.55), sofr.top(0.55)], "1 : N", label_offset=(20, -6)),
-        Edge([run.bottom(0.86), (run.x + run.w * 0.86, bus - 30),
-              (rej.x + rej.w * 0.45, bus - 30), rej.top(0.45)], "1 : N",
+        Edge([run.bottom(0.86), (run.x + run.w * 0.86, BUS_Y),
+              (rej.x + rej.w * 0.45, BUS_Y), rej.top(0.45)], "1 : N",
              cascade=True, label_offset=(6, -6)),
 
         # sec
         Edge([usr.right(0.30), ur.left(0.30)], "1 : N", cascade=True),
         Edge([rol.left(0.40), ur.right(0.40)], "1 : N"),
 
-        # ai
-        Edge([qry.left(0.35), ses.right(0.35)], "N : 1", one_at_start=False),
-        Edge([fb.left(0.40), qry.right(0.40)], "1 : 1", one_at_start=False),
-
-        # AppUser -> AssistantSession, and AppUser -> AssistantQuery.
-        Edge([usr.bottom(0.20), ses.top(0.20)], "1 : N", label_offset=(8, -6)),
-        Edge([usr.bottom(0.62), (usr.x + usr.w * 0.62, Y_AI - 30),
-              (qry.x + qry.w * 0.22, Y_AI - 30), qry.top(0.22)], "1 : N",
-             label_offset=(8, -6)),
+        # ai. The only edge left out of this band: a session belongs to a user, and the
+        # turns inside it are JSON rather than rows, so they have no key to draw.
+        Edge([usr.bottom(0.30), ses.top(0.30)], "1 : N", label_offset=(8, -6)),
     ]
     return edges
 
@@ -307,14 +300,23 @@ EDGES = build_edges()
 TITLE = "Data Intelligence Platform - Entity Relationship Diagram"
 SUBTITLE = ("Phase 3 deliverable (SOW 6).  CPI series CUUR0000SA0 (BLS) and the Secured "
             "Overnight Financing Rate (NY Fed), one table each.")
-FOOTER = ("Generated from docs/erd/generate_erd.py - regenerate after any schema change.  "
-          "Mirrors docs/database-schema.sql.  SofrDailyRate's four percentile and three "
-          "average columns are shown collapsed.  analytics.* is views over core.*, not shown.")
+# Wrapped by hand rather than by width: the breaks are where the sentences are. validate()
+# checks each line still fits, because an over-long footer is clipped without any error.
+FOOTER_LINES = [
+    "Generated from docs/erd/generate_erd.py - regenerate after any schema change.  "
+    "Mirrors docs/database-schema.sql.",
+    "Timestamps are Pakistan wall-clock readings (UTC+05:00), which is what the Pkt suffix "
+    "records; datetime2 carries no offset.",
+    "Shown abbreviated: DataSource, CollectionRun, and SofrDailyRate's four percentile and "
+    "three average columns.  Not shown: analytics.* (views over core.*),",
+    "ai.AssistantTurns (an OPENJSON view over TranscriptJson, not a table), and the "
+    "ai.AssistantTurnId sequence that numbers turns now that no table does.",
+]
 
 LEGEND = [
     ("PK", "Primary key"),
     ("FK", "Foreign key"),
-    ("UQ", "Part of the vintage key (clustered)"),
+    ("UQ", "Part of a unique key"),
     ("UQf", "Unique where IsCurrent = 1"),
 ]
 
@@ -439,8 +441,10 @@ def render_svg() -> str:
             parts.append(f'<text x="{t.x + 14:.1f}" y="{t.y + t.h - 3:.1f}" font-size="9.5" '
                          f'font-style="italic" fill="{MUTED}">{esc(t.note)}</text>')
 
-    parts.append(f'<text x="60" y="{CANVAS_H - 34:.1f}" font-size="11" fill="{MUTED}">'
-                 f'{esc(FOOTER)}</text>')
+    for i, line in enumerate(FOOTER_LINES):
+        y = CANVAS_H - 34 - (len(FOOTER_LINES) - 1 - i) * 15
+        parts.append(f'<text x="60" y="{y:.1f}" font-size="11" fill="{MUTED}">'
+                     f'{esc(line)}</text>')
     parts.append('</svg>')
     return "\n".join(parts)
 
@@ -581,7 +585,8 @@ def render_pdf(path: str) -> None:
 
     c.setFont("Helvetica", 11)
     c.setFillColor(HexColor(MUTED))
-    c.drawString(60, Y(CANVAS_H - 34), FOOTER)
+    for i, line in enumerate(FOOTER_LINES):
+        c.drawString(60, Y(CANVAS_H - 34 - (len(FOOTER_LINES) - 1 - i) * 15), line)
 
     c.showPage()
     c.save()
@@ -593,11 +598,22 @@ def validate() -> list[str]:
     """Catches the layout mistakes that are invisible in code but obvious on the page."""
     problems: list[str] = []
 
+    # The top of the footer block, which the cards must clear rather than merely fit above
+    # the page edge: the two collide long before anything runs off the canvas.
+    footer_top = CANVAS_H - 34 - (len(FOOTER_LINES) - 1) * 15 - 11
+
     for a in TABLES:
-        if a.y + a.h > CANVAS_H - 60:
-            problems.append(f"{a.key} overflows the canvas bottom")
+        if a.y + a.h > footer_top - 20:
+            problems.append(f"{a.key} runs into the footer block")
         if a.x + a.w > CANVAS_W - 40:
             problems.append(f"{a.key} overflows the canvas right edge")
+
+    # Text is drawn, never wrapped, so an over-long line is silently clipped at the edge.
+    for i, line in enumerate(FOOTER_LINES):
+        if 60 + len(line) * 5.6 > CANVAS_W - 40:
+            problems.append(f"footer line {i + 1} is too wide for the canvas")
+    if 60 + len(SUBTITLE) * 6.6 > CANVAS_W - 40:
+        problems.append("subtitle is too wide for the canvas")
 
     for i, a in enumerate(TABLES):
         for b in TABLES[i + 1:]:
@@ -608,6 +624,22 @@ def validate() -> list[str]:
     for e in EDGES:
         if len(e.points) < 2:
             problems.append(f"edge '{e.label}' has fewer than two points")
+
+    # The routing lane has to sit in the gap between the two bands. Above it, the horizontal
+    # run is drawn alongside the collect cards and the route appears to start at the wrong
+    # table; below it, the lane crosses the core cards it is meant to arrive at.
+    for t in TABLES:
+        if t.schema == "collect" and t.y + t.h > BUS_Y:
+            problems.append(f"{t.key} extends past the routing lane at y={BUS_Y:.0f}")
+    if BUS_Y > Y_CORE - 14:
+        problems.append("the routing lane runs into the core band")
+
+    # Every edge must start and end on a card, or it is pointing at empty space.
+    for e in EDGES:
+        for end in (e.points[0], e.points[-1]):
+            if not any(t.x - 1 <= end[0] <= t.x + t.w + 1
+                       and t.y - 1 <= end[1] <= t.y + t.h + 1 for t in TABLES):
+                problems.append(f"edge '{e.label}' has an endpoint on no card")
 
     return problems
 

@@ -221,10 +221,6 @@ Known gaps worth tracking:
 - The `analytics.*` views and least-privilege roles exist only in
   [docs/database-schema.sql](docs/database-schema.sql), not in the EF migration, so a
   migration-built database lacks them — including the views the assistant queries.
-- The ERD is drawn against a schema that has moved. `docs/erd/generate_erd.py` still models
-  `ai.AssistantQuery` and `ai.AssistantFeedback`, dropped when a conversation became one JSON
-  document in `ai.AssistantSession`, so the committed SVG and PDF show 12 tables where the script
-  creates 10. The generator needs editing before it is worth re-running.
 - The Scope of Work still describes a single scraped source; it needs refreshing against the
   signed-off API sources, and against the narrowing to one CPI series and the current year of SOFR.
 - Architecture document and risk log (Phase 3 deliverables) are not started.
